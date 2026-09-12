@@ -1,0 +1,109 @@
+name: Build Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      # AURORA_CONTINUOUS_BEETLE_PCE_FAST_V14
+      - name: Verify required emulator submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f src/third_party/quicknes/Makefile
+          test -f src/third_party/picodrive/Makefile
+          test -f src/third_party/beetle-pce-fast/Makefile
+          test -f src/third_party/beetle-pce-fast/COPYING
+          # AURORA_FCEUMM_FDS_CONTINUOUS_V1
+          test -f src/third_party/fceumm-fds/Makefile
+          test -f src/third_party/fceumm-fds/Copying
+          test -f src/third_party/fceumm-fds/src/fds.c
+          test -f tools/Makefile.beetle-pce-fast-ps2
+          test -f tools/Makefile.fceumm-fds-ps2
+          test -f tools/prepare_fceumm_fds_sources.py
+          test -f tools/namespace_fceumm_fds_archive.py
+
+          test "$(git config -f .gitmodules --get submodule.src/third_party/beetle-pce-fast.url)" = "https://github.com/itsveenee/beetle-pce-fast-libretro.git"
+          test "$(git config -f .gitmodules --get submodule.src/third_party/beetle-pce-fast.branch)" = "master"
+
+          test "$(git config -f .gitmodules --get submodule.src/third_party/fceumm-fds.url)" = "https://github.com/itsveenee/Fceumm-PS2.git"
+          test "$(git config -f .gitmodules --get submodule.src/third_party/fceumm-fds.branch)" = "master"
+
+          echo "Recursive submodules:"
+          git submodule status --recursive
+          echo "Beetle PCE Fast commit:"
+          git -C src/third_party/beetle-pce-fast rev-parse HEAD
+          echo "FCEUmm/FDS commit:"
+          git -C src/third_party/fceumm-fds rev-parse HEAD
+          test "$(git -C src/third_party/fceumm-fds rev-parse HEAD)" = "dc77e3ca4baad08f0023f61dba9846550735b74d"
+
+      # AURORA_CONTINUOUS_PICODRIVE_SOURCE_V4_2
+      - name: Package checked-out source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA:0:12}"
+          source_name="SNESticleAurora-${short_sha}-source.tar.gz"
+
+          {
+            printf 'SNESticleAurora commit: %s\n' "$GITHUB_SHA"
+            printf 'Recursive submodules:\n'
+            git submodule status --recursive
+          } > /tmp/SOURCE-MANIFEST.txt
+
+          tar \
+            --exclude='./.git' \
+            --exclude='*/.git' \
+            --exclude='./build' \
+            --exclude='./.aurora_picodrive_stage2_backup' \
+            -czf "/tmp/${source_name}" \
+            -C "$GITHUB_WORKSPACE" . \
+            -C /tmp SOURCE-MANIFEST.txt
+
+          echo "AURORA_SOURCE_NAME=${source_name}" >> "$GITHUB_ENV"
+          echo "AURORA_SOURCE_BUNDLE=/tmp/${source_name}" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: make -j8 AUTO_INSTALL=yes LTO_LINK_JOBS=2
+
+      - name: Strip release ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          STRIP="$(command -v mips64r5900el-ps2-elf-strip || true)"
+          if [ -z "$STRIP" ] && [ -n "${PS2DEV:-}" ] && [ -x "$PS2DEV/ee/bin/mips64r5900el-ps2-elf-strip" ]; then STRIP="$PS2DEV/ee/bin/mips64r5900el-ps2-elf-strip"; fi
+          [ -n "$STRIP" ] || STRIP="$(command -v mips64r5900el-ps2-elf-strip 2>/dev/null || true)"
+          [ -n "$STRIP" ] || STRIP="$(find "${PS2DEV:-$HOME/.local/ps2dev}" "$HOME/.local/ps2dev" "$HOME/ps2dev" /usr/local/ps2dev /opt/ps2dev -type f -name mips64r5900el-ps2-elf-strip -print -quit 2>/dev/null || true)"
+          test -n "$STRIP"
+          "$STRIP" -o build/SNESticle.stripped.elf build/SNESticle.elf
+          mv -f build/SNESticle.stripped.elf build/SNESticle.elf
+
+      - name: Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            (cd build && sha256sum SNESticle.elf)
+            (cd /tmp && sha256sum "$AURORA_SOURCE_NAME")
+          } > /tmp/SHA256SUMS.txt
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: snes-ticle-aurora-artifacts
+          path: |
+            build/SNESticle.elf
+            /tmp/*.tar.gz
+            /tmp/SOURCE-MANIFEST.txt
+            /tmp/SHA256SUMS.txt
