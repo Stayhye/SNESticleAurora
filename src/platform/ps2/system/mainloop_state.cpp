@@ -22,6 +22,8 @@ extern "C" {
 
 #include "mainloop_shared.h"
 #include "mainloop_state.h"
+
+/* AURORA_VOLUME_TFA_N163_V4_20260913 */
 #include "nes/quicknes/quicknes_bridge.h" /* AURORA_QN_TURBOFILE_SAVE_V2_20260828 */
 #include "sega/picodrive/picodrive_bridge.h" /* AURORA_CD_STATE_V1_SAFE_20260903 */
 #include "pce/beetle/pce_bridge.h" /* AURORA_CD_STATE_V1_SAFE_20260903 */
@@ -2228,6 +2230,18 @@ void _MainLoopLoadSRAM()
             }
         }
 
+        /* AURORA_VOLUME_TFA_N163_V4_20260913
+         * Mapper 019 internal battery RAM lives inside QuickNES's mapper
+         * state, not high_mem(). _MainLoopLoadSRAMFrom filled the bridge's
+         * aligned 128-byte mirror; commit it to the live N163 now. */
+        if (bLoaded && _pSystem == _pNes &&
+            QuicknesBridge_UsesN163InternalSave() &&
+            !QuicknesBridge_CommitSRAMData())
+        {
+            ConPrint("WARNING: N163 128-byte battery save could not be committed\n");
+            bLoaded = FALSE;
+        }
+
         _MainLoop_SRAMChecksum =
             _CalcChecksum((Uint32 *)pSRAM, nSramBytes / 4);
 
@@ -2375,6 +2389,13 @@ Bool _MainLoopCheckSRAM()
 
         return TRUE;
     }
+
+    /* AURORA_VOLUME_TFA_N163_V4_20260913
+     * Avoid turning QuickNES native serialization into a periodic gameplay
+     * workload. Menu entry already calls _MainLoopForceCheckSRAM(), which is
+     * the deterministic save boundary and snapshots these 128 bytes there. */
+    if (_pSystem == _pNes && QuicknesBridge_UsesN163InternalSave())
+        return TRUE;
 
     if (nSramBytes > 0)
     {
@@ -3443,7 +3464,8 @@ static Bool _MainLoopStateCheckAvailability(Char *pReason, Int32 nReasonBytes)
 
     if (_pSystem != _pSnes && _pSystem != _pNes &&
         _pSystem != _pSega && _pSystem != _pPce &&
-        _pSystem != _pFds && _pSystem != _pGb) /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
+        _pSystem != _pFds && _pSystem != _pGb &&
+        _pSystem != _pGba) /* AURORA_GBA_STATE_TFA_CONNECTION_V1_20260913: gpSP state frontend */
     {
         snprintf(pReason, nReasonBytes, "This system cannot save states.");
         return FALSE;
@@ -3603,6 +3625,8 @@ static Bool _MainLoopStateCheckAvailability(Char *pReason, Int32 nReasonBytes)
                 : "Ready: PC Engine HuCard state.");
     else if (_pSystem == _pGb)
         snprintf(pReason, nReasonBytes, "Ready: Gambatte Game Boy state.");
+    else if (_pSystem == _pGba)
+        snprintf(pReason, nReasonBytes, "Ready: gpSP Game Boy Advance state.");
     else if (_pSystem == _pFds)
         snprintf(pReason, nReasonBytes, "Ready: Famicom Disk System state."); /* AURORA_FCEUMM_FDS_V0_6_STATE */
     else
@@ -4021,6 +4045,18 @@ static Bool _MainLoopStateGetRomIdentity(
         _MainLoop_StateRomCRCValid = TRUE;
         *puCRC = crc; *pnBytes = bytes; *puFlags = 0x47420001U;
         return TRUE; /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
+    }
+    if (_pSystem == _pGba)
+    {
+        Uint32 bytes = _pGba ? _pGba->GetGameBytes() : 0;
+        Uint32 crc = _pGba ? _pGba->GetGameCRC() : 0;
+        if (!bytes) return FALSE;
+        _MainLoop_StateRomCRC = crc;
+        _MainLoop_StateRomCRCValid = TRUE;
+        *puCRC = crc;
+        *pnBytes = bytes;
+        *puFlags = 0x47424101U; /* GBA identity format 1 */
+        return TRUE; /* AURORA_GBA_STATE_TFA_CONNECTION_V1_20260913 */
     }
     if (_MainLoopStateIsSgb())
     {
@@ -4478,6 +4514,7 @@ static Char _MainLoopStateGetBankClass()
 {
     if (_pSystem == _pNes) return 'n';
     if (_pSystem == _pGb) return 'b'; /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
+    if (_pSystem == _pGba) return 'a'; /* AURORA_GBA_STATE_TFA_CONNECTION_V1_20260913: Advance */
     if (_pSystem == _pFds) return 'f';
     if (_pSystem == _pSega)
         return PicoDriveBridge_IsSegaCD() ? 'c' : 'g';

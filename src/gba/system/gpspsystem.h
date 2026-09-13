@@ -19,6 +19,9 @@ public:
     virtual ~GpSPSystem();
 
     Bool LoadGame(const Char *pPath, const Char *pSystemDirectory);
+    Bool LoadGameMemory(const void *pData, Uint32 nBytes, Uint32 uCRC,
+                        const Char *pContentName,
+                        const Char *pSystemDirectory); /* AURORA_ROM_LIFETIME_RAMONLY_ZIP_V2_20260913 */
     void UnloadGame();
     Bool IsGameLoaded() const;
 
@@ -62,6 +65,7 @@ public:
     Bool TurboFileAdvanceDirty() const;
     void ClearTurboFileAdvanceDirty();
     Uint32 GetGameCRC() const;
+    Uint32 GetGameBytes() const; /* AURORA_GBA_STATE_TFA_CONNECTION_V1_20260913: state identity */
 
 private:
     Impl *m_p;

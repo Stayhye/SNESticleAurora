@@ -1,5 +1,7 @@
 #include "gba/system/gpspsystem.h"
 
+/* AURORA_VOLUME_TFA_N163_V4_20260913 */
+
 #include <new>
 #include <stdio.h>
 #include <string.h>
@@ -10,6 +12,8 @@
 #include "../../platform/ps2/input/input.h" /* AURORA_GPSP_GBA_V13_BITMASK_TURBO_INPUT_20260911: raw PS2 chords */
 #include <libpad.h> /* PAD_L1/PAD_L2/PAD_R2 */
 #include "snio.h"
+
+extern Int32 VideoGetGbaVolume(void);
 
 extern "C" {
 #include "gs.h"
@@ -68,6 +72,7 @@ struct GpSPSystem::Impl
     /* AURORA_GPSP_GBA_V2_TFA_BLEND_20260911 */
     Uint8 *tfaData;
     Uint32 romCRC;
+    Uint32 romBytes; /* AURORA_GBA_STATE_TFA_CONNECTION_V1_20260913: state identity, no extra ROM pass */
 
     Impl()
         : initialized(FALSE), loaded(FALSE), pad(0),
@@ -75,7 +80,7 @@ struct GpSPSystem::Impl
           target(NULL), mix(NULL),
           directVideoData(NULL), directVideoW(0), directVideoH(0),
           directVideoPitch(0), directVideoValid(FALSE),
-          tfaData(NULL), romCRC(0)
+          tfaData(NULL), romCRC(0), romBytes(0)
     {
         systemDirectory[0] = 0;
     }
@@ -464,6 +469,17 @@ Bool GpSPSystem::DrawDirectGs(Uint32 auroraOutBaseTBP, Float32 intensity)
     return TRUE;
 }
 
+static Int16 AuroraGpSPScaleVolume(Int16 sample, Int32 gain)
+{
+    Int32 v;
+    if (gain <= 0) return 0;
+    if (gain == 200) return sample;
+    v = ((Int32)sample * gain) / 200;
+    if (v > 32767) v = 32767;
+    if (v < -32768) v = -32768;
+    return (Int16)v;
+}
+
 static size_t AuroraGpSPAudioBatch(const int16_t *data, size_t frames)
 {
     GpSPSystem::Impl *p = s_GpSPHost;
@@ -471,13 +487,17 @@ static size_t AuroraGpSPAudioBatch(const int16_t *data, size_t frames)
     if (!p || !p->mix || !data || !frames)
         return frames;
 
+    const Int32 gain = VideoGetGbaVolume();
+
     /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911
      * V1 split every interleaved gpSP batch into two stack arrays, then fed
      * those arrays back into AudMixBuffer. Aurora already provides a native
      * libretro interleaved path with arbitrary-rate -> 48 kHz resampling. */
     {
         AudMixBuffer *aud = (AudMixBuffer *)p->mix;
-        if (aud->OutputLibretroInterleaved(data, (Int32)frames))
+        /* Unity preserves gpSP's zero-copy/interleaved fast path. */
+        if (gain == 200 &&
+            aud->OutputLibretroInterleaved(data, (Int32)frames))
             return frames;
     }
 
@@ -494,8 +514,10 @@ static size_t AuroraGpSPAudioBatch(const int16_t *data, size_t frames)
             if (batch > 512U) batch = 512U;
             for (i = 0; i < batch; ++i)
             {
-                left[i] = data[(pos + i) * 2U + 0U];
-                right[i] = data[(pos + i) * 2U + 1U];
+                left[i] = AuroraGpSPScaleVolume(
+                    data[(pos + i) * 2U + 0U], gain);
+                right[i] = AuroraGpSPScaleVolume(
+                    data[(pos + i) * 2U + 1U], gain);
             }
             p->mix->OutputSamplesStereo(left, right, (Int32)batch);
             pos += batch;
@@ -508,8 +530,9 @@ static void AuroraGpSPAudioSample(int16_t left, int16_t right)
 {
     GpSPSystem::Impl *p = s_GpSPHost;
     if (!p || !p->mix) return;
-    Int16 l[1] = { left };
-    Int16 r[1] = { right };
+    const Int32 gain = VideoGetGbaVolume();
+    Int16 l[1] = { AuroraGpSPScaleVolume(left, gain) };
+    Int16 r[1] = { AuroraGpSPScaleVolume(right, gain) };
     p->mix->OutputSamplesStereo(l, r, 1);
 }
 
@@ -538,17 +561,20 @@ static Bool AuroraGpSPTurboFileAdvanceCRC(Uint32 crc)
             crc == AURORA_GBA_TFA_CRC_TSUKURU) ? TRUE : FALSE;
 }
 
-static Bool AuroraGpSPCRC32File(const Char *pPath, Uint32 *pCRC)
+static Bool AuroraGpSPCRC32File(const Char *pPath, Uint32 *pCRC,
+                                   Uint32 *pBytes)
 {
     static Uint32 table[256];
     static Bool tableReady = FALSE;
     Uint8 buf[32768];
     FILE *fp;
     Uint32 crc = 0xffffffffU;
+    Uint32 total = 0;
     size_t got, i;
 
     if (pCRC) *pCRC = 0;
-    if (!pPath || !*pPath || !pCRC) return FALSE;
+    if (pBytes) *pBytes = 0;
+    if (!pPath || !*pPath || !pCRC || !pBytes) return FALSE;
     if (!tableReady)
     {
         Uint32 n, k;
@@ -565,11 +591,20 @@ static Bool AuroraGpSPCRC32File(const Char *pPath, Uint32 *pCRC)
     fp = fopen(pPath, "rb");
     if (!fp) return FALSE;
     while ((got = fread(buf, 1, sizeof(buf), fp)) != 0)
+    {
+        if ((Uint32)got > 0xffffffffU - total)
+        {
+            fclose(fp);
+            return FALSE;
+        }
+        total += (Uint32)got;
         for (i = 0; i < got; ++i)
             crc = table[(crc ^ buf[i]) & 0xffU] ^ (crc >> 8);
+    }
     if (ferror(fp)) { fclose(fp); return FALSE; }
     fclose(fp);
     *pCRC = crc ^ 0xffffffffU;
+    *pBytes = total;
     return TRUE;
 }
 
@@ -596,8 +631,13 @@ Bool GpSPSystem::LoadGame(const Char *pPath, const Char *pSystemDirectory)
      * Normal games still pay zero TFA RAM cost. */
     {
         Uint32 crc = 0;
-        if (AuroraGpSPCRC32File(pPath, &crc))
+        Uint32 bytes = 0;
+        /* AURORA_GBA_STATE_TFA_CONNECTION_V1_20260913: piggyback size on the pre-existing CRC pass. */
+        if (AuroraGpSPCRC32File(pPath, &crc, &bytes))
+        {
             m_p->romCRC = crc;
+            m_p->romBytes = bytes;
+        }
         if (AuroraGpSPTurboFileAdvanceCRC(m_p->romCRC))
         {
             m_p->tfaData =
@@ -634,6 +674,75 @@ Bool GpSPSystem::LoadGame(const Char *pPath, const Char *pSystemDirectory)
     m_p->loaded = TRUE;
 
     /* AURORA_GPSP_GBA_V21_TFA_PREALLOC_20260912: CRC/storage were reserved before core init. */
+
+    memset(&av, 0, sizeof(av));
+    GPSP_retro_get_system_av_info(&av);
+    if (av.timing.sample_rate > 1000.0)
+        m_p->sampleRate = (Uint32)(av.timing.sample_rate + 0.5);
+    else
+        m_p->sampleRate = 32768U;
+
+    m_p->pad = 0;
+    m_uLine = 0;
+    m_uFrame = 0;
+    return TRUE;
+}
+
+
+Bool GpSPSystem::LoadGameMemory(const void *pData, Uint32 nBytes, Uint32 uCRC,
+                                const Char *pContentName,
+                                const Char *pSystemDirectory)
+{
+    struct retro_game_info info;
+    struct retro_system_av_info av;
+
+    if (!pData || !nBytes || !pContentName || !*pContentName ||
+        !pSystemDirectory || !*pSystemDirectory)
+        return FALSE;
+
+    UnloadGame();
+    m_p = new (std::nothrow) Impl;
+    if (!m_p) return FALSE;
+
+    snprintf(m_p->systemDirectory, sizeof(m_p->systemDirectory), "%s",
+             pSystemDirectory);
+    s_GpSPHost = m_p;
+
+    /* AURORA_ROM_LIFETIME_RAMONLY_ZIP_V2_20260913: the ZIP frontend already owns the pristine payload, so
+     * identity/TFA selection come from that same in-RAM byte stream. */
+    m_p->romCRC = uCRC;
+    m_p->romBytes = nBytes;
+    if (AuroraGpSPTurboFileAdvanceCRC(m_p->romCRC))
+    {
+        m_p->tfaData = new (std::nothrow) Uint8[AURORA_GBA_TFA_BYTES];
+        if (m_p->tfaData)
+            memset(m_p->tfaData, 0xff, AURORA_GBA_TFA_BYTES);
+        else
+            printf("[gpSP] Turbo File Advance disabled: 2 MiB pre-allocation failed\n");
+    }
+
+    GPSP_retro_set_environment(AuroraGpSPEnvironment);
+    GPSP_retro_set_video_refresh(AuroraGpSPVideo);
+    GPSP_retro_set_audio_sample(AuroraGpSPAudioSample);
+    GPSP_retro_set_audio_sample_batch(AuroraGpSPAudioBatch);
+    GPSP_retro_set_input_poll(AuroraGpSPInputPoll);
+    GPSP_retro_set_input_state(AuroraGpSPInputState);
+    GPSP_retro_init();
+    m_p->initialized = TRUE;
+    GPSP_retro_set_controller_port_device(0, RETRO_DEVICE_JOYPAD);
+    GPSP_aurora_tfa_set_storage(
+        m_p->tfaData, m_p->tfaData ? AURORA_GBA_TFA_BYTES : 0U);
+
+    memset(&info, 0, sizeof(info));
+    info.path = pContentName;
+    info.data = pData;
+    info.size = (size_t)nBytes;
+    if (!GPSP_retro_load_game(&info))
+    {
+        UnloadGame();
+        return FALSE;
+    }
+    m_p->loaded = TRUE;
 
     memset(&av, 0, sizeof(av));
     GPSP_retro_get_system_av_info(&av);
@@ -852,6 +961,11 @@ void GpSPSystem::ClearTurboFileAdvanceDirty()
 Uint32 GpSPSystem::GetGameCRC() const
 {
     return m_p ? m_p->romCRC : 0U;
+}
+
+Uint32 GpSPSystem::GetGameBytes() const
+{
+    return (m_p && m_p->loaded) ? m_p->romBytes : 0U; /* AURORA_GBA_STATE_TFA_CONNECTION_V1_20260913 */
 }
 
 const char *GpSPSystem::GetString(Emu::System::StringE eString)

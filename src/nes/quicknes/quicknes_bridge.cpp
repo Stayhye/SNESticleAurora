@@ -1,3 +1,4 @@
+/* AURORA_VOLUME_TFA_N163_V4_20260913 */
 /* SNESTICLE_QUICKNES_BRIDGE
  * SNESTICLE_QUICKNES_NATIVE_DIRECT_V1
  *
@@ -69,6 +70,24 @@ static bool s_SkipVideoNext = false; /* AURORA_SAFE_FRAMESKIP_GG_ZOOM_V2_2 */
 static bool s_ArkanoidVaus = false; /* AURORA_QN_EXT_HOST_V2_20260828 */
 static bool s_TurboFileEnabled = false; /* AURORA_CD_AUDIO_STREAM_V3_NES_HOST_FLAG_20260829 */
 static bool s_BattleBoxEnabled = false; /* AURORA_QN_BATTLEBOX_V5_20260829 */
+
+/* AURORA_VOLUME_TFA_N163_V4_20260913
+ * Namco 163 has 128 bytes of internal RAM which can itself be battery-backed,
+ * independently of optional external 8 KiB WRAM.  Legacy iNES cannot express
+ * that distinction.  Keep a tiny aligned persistence mirror and manipulate
+ * only the MAPR snapshot at explicit save/load boundaries; no QuickNES
+ * submodule modification and no per-frame state serialization. */
+enum
+{
+    QN_N163_INTERNAL_RAM_BYTES = 0x80,
+    QN_N163_MAPPER_STATE_BYTES = 192,
+    QN_N163_INTERNAL_RAM_OFFSET = 20
+};
+static bool s_N163InternalBatterySave = false;
+static Uint8 s_N163SaveMirror[QN_N163_INTERNAL_RAM_BYTES]
+    __attribute__((aligned(64)));
+static Uint8 s_N163StateScratch[QUICKNES_STATE_CAPACITY]
+    __attribute__((aligned(64)));
 
 /* AURORA_QN_LIGHTGUN_CURSOR_V7_20260829 */
 enum
@@ -213,6 +232,132 @@ static Uint32 qNesPayloadCrc32(const void *pData, size_t nBytes)
         return 0;
 
     return qCrc32(rom + offset, payload);
+}
+
+/* AURORA_VOLUME_TFA_N163_V4_20260913 */
+static Uint32 qReadLe32(const Uint8 *p)
+{
+    return (Uint32)p[0] |
+           ((Uint32)p[1] << 8) |
+           ((Uint32)p[2] << 16) |
+           ((Uint32)p[3] << 24);
+}
+
+static int qNesMapperCode(const void *pData, size_t nBytes, bool *pNes2)
+{
+    const Uint8 *rom = (const Uint8 *)pData;
+    bool nes2;
+    int mapper;
+
+    if (pNes2) *pNes2 = false;
+    if (!rom || nBytes < 16 ||
+        rom[0] != 'N' || rom[1] != 'E' ||
+        rom[2] != 'S' || rom[3] != 0x1A)
+        return -1;
+
+    nes2 = (rom[7] & 0x0CU) == 0x08U;
+    mapper = ((int)rom[6] >> 4) | ((int)rom[7] & 0xF0);
+    if (nes2)
+        mapper |= ((int)rom[8] & 0x0F) << 8;
+    if (pNes2) *pNes2 = nes2;
+    return mapper;
+}
+
+static bool qN163UsesInternalBatteryRam(const void *pData, size_t nBytes,
+                                        Uint32 payloadCrc)
+{
+    const Uint8 *rom = (const Uint8 *)pData;
+    bool nes2 = false;
+    int mapper = qNesMapperCode(pData, nBytes, &nes2);
+
+    if (!rom || mapper != 19 || !(rom[6] & 0x02U))
+        return false;
+
+    if (nes2)
+    {
+        /* NES 2.0 byte 10 high nibble describes external PRG-NVRAM only.
+         * The N163's private 128-byte battery RAM is intentionally not
+         * represented there.  Zero external NVRAM + battery means internal. */
+        const unsigned prgNvShift = ((unsigned)rom[10] >> 4) & 0x0FU;
+        return prgNvShift == 0U;
+    }
+
+    /* Legacy iNES is ambiguous.  Isolate the known clean Hydlide III image
+     * by PRG+CHR CRC32 (NesCartDB convention) instead of guessing every M19. */
+    return payloadCrc == 0x47C2020BU;
+}
+
+static Uint8 *qN163FindMapperPayload(Uint8 *state, int bytes)
+{
+    int pos;
+
+    if (!state || bytes < 16 ||
+        state[0] != 'N' || state[1] != 'E' ||
+        state[2] != 'S' || state[3] != 'S')
+        return NULL;
+
+    /* Nes_File_Writer stores a top-level NESS group followed by 8-byte
+     * block headers. Tags are byte-readable ASCII; block size is little-endian. */
+    pos = 8;
+    while (pos + 8 <= bytes)
+    {
+        Uint32 size = qReadLe32(state + pos + 4);
+
+        if (state[pos + 0] == 'M' && state[pos + 1] == 'A' &&
+            state[pos + 2] == 'P' && state[pos + 3] == 'R')
+        {
+            if (size != QN_N163_MAPPER_STATE_BYTES ||
+                size > (Uint32)(bytes - pos - 8))
+                return NULL;
+            return state + pos + 8;
+        }
+
+        if (size == 0xFFFFFFFFU || size > (Uint32)(bytes - pos - 8))
+            return NULL;
+        pos += 8 + (int)size;
+    }
+    return NULL;
+}
+
+static int qN163SerializeCurrentState(void)
+{
+    Mem_Writer writer(s_N163StateScratch, QUICKNES_STATE_CAPACITY);
+    const char *err;
+    long written;
+
+    if (!s_GameLoaded || !s_pEmu)
+        return 0;
+    err = s_pEmu->save_state(writer);
+    written = writer.size();
+    if (err || written <= 0 || written > QUICKNES_STATE_CAPACITY)
+    {
+        printf("[QuickNES/N163] snapshot failed: %s (%ld)\n",
+               err ? err : "invalid size", written);
+        return 0;
+    }
+    return (int)written;
+}
+
+static bool qN163SnapshotInternalRam(void)
+{
+    int bytes;
+    Uint8 *mapper;
+
+    if (!s_N163InternalBatterySave)
+        return false;
+    bytes = qN163SerializeCurrentState();
+    if (bytes <= 0)
+        return false;
+    mapper = qN163FindMapperPayload(s_N163StateScratch, bytes);
+    if (!mapper)
+    {
+        printf("[QuickNES/N163] MAPR block/state layout not found\n");
+        return false;
+    }
+    memcpy(s_N163SaveMirror,
+           mapper + QN_N163_INTERNAL_RAM_OFFSET,
+           QN_N163_INTERNAL_RAM_BYTES);
+    return true;
 }
 
 /* AURORA_CD_AUDIO_STREAM_V3_NES_DETECT_20260829 */
@@ -849,6 +994,8 @@ bool QuicknesBridge_LoadGame(const void *pData, size_t nBytes, const char *pName
     {
         const int nes2Ext = qNes2DefaultExpansionDevice(pData, nBytes);
         const Uint32 payloadCrc = qNesPayloadCrc32(pData, nBytes);
+        s_N163InternalBatterySave =
+            qN163UsesInternalBatteryRam(pData, nBytes, payloadCrc);
 
         /* AURORA_PCE_SCALING_LIGHTGUN_TOGGLE_V2_20260830
          * Light Gun detection is deliberately CRC32-only. */
@@ -912,6 +1059,10 @@ bool QuicknesBridge_LoadGame(const void *pData, size_t nBytes, const char *pName
             printf("[QuickNES/EXT] ASCII Turbo File enabled%s%08X\n",
                    payloadCrc ? "; CRC=" : "; NES2 device=",
                    (unsigned)(payloadCrc ? payloadCrc : (Uint32)nes2Ext));
+
+        if (s_N163InternalBatterySave)
+            printf("[QuickNES/N163] internal battery RAM selected: 128 bytes; CRC=%08X\n",
+                   (unsigned)payloadCrc);
     }
 
     s_GameLoaded = true;
@@ -930,6 +1081,7 @@ void QuicknesBridge_UnloadGame(void)
     s_ArkanoidVaus = false;
     s_TurboFileEnabled = false; /* AURORA_CD_AUDIO_STREAM_V3_NES_UNLOAD_20260829 */
     s_BattleBoxEnabled = false; /* AURORA_QN_BATTLEBOX_V5_20260829 */
+    s_N163InternalBatterySave = false; /* AURORA_VOLUME_TFA_N163_V4_20260913 */
     s_LightGunDetectedMode = QN_GUN_NONE; /* preference survives ROM unload */
     s_LightGunMode = QN_GUN_NONE; /* AURORA_QN_LIGHTGUN_CURSOR_V7_20260829 */
     quicknes_snesticle_ext_set_turbofile(0);
@@ -1193,16 +1345,59 @@ bool QuicknesBridge_LoadState(const void *pData, int nBytes)
 
 int QuicknesBridge_GetSRAMBytes(void)
 {
-    if (!s_GameLoaded || !s_pEmu->cart() || !s_pEmu->has_battery_ram())
+    if (!s_GameLoaded || !s_pEmu || !s_pEmu->cart())
+        return 0;
+    if (s_N163InternalBatterySave)
+        return QN_N163_INTERNAL_RAM_BYTES;
+    if (!s_pEmu->has_battery_ram())
         return 0;
     return (int)s_pEmu->battery_ram_size();
 }
 
 uint8_t *QuicknesBridge_GetSRAMData(void)
 {
+    if (s_N163InternalBatterySave)
+        return qN163SnapshotInternalRam() ? s_N163SaveMirror : NULL;
     if (QuicknesBridge_GetSRAMBytes() <= 0)
         return NULL;
     return s_pEmu->high_mem();
+}
+
+bool QuicknesBridge_UsesN163InternalSave(void)
+{
+    return s_GameLoaded && s_N163InternalBatterySave;
+}
+
+bool QuicknesBridge_CommitSRAMData(void)
+{
+    int bytes;
+    Uint8 *mapper;
+
+    if (!s_N163InternalBatterySave)
+        return true;
+    bytes = qN163SerializeCurrentState();
+    if (bytes <= 0)
+        return false;
+    mapper = qN163FindMapperPayload(s_N163StateScratch, bytes);
+    if (!mapper)
+    {
+        printf("[QuickNES/N163] cannot apply battery RAM: MAPR block missing\n");
+        return false;
+    }
+
+    memcpy(mapper + QN_N163_INTERNAL_RAM_OFFSET,
+           s_N163SaveMirror,
+           QN_N163_INTERNAL_RAM_BYTES);
+
+    /* Reuse the proven native state restore path. The snapshot was made from
+     * this same freshly-loaded machine, so only the 128-byte N163 RAM differs. */
+    if (!QuicknesBridge_LoadState(s_N163StateScratch, bytes))
+    {
+        printf("[QuickNES/N163] cannot apply 128-byte battery RAM\n");
+        return false;
+    }
+    printf("[QuickNES/N163] 128-byte battery RAM committed\n");
+    return true;
 }
 
 bool QuicknesBridge_IsArkanoidVaus(void)

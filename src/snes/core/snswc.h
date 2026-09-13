@@ -265,6 +265,13 @@ private:
                   Uint32 *pOffsets, Uint32 *pSectorOffsets,
                   Uint8 *pTrackSpt, Uint8 *pFirstR,
                   Uint32 *pDiskBytes, Bool *pProtected);
+    /* AURORA_D88_DIRECT_FILE_V3_20260913
+     * Low-memory D88 parser: keeps only CHRN/offset metadata in EE RAM. */
+    Bool D88ProbeFile(FILE *pFile, Uint32 nBytes,
+                      Int32 *pTracks, Int32 *pHeads, Int32 *pMaxSpt,
+                      Uint32 *pOffsets, Uint32 *pSectorOffsets,
+                      Uint8 *pTrackSpt, Uint8 *pFirstR,
+                      Uint32 *pDiskBytes, Bool *pProtected);
     Bool D88FindSector(Uint8 c, Uint8 h, Uint8 r, Uint8 n,
                        long *pDataOffset);
     Uint8 D88TrackSectorCount(Uint8 c, Uint8 h);

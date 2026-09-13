@@ -1,4 +1,5 @@
 /* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910 */
+/* AURORA_VOLUME_TFA_N163_V4_20260913 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +40,15 @@ extern SnesSystem *_pSnes;
 extern Emu::System *_pSystem;
 extern AudMixBuffer *_AudMix;
 
+/* AURORA_VOLUME_TFA_N163_V4_20260913
+ * These gains are intentionally outside the shared SNES/QuickNES,
+ * SEGA and PCE mixer controls. Internal 200 is unity and UI 100. */
+static Int32 g_GbcVolume = 200;
+static Int32 g_GbaVolume = 200;
+
+Int32 VideoGetGbcVolume(void) { return g_GbcVolume; }
+Int32 VideoGetGbaVolume(void) { return g_GbaVolume; }
+
 void MainResetEmulator(void);
 Bool MainLoopReinitVideoMode(Int32 mode);
 /* AURORA_LEGACYCORE_V1 */
@@ -49,7 +59,7 @@ Bool MainLoopReinitVideoMode(Int32 mode);
 /* ------------------------------------------------------------------ */
 
 #define VIDEOCFG_MAGIC   0x53564944u   /* 'SVID' */
-#define VIDEOCFG_VERSION 49 /* AURORA_V22_VIDEOCFG49_GGZOOM_OFF_20260912: same layout; GG Zoom hidden and forced Off */
+#define VIDEOCFG_VERSION 50 /* AURORA_VOLUME_TFA_N163_V4_20260913: append GBC/GBA volume */
 /* AURORA_CFG_MODE7_FULL_ONCE_V1_6_20260905: 44 -> 45; same-layout migration, Mode7 Full once. */
 /* AURORA_CD_MUSIC_REDBOOK_V3_20260830: v43 appends shared SCD/PCE CD Red Book toggle; old configs default On. */
 /* AURORA_PCE_SCALING_LIGHTGUN_TOGGLE_V2_20260830: v42 appends Light Gun; old configs default On. */
@@ -130,8 +140,12 @@ typedef struct
 	Int32  sgbinvert;     /* AURORA_CONFIG_STRICT_SGB_INVERT_CLOCK_V1_20260905: 0=Off, 1=On; effect SGB-only */
 	Int32  sgbbios;       /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: 0=SGB1, 1=SGB2 */
 	Int32  gameboymode;   /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: 0=GBC, 1=SGB1, 2=SGB2 */
+	/* AURORA_VOLUME_TFA_N163_V4_20260913: v50 append-only fields. */
+	Int32  gbcvol;        /* internal 0..400; UI /2; default 200 == unity */
+	Int32  gbavol;        /* internal 0..400; UI /2; default 200 == unity */
 } VideoCfgT;
-#define VIDEOCFG_V46_BYTES (sizeof(VideoCfgT) - sizeof(Int32))
+#define VIDEOCFG_V49_BYTES (sizeof(VideoCfgT) - 2 * sizeof(Int32))
+#define VIDEOCFG_V46_BYTES (VIDEOCFG_V49_BYTES - sizeof(Int32))
 #define VIDEOCFG_V45_BYTES (VIDEOCFG_V46_BYTES - sizeof(Int32))
 #define VIDEOCFG_V43_BYTES (VIDEOCFG_V45_BYTES - sizeof(Int32))
 #define VIDEOCFG_V42_BYTES (VIDEOCFG_V43_BYTES - sizeof(Int32))
@@ -480,6 +494,8 @@ void VideoSettingsSave(void)
 	cfg.sgbinvert = MainLoopSgbInvertGetEnabled() ? 1 : 0; /* AURORA_CONFIG_STRICT_SGB_INVERT_CLOCK_V1_20260905 */
 	cfg.sgbbios = 0; /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910: compatibility field; GBC only */
 	cfg.gameboymode = 0; /* GBC always */
+	cfg.gbcvol = g_GbcVolume;
+	cfg.gbavol = g_GbaVolume;
 	_VideoCfgPath(path);
 	BgmIOBegin();
 	MemCardWriteFile(path, (Uint8 *)&cfg, sizeof(cfg));
@@ -503,8 +519,13 @@ void VideoSettingsLoad(void)
 	g_GameBoyMode = 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: v45-and-older default GBC */
 	PicoDriveBridge_SetRenderingMode(0); /* AURORA_CFG_LOADER_REBUILD_V1_13_20260905: MD FAST default */
 	PicoDriveBridge_SetGgZoom(false);
+	/* AURORA_VOLUME_TFA_N163_V4_20260913: defaults for v49-and-older/missing config. */
+	g_GbcVolume = 200;
+	g_GbaVolume = 200;
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.gameboymode = 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: old configs default GBC */
+	cfg.gbcvol = 200;
+	cfg.gbavol = 200;
 	cfg.lightgun = 1; /* v42 default and all pre-v42 migrations: On */
 	cfg.cdmusic = 1;  /* AURORA_CD_MUSIC_REDBOOK_V3_20260830: pre-v43 default On */
 	QuicknesBridge_SetLightGunEnabled(true);
@@ -530,12 +551,19 @@ void VideoSettingsLoad(void)
 		{
 			loaded = MemCardReadFile(path, (Uint8 *)&cfg, sizeof(cfg));
 		}
+		else if (header.version == 49)
+		{
+			/* AURORA_VOLUME_TFA_N163_V4_20260913:
+			 * v49 is the exact prefix before the two independent gains. */
+			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V49_BYTES);
+			if (loaded) cfg.version = VIDEOCFG_VERSION;
+		}
 		else if (header.version == 48)
 		{
 			/* AURORA_V22_VIDEOCFG49_GGZOOM_OFF_20260912
 			 * v48 is byte-identical; preserve all preferences except the
 			 * now-hidden GG Zoom setting, which migrates to Off. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, sizeof(cfg));
+			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V49_BYTES);
 			if (loaded)
 			{
 				cfg.ggzoom = 0;
@@ -545,7 +573,7 @@ void VideoSettingsLoad(void)
 		else if (header.version == 47)
 		{
 			/* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: old 0=GB,1=SGB -> 0=GBC,1=SGB1,2=SGB2. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, sizeof(cfg));
+			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V49_BYTES);
 			if (loaded)
 			{
 				cfg.gameboymode = cfg.gameboymode ? (cfg.sgbbios ? 2 : 1) : 0;
@@ -861,7 +889,7 @@ void VideoSettingsLoad(void)
 	 * Older migrations retain the previous one-time conservative default. */
 	/* AURORA_CFG_LOADER_REBUILD_V1_13_20260905
  * One-time migration exceptions only. */
-if (loaded && header.version != VIDEOCFG_VERSION)
+if (loaded && header.version != VIDEOCFG_VERSION && header.version != 49)
 {
 	cfg.safeframeskip = 1;
 	cfg.sneshackflags &= ~SNPPU_HACK_MODE7_HALF;
@@ -920,6 +948,9 @@ if (loaded && header.version != VIDEOCFG_VERSION)
 		if (cfg.gamevol >= 0 && cfg.gamevol <= 400) AudMixGameSetVolume(cfg.gamevol);
 		if (cfg.segavol >= 0 && cfg.segavol <= 400) AudMixSegaSetVolume(cfg.segavol);
 		if (cfg.pcevol >= 0 && cfg.pcevol <= 400) AudMixPceSetVolume(cfg.pcevol);
+		/* AURORA_VOLUME_TFA_N163_V4_20260913: independent handheld gains. */
+		if (cfg.gbcvol >= 0 && cfg.gbcvol <= 400) g_GbcVolume = cfg.gbcvol;
+		if (cfg.gbavol >= 0 && cfg.gbavol <= 400) g_GbaVolume = cfg.gbavol;
 		if (cfg.bgmtrack >= 1 && cfg.bgmtrack <= 64) BgmSetTrackIndex(cfg.bgmtrack);
 		if (cfg.mdrendering >= 0 && cfg.mdrendering <= 2)
 			PicoDriveBridge_SetRenderingMode(cfg.mdrendering);
@@ -1314,6 +1345,10 @@ void CVideoScreen::Draw()
 		          PicoDriveBridge_GetSmsFm() ? "Enable" : "Disable"); vy += 12;
 		_VideoRow(vy, 58, m_iSelect, "CD music",
 		          g_CdMusicEnabled ? "ON" : "OFF"); vy += 12; /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
+		snprintf(buf, sizeof(buf), "%d", g_GbcVolume / 2);
+		_VideoRow(vy, 59, m_iSelect, "GBC volume", buf); vy += 12;
+		snprintf(buf, sizeof(buf), "%d", g_GbaVolume / 2);
+		_VideoRow(vy, 60, m_iSelect, "GBA volume", buf); vy += 12;
 	}
 	else if (iPage == 5)
 	{
@@ -1440,7 +1475,7 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 		else if (m_iSelect <= 30) { lo = 20; hi = 27; } /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910 */
 		else if (m_iSelect < 40)  { lo = 31; hi = 37; }
 		else if (m_iSelect < 50)  { lo = 40; hi = 45; }
-		else                      { lo = 50; hi = 58; } /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
+		else                      { lo = 50; hi = 60; } /* AURORA_VOLUME_TFA_N163_V4_20260913 */
 		if (trigger & PAD_UP)
 		{
 			m_iSelect--;
@@ -1556,6 +1591,16 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 			break;
 		case 58: /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
 			_VideoSetCdMusicEnabled(!g_CdMusicEnabled);
+			break;
+		case 59: /* GBC volume: UI 0..200, internal 0..400. */
+			g_GbcVolume += dir * 2;
+			if (g_GbcVolume < 0) g_GbcVolume = 0;
+			if (g_GbcVolume > 400) g_GbcVolume = 400;
+			break;
+		case 60: /* GBA volume: UI 0..200, internal 0..400. */
+			g_GbaVolume += dir * 2;
+			if (g_GbaVolume < 0) g_GbaVolume = 0;
+			if (g_GbaVolume > 400) g_GbaVolume = 400;
 			break;
 
 		case 10: /* Mass / USB on/off -- lista mass0:/mass1: (USB).  O USB core

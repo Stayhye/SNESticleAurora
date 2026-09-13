@@ -2,6 +2,8 @@
 #ifndef _QUICKNES_BRIDGE_H
 #define _QUICKNES_BRIDGE_H
 
+/* AURORA_VOLUME_TFA_N163_V4_20260913 */
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -43,6 +45,9 @@ int QuicknesBridge_SaveState(void *pData, int nBytes);
 bool QuicknesBridge_LoadState(const void *pData, int nBytes);
 int QuicknesBridge_GetSRAMBytes(void);
 uint8_t *QuicknesBridge_GetSRAMData(void);
+/* AURORA_VOLUME_TFA_N163_V4_20260913: N163 internal 128-byte battery RAM bridge. */
+bool QuicknesBridge_UsesN163InternalSave(void);
+bool QuicknesBridge_CommitSRAMData(void);
 /* AURORA_QN_EXT_HOST_V2_20260828 */
 bool QuicknesBridge_IsArkanoidVaus(void);
 bool QuicknesBridge_TurboFileEnabled(void); /* AURORA_CD_AUDIO_STREAM_V3_NES_HEADER_20260829 */

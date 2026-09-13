@@ -2,6 +2,8 @@
 #ifndef _UIVIDEO_H
 #define _UIVIDEO_H
 
+/* AURORA_VOLUME_TFA_N163_V4_20260913 */
+
 #include "uiScreen.h"
 
 class CVideoScreen : public CScreen
@@ -23,5 +25,8 @@ void VideoSettingsLoad(void);
 void VideoSettingsSave(void);
 Int32 VideoGetSgbBiosModel(void); /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
 Int32 VideoGetGameBoyMode(void); /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: 0=GBC, 1=SGB1, 2=SGB2 */
+/* AURORA_VOLUME_TFA_N163_V4_20260913: independent handheld gains; 200 == unity/UI 100. */
+Int32 VideoGetGbcVolume(void);
+Int32 VideoGetGbaVolume(void);
 
 #endif

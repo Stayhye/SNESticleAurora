@@ -12,7 +12,7 @@ import re
 import shutil
 from pathlib import Path
 
-VERSION = "AURORA_PCE_SSF2_FINAL_R4_CLEANUP_20260913_GPSP_STAGE"
+VERSION = "AURORA_FDS_D88_TFA_SWC_V3_20260913_GPSP_STAGE"
 
 TFA_H = r'''#ifndef AURORA_TFA_H
 #define AURORA_TFA_H
@@ -103,7 +103,7 @@ static u32 tfa_body_final_counter(u8 command)
     case 0x10: return 2U;  /* 5A cmd checksum */
     case 0x20: return 3U;  /* 5A cmd param checksum */
     case 0x22:
-    case 0x23: return 4U;  /* 5A cmd bankHi bankLo checksum */
+    case 0x23: return 4U;  /* AURORA_TFA_PROTOCOL_FIX_V3_20260913: bankHi bankLo checksum */
     case 0x24: return 2U;
     case 0x30: return 68U; /* 5A cmd offHi offLo + 64 data + checksum */
     case 0x34: return 5U;  /* TFA: offHi offLo fill + checksum */
@@ -259,9 +259,10 @@ u8 aurora_tfa_transfer(u8 out)
       if (out == 0xf1U) {
         in = 0xe7U;
         tfa_sync1 = true;
-      } else if (out == 0x7eU) {
+      } else if (out == 0x7eU && tfa_sync1) {
+        /* AURORA_TFA_PROTOCOL_FIX_V3_20260913: ignore stray 0x7E until the required 0xF1 arrived. */
         in = 0xa5U;
-        if (tfa_sync1) tfa_sync2 = true;
+        tfa_sync2 = true;
       }
       if (tfa_sync1 && tfa_sync2) {
         tfa_state = TFA_DATA_RESPONSE;
@@ -1745,6 +1746,139 @@ ifeq ($(MMAP_JIT_CACHE), 1)
         raise SystemExit("gpSP R3: exact PS2 MMAP override was not installed")
     _r3_mk.write_text(_r3_ms, encoding="utf-8", newline="\n")
     # AURORA_PCE_SSF2_FINAL_R3_20260913_MMAP_HARDEN_END
+    # AURORA_GPSP_RAMONLY_ZIP_V2_20260913
+    _ram_gm = stage / "gba_memory.c"
+    _ram_s = _ram_gm.read_text(encoding="utf-8")
+    _ram_marker = "AURORA_GPSP_RAMONLY_ZIP_V2_20260913"
+    if _ram_marker not in _ram_s:
+        _ram_anchor = "static s32 load_gamepak_raw(const char *name)\n"
+        if _ram_s.count(_ram_anchor) != 1:
+            raise SystemExit("gpSP RAM-only ZIP: load_gamepak_raw anchor missing/ambiguous")
+        _ram_helper = r'''/* AURORA_GPSP_RAMONLY_ZIP_V2_20260913
+ * Frontend-owned memory source for compressed cartridges.
+ * This intentionally has NO file/path fallback: every ROM page must fit the
+ * core's existing buffers while retro_load_game() consumes info->data. */
+static s32 load_gamepak_raw_memory(const void *data, size_t data_size)
+{
+  const u8 *src = (const u8 *)data;
+  u32 source_size, raw_size, buf_blocks, rom_blocks;
+  unsigned i, j;
+
+  if (!src || data_size == 0 || data_size > (size_t)0x02000000U)
+    return -1;
+
+  source_size = (u32)data_size;
+  raw_size = (source_size + 0x7FFFU) & ~0x7FFFU;
+  if (raw_size < source_size || raw_size > 0x02000000U)
+    return -1;
+
+  if (gamepak_file_large)
+  {
+    filestream_close(gamepak_file_large);
+    gamepak_file_large = NULL;
+  }
+  if (gamepak_mini_rom)
+  {
+    free(gamepak_mini_rom);
+    gamepak_mini_rom = NULL;
+  }
+  gamepak_mini_materialized = false;
+
+  gamepak_file_blocks = raw_size >> 15;
+  gamepak_mirror_1m = (raw_size == 0x00100000U);
+  gamepak_size = gamepak_mirror_1m ? 0x00400000U : raw_size;
+
+  /* Preserve gpSP's special 1 MiB cartridge mirroring without storage I/O. */
+  if (gamepak_mirror_1m)
+  {
+    u32 map_blocks = gamepak_size >> 15;
+    u32 phyn;
+    u32 first_copy;
+
+    gamepak_mini_rom = (u8 *)malloc(gamepak_size);
+    if (!gamepak_mini_rom)
+      return -1;
+
+    memset(gamepak_mini_rom, 0xFF, gamepak_size);
+    memcpy(gamepak_mini_rom, src, source_size);
+    memcpy(gamepak_mini_rom + 0x100000U, gamepak_mini_rom, 0x100000U);
+    memcpy(gamepak_mini_rom + 0x200000U, gamepak_mini_rom, 0x100000U);
+    memcpy(gamepak_mini_rom + 0x300000U, gamepak_mini_rom, 0x100000U);
+
+    if (!gamepak_buffer_count || !gamepak_buffers[0])
+    {
+      free(gamepak_mini_rom);
+      gamepak_mini_rom = NULL;
+      return -1;
+    }
+    first_copy = gamepak_buffer_blocksize < 0x100000U
+                   ? gamepak_buffer_blocksize : 0x100000U;
+    memcpy(gamepak_buffers[0], gamepak_mini_rom, first_copy);
+
+    map_null(read, 0x8000000, 0xD000000);
+    for (phyn = 0; phyn < map_blocks; phyn++)
+    {
+      u8 *blkptr = &gamepak_mini_rom[32U * 1024U * phyn];
+      map_rom_entry(read, phyn, blkptr, map_blocks);
+    }
+    update_gpio_romregs();
+    gamepak_mirror_1m = false;
+    gamepak_mini_materialized = true;
+    return 0;
+  }
+
+  buf_blocks = (raw_size + gamepak_buffer_blocksize - 1U) /
+               gamepak_buffer_blocksize;
+
+  /* There is deliberately no memory->file spill and no path-backed pager.
+   * If the complete ROM cannot fit now, the frontend reports a clean ZIP
+   * too-large-for-RAM error. */
+  if (!buf_blocks || buf_blocks > gamepak_buffer_count)
+    return -1;
+
+  rom_blocks = gamepak_size >> 15;
+  map_null(read, 0x8000000, 0xD000000);
+
+  for (i = 0; i < buf_blocks; i++)
+  {
+    u32 off = (u32)i * gamepak_buffer_blocksize;
+    u32 take = 0;
+    if (off < source_size)
+    {
+      take = source_size - off;
+      if (take > gamepak_buffer_blocksize)
+        take = gamepak_buffer_blocksize;
+      memcpy(gamepak_buffers[i], src + off, take);
+    }
+    if (take < gamepak_buffer_blocksize)
+      memset(gamepak_buffers[i] + take, 0xFF,
+             gamepak_buffer_blocksize - take);
+
+    for (j = 0; j < 32 && i * 32 + j < gamepak_file_blocks; j++)
+    {
+      u32 phyn = i * 32 + j;
+      u8 *blkptr = &gamepak_buffers[i][32U * 1024U * j];
+      u32 entry = evict_gamepak_page();
+      gamepak_blk_queue[entry].phy_rom = phyn;
+      map_rom_entry(read, phyn, blkptr, rom_blocks);
+    }
+  }
+
+  update_gpio_romregs();
+  return 0;
+}
+
+'''
+        _ram_s = _ram_s.replace(_ram_anchor, _ram_helper + _ram_anchor, 1)
+        _ram_old = "if (load_gamepak_raw(name))"
+        if _ram_s.count(_ram_old) != 1:
+            raise SystemExit("gpSP RAM-only ZIP: load_gamepak call anchor missing/ambiguous")
+        _ram_new = "if ((info && info->data && info->size) ?\n" \
+                   "      load_gamepak_raw_memory(info->data, info->size) :\n" \
+                   "      load_gamepak_raw(name))"
+        _ram_s = _ram_s.replace(_ram_old, _ram_new, 1)
+        _ram_gm.write_text(_ram_s, encoding="utf-8", newline="\n")
+
     stamp.write_text(digest + "\n", encoding="utf-8")
     print(f"[ gpSP stage ] V21: SMALL JIT memory + 4 MiB paged ROM + TFA pre-reserve (V15 SIO) + pager I/O + full PS2 JIT cache sync: {stage}")
 
