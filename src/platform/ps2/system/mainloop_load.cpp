@@ -471,6 +471,9 @@ static void _MainLoopRemoveFdsZipTemp(void)
     }
 }
 
+/* AURORA_PCE_SSF2_FINAL_R4_CLEANUP_20260913_NORMAL_ALLOCATOR
+ * R4: no speculative cross-core SSF2 reservation.  Allocate only when the
+ * selected cartridge actually requests its backing. */
 static void _MainLoopFreeRomBuffer(void)
 {
     if (_RomData)
@@ -489,11 +492,7 @@ static Bool _MainLoopAllocRomBuffer(Uint32 capacity)
     if (!p)
     {
         /* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910
-         * Some PS2 heaps become fragmented by optional drivers/storage. ROM
-         * data is CPU-read backing, not a GS DMA buffer; PicoDrive requires
-         * only normal word-safe storage and separately receives the exact
-         * capacity. Retry with a weaker-but-safe 16-byte alignment before
-         * reporting OOM. The normal 64-byte path remains unchanged. */
+         * ROM backing is CPU memory, not a GS DMA surface. */
         p = (Uint8 *)memalign(16, (size_t)capacity);
     }
     if (!p)

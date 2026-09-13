@@ -77,7 +77,11 @@ static int _gsk_240p_window_w = 0;
 /* AURORA_MD_UI256_320FB_V1_20260823
  * Keep MD's physical 320-wide framebuffer while its cartridge is alive,
  * but draw/scan Aurora's UI as exactly 256 uniform source pixels. */
-static int _gsk_ui256_on_320fb = 0;
+/* AURORA_PCE_SSF2_FINAL_R2_20260913_PCE_UI256_WIDE
+ * One logical 256-pixel frontend canvas inside a live 240p wide
+ * framebuffer. MD uses 320 storage; PCE uses fixed 512 storage.
+ * No GS reinit, no VRAM epoch change, no DBX pan. */
+static int _gsk_ui256_on_widefb = 0;
 static int _gsk_game_y_bias = 0;
 
 /* gsKit's computed DISPLAY params, captured after gsKit_init_screen so
@@ -355,13 +359,16 @@ static void _GskApplyRenderTransform(void)
               (float)GSK_LOGICAL_W * sx) * 0.5f;
     }
 
-    /* AURORA_MD_UI256_320FB_V1_20260823
-     * No 256->320 fractional UI scaling. Draw logical UI columns 1:1. */
-    if (_gsk_ui256_on_320fb &&
+    /* AURORA_PCE_SSF2_FINAL_R2_20260913_PCE_UI256_WIDE
+     * The first 256 framebuffer columns ARE the Aurora UI canvas.  This is
+     * the same integer 1:1 render rule the MD menu already used, extended to
+     * PCE's fixed 512 storage raster. */
+    if (_gsk_ui256_on_widefb &&
         _gsk_active_mode == GSK_VIDMODE_240P &&
-        _gsk_fb_width == 320)
+        (_gsk_fb_width == 320 || _gsk_fb_width == 512))
     {
         sx = 1.0f;
+        ox = 0.0f;
     }
 
     GPPrimSetTransform(sx, sy, ox, 0.0f);
@@ -536,17 +543,24 @@ static void _GskApplyDisplay(void)
         starty += 1;
     }
 
-    /* AURORA_MD_UI256_320FB_V1_20260823
-     * DISPLAY.DW/MAGH define how many framebuffer samples PCRTC scans.
-     * Choose one integer magnification for exactly 256 source pixels, keeping
-     * physical width as close as possible to the active 320 presentation.
-     * No source columns are duplicated unevenly. */
-    if (_gsk_ui256_on_320fb &&
+    /* AURORA_PCE_SSF2_FINAL_R3_20260913_PCE_MENU_SNES_APERTURE
+     * Keep R2's stable fixed-512 backing, but make the PCE menu look exactly
+     * like Aurora's normal 256x240 menu/SNES canvas.  The normal gsKit 240p
+     * 256-wide baseline is 11 VCK per source pixel (MagH=10).  Only DISPLAY
+     * geometry changes; framebuffer stride, VRAM addresses and core state do
+     * not.  Overscan keeps R2's derived aperture so the user's shrink setting
+     * remains authoritative. */
+    if (_gsk_ui256_on_widefb &&
         _gsk_active_mode == GSK_VIDMODE_240P &&
-        _gsk_fb_width == 320)
+        (_gsk_fb_width == 320 || _gsk_fb_width == 512))
     {
-        int new_magh1 = (dw + (GSK_LOGICAL_W / 2)) / GSK_LOGICAL_W;
+        int new_magh1;
         int new_dw;
+
+        if (_gsk_fb_width == 512 && g_GskOverscan == 0)
+            new_magh1 = 11; /* normal Aurora/SNES menu: MagH=10 */
+        else
+            new_magh1 = (dw + (GSK_LOGICAL_W / 2)) / GSK_LOGICAL_W;
 
         if (new_magh1 < 1)  new_magh1 = 1;
         if (new_magh1 > 16) new_magh1 = 16;
@@ -636,14 +650,21 @@ void GSK_SetGameplayYOffsetBias(int y)
     _GskApplyDisplay();
 }
 
-void GSK_SetUi256On320Framebuffer(int on)
+void GSK_SetUi256OnWideFramebuffer(int on)
 {
     on = on ? 1 : 0;
-    if (_gsk_ui256_on_320fb == on)
+    if (_gsk_ui256_on_widefb == on)
         return;
 
-    _gsk_ui256_on_320fb = on;
+    _gsk_ui256_on_widefb = on;
+    _GskApplyRenderTransform();
     _GskApplyDisplay();
+}
+
+/* Preserve the old API for the MD callers outside mainloop_render.cpp. */
+void GSK_SetUi256On320Framebuffer(int on)
+{
+    GSK_SetUi256OnWideFramebuffer(on);
 }
 
 void GSK_Set240pFramebufferWidth(int width)

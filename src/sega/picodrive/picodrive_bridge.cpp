@@ -1070,31 +1070,65 @@ static size_t pdGenericRequiredRomCapacity(size_t nBytes)
     return alloc;
 }
 
-static bool pdIsCompactSsf2Image(const void *pData, size_t nBytes)
+/* AURORA_PCE_SSF2_FINAL_20260913_SSF2_HEADER_AND_COMPACT
+ * Return the number of copier-header bytes preceding the real 5 MiB image.
+ * SIZE_MAX means "not the SSF2 compact case".  Supporting the conventional
+ * +0x200 form here prevents it from falling back to PicoDrive's generic 8 MiB
+ * power-of-two allocation. */
+static size_t pdCompactSsf2HeaderSkip(const void *pData, size_t nBytes)
 {
     static const char title[] = "SUPER STREET FIGHTER2 The New Challengers";
     const Uint8 *p = (const Uint8 *)pData;
-    return p && nBytes == 0x500000U &&
-           memcmp(p + 0x150, title, sizeof(title) - 1) == 0;
+    size_t skip;
+
+    if (!p)
+        return (size_t)-1;
+    if (nBytes == 0x500000U)
+        skip = 0U;
+    else if (nBytes == 0x500200U)
+        skip = 0x200U;
+    else
+        return (size_t)-1;
+
+    return memcmp(p + skip + 0x150U, title, sizeof(title) - 1) == 0
+        ? skip : (size_t)-1;
 }
 
 size_t PicoDriveBridge_RequiredRomCapacity(size_t nBytes)
 {
-    /* Called before the file is read. LoadGame validates the title before
-     * allowing the compact buffer to be borrowed. */
+    /* The frontend must reserve before it can inspect the title.  These are
+     * the two physical sizes of the same 5 MiB SSF2 image.  LoadGame performs
+     * the title check before borrowing compact storage. */
     if (nBytes == 0x500000U) return 0x500040U;
+    if (nBytes == 0x500200U) return 0x500240U;
     return pdGenericRequiredRomCapacity(nBytes);
 }
 
 bool PicoDriveBridge_LoadGame(const void *pData, size_t nBytes,
                               size_t nCapacity, const char *pName)
 {
-    const bool compactSsf2 = pdIsCompactSsf2Image(pData, nBytes);
-    const size_t requiredCapacity = compactSsf2
-        ? (size_t)0x500040U : pdGenericRequiredRomCapacity(nBytes);
+    /* AURORA_PCE_SSF2_FINAL_20260913_SSF2_HEADER_AND_COMPACT */
+    const size_t ssf2Skip = pdCompactSsf2HeaderSkip(pData, nBytes);
+    const bool compactSsf2 = ssf2Skip != (size_t)-1;
+    const Uint8 *loadData = (const Uint8 *)pData;
+    size_t loadBytes = nBytes;
+    size_t loadCapacity = nCapacity;
+    size_t requiredCapacity;
+
+    if (compactSsf2 && ssf2Skip != 0U)
+    {
+        if (loadBytes < ssf2Skip || loadCapacity < ssf2Skip)
+            return false;
+        loadData += ssf2Skip;
+        loadBytes -= ssf2Skip;
+        loadCapacity -= ssf2Skip;
+    }
+
+    requiredCapacity = compactSsf2
+        ? (size_t)0x500040U : pdGenericRequiredRomCapacity(loadBytes);
 
     if (!pData || !nBytes || !requiredCapacity ||
-        nCapacity < requiredCapacity || nCapacity > 0xFFFFFFFFU ||
+        loadCapacity < requiredCapacity || loadCapacity > 0xFFFFFFFFU ||
         !PicoDriveBridge_Init())
         return false;
 
@@ -1114,12 +1148,12 @@ bool PicoDriveBridge_LoadGame(const void *pData, size_t nBytes,
     struct retro_game_info info;
     memset(&info, 0, sizeof(info));
     info.path = s_ContentName;
-    info.data = pData;
-    info.size = nBytes;
+    info.data = loadData;
+    info.size = loadBytes;
 
     /* The buffer belongs to SegaRom/Aurora and remains alive until unload. */
-    s_ContentData = pData;
-    s_ContentBytes = nBytes;
+    s_ContentData = loadData;
+    s_ContentBytes = loadBytes;
 
     /* PicoDrive's GET_GAME_INFO_EXT path also needs canonical path metadata. */
     {
@@ -1156,8 +1190,8 @@ bool PicoDriveBridge_LoadGame(const void *pData, size_t nBytes,
     /* AURORA_PD_BORROW_AURORA_ROM_V1
      * Lend PicoDrive the exact frontend allocation capacity. */
     PicoCartSetExternalRomBuffer(
-        (const unsigned char *)pData,
-        (unsigned int)nCapacity);
+        (const unsigned char *)loadData,
+        (unsigned int)loadCapacity);
 
     /* Region must already be visible to PicoResetMS() during load. */
     PicoIn.regionOverride = pdCoreRegionOverride(s_AuroraRegion);

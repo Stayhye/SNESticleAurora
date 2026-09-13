@@ -443,29 +443,18 @@ void MainLoopRender()
                 wantedRaster = 320;
 
 
+            /* AURORA_PCE_SSF2_FINAL_R2_20260913_PCE_FIXED512_MENU256
+             * Real PS2: rebuilding 512->256 while Beetle/PCE-CD is alive can
+             * destroy the live GS/VRAM epoch and hang the console.  Keep the
+             * physical PCE raster at 512 for the entire core lifetime.  The
+             * menu is a 256-sample presentation inside that backing instead. */
             if (_pSystem == _pPce)
-            {
-                /* AURORA_MEMORY_RASTER_REGRESSION_FIX_V3_20260913_PCE_KEEP_512_MENU
-                 * Do not rebuild the GS 512->256 merely because the normal
-                 * Aurora menu opened while a PCE/PCE-CD core is resident.
-                 *
-                 * With the post-gpSP memory envelope, that reinit can require
-                 * fresh gsKit/UI heap allocations while Beetle, CD streams and
-                 * the complete PCE machine are still alive. On real PS2 this
-                 * is exactly the transition that can hard-freeze on L2+R2.
-                 *
-                 * The UI is authored at 256 logical pixels; on the existing
-                 * 512x240 storage raster GSK's normal transform is an exact
-                 * 2x horizontal / 1x vertical mapping. The existing menu path
-                 * also clears PCE's gameplay visible-window latch, so no game
-                 * crop leaks into the menu. Closing the menu likewise needs no
-                 * rebuild. The raster can return to 256 only after PCE unload. */
                 wantedRaster = 512;
-            }
             /* Menu/prompts use exact 256-source integer presentation on the
              * still-alive 320 framebuffer, not 256->320 resampling. */
-            GSK_SetUi256On320Framebuffer(
-                (_bMenu && bMdVideo) ? 1 : 0);
+            /* AURORA_PCE_SSF2_FINAL_R2_20260913_PCE_FIXED512_MENU256 */
+            GSK_SetUi256OnWideFramebuffer(
+                (_bMenu && (bMdVideo || _pSystem == _pPce)) ? 1 : 0);
 
             if (_bMenu)
                 GSK_SetNative240pPar(0);
@@ -476,13 +465,12 @@ void MainLoopRender()
                        (int)wantedRaster);
             }
 
-            /* AURORA_PCE_ROOT512_KRAZY_LATCH_V12_20260830: clear window */
+            /* AURORA_PCE_SSF2_FINAL_20260913_PCE_MENU_CLEAR_GAME_WINDOW
+             * A gameplay crop/window never belongs to Aurora UI. */
             if (_pSystem != _pPce || _bMenu || _MainLoop_BlackScreen)
                 GSK_Clear240pVisibleWindow();
 
-            /* AURORA_PCE_FIXED512_DBX0_CUMULATIVE_V8_20260830: clear window */
-            if (_pSystem != _pPce || _bMenu || _MainLoop_BlackScreen)
-                GSK_Clear240pVisibleWindow();
+
         }
 
 
@@ -669,6 +657,7 @@ void MainLoopRender()
                 fColor);
         }
         else if (_pSystem == _pPce &&
+                 !_bMenu && /* AURORA_PCE_SSF2_FINAL_20260913_PCE_NO_DIRECT_UNDER_MENU */
                  PceBridge_CanDirectGsVideo())
         {
             /* AURORA_PCE_EXPERIMENTAL_V10_DIRECT_GS */

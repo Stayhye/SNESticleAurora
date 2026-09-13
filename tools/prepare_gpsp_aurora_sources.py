@@ -12,7 +12,7 @@ import re
 import shutil
 from pathlib import Path
 
-VERSION = "AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_STAGE_1"  # AURORA_GPSP_GBA_V21_MEMORY_TFA_DYNAREC_20260912
+VERSION = "AURORA_PCE_SSF2_FINAL_R4_CLEANUP_20260913_GPSP_STAGE"
 
 TFA_H = r'''#ifndef AURORA_TFA_H
 #define AURORA_TFA_H
@@ -1690,6 +1690,61 @@ static inline u8 lookup_pix_8bpp_cached(
         mem.write_text(ms, encoding="utf-8", newline="\n")
 
 
+    # AURORA_PCE_SSF2_FINAL_20260913_GPSP_RESIDENT_FINAL_BEGIN
+    # AURORA_PCE_SSF2_FINAL_R4_CLEANUP_20260913_UPSTREAM_WORKRAM
+    # Keep gpSP's pinned MIPS IWRAM/VRAM/EWRAM layout unchanged.  R4 narrows
+    # the cross-core memory fix to gpSP's own MMAP_JIT_CACHE mechanism only.
+
+    # Make the existing lazy JIT real on PS2 and make Aurora's final
+    # --gc-sections useful inside gpSP object files.  The upstream .S rule also
+    # includes CFLAGS, and CXXFLAGS is derived from CFLAGS, so one PS2 CFLAGS
+    # line covers C, C++ and preprocessed MIPS assembly consistently.
+    _fmk = stage / "Makefile"
+    _fmks = _fmk.read_text(encoding="utf-8")
+    _fmks, _fn = re.subn(r"^MMAP_JIT_CACHE\s*[:?+]?=\s*.*$",
+                          "MMAP_JIT_CACHE := 1", _fmks,
+                          count=1, flags=re.MULTILINE)
+    if _fn != 1:
+        raise SystemExit("gpSP FINAL: MMAP_JIT_CACHE assignment missing")
+
+    _fflags = "CFLAGS += -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables # AURORA_PCE_SSF2_FINAL_20260913_GPSP_GC_SECTIONS\n"
+    if "AURORA_PCE_SSF2_FINAL_20260913_GPSP_GC_SECTIONS" not in _fmks:
+        _fps2 = "else ifeq ($(platform), ps2)\n"
+        _fpos = _fmks.find(_fps2)
+        if _fpos < 0:
+            raise SystemExit("gpSP FINAL: PS2 Makefile branch missing")
+        _fpos += len(_fps2)
+        _fmks = _fmks[:_fpos] + _fflags + _fmks[_fpos:]
+    _fmk.write_text(_fmks, encoding="utf-8", newline="\n")
+    # AURORA_PCE_SSF2_FINAL_20260913_GPSP_RESIDENT_FINAL_END
+    # AURORA_PCE_SSF2_FINAL_R3_20260913_MMAP_HARDEN_BEGIN
+    _r3_mk = stage / "Makefile"
+    _r3_ms = _r3_mk.read_text(encoding="utf-8")
+    _r3_gate = "ifeq ($(MMAP_JIT_CACHE), 1)\n"
+    _r3_force = """# AURORA_PCE_SSF2_FINAL_R3_20260913_MMAP_EXACT_PS2
+ifeq ($(platform), ps2)
+override MMAP_JIT_CACHE := 1
+endif
+
+ifeq ($(MMAP_JIT_CACHE), 1)
+"""
+    if "AURORA_PCE_SSF2_FINAL_R3_20260913_MMAP_EXACT_PS2" not in _r3_ms:
+        if _r3_ms.count(_r3_gate) != 1:
+            raise SystemExit("gpSP R3: MMAP_JIT_CACHE gate missing/ambiguous")
+        _r3_ms = _r3_ms.replace(_r3_gate, _r3_force, 1)
+
+    # Also normalise the known malformed Aurora PS2 assignment when present.
+    # This is not relied upon for correctness (the override above is), but it
+    # prevents the bad value from surviving in the staged Makefile.
+    _r3_ms = re.sub(
+        r'^(\s*)MMAP_JIT_CACHE\s*=\s*1\s+#\s*AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_LAZY_ALLOC_STAGE\s*$',
+        r'\1MMAP_JIT_CACHE := 1 # AURORA_PCE_SSF2_FINAL_R3_20260913_MMAP_NORMALIZED',
+        _r3_ms, count=1, flags=re.M)
+
+    if "override MMAP_JIT_CACHE := 1" not in _r3_ms:
+        raise SystemExit("gpSP R3: exact PS2 MMAP override was not installed")
+    _r3_mk.write_text(_r3_ms, encoding="utf-8", newline="\n")
+    # AURORA_PCE_SSF2_FINAL_R3_20260913_MMAP_HARDEN_END
     stamp.write_text(digest + "\n", encoding="utf-8")
     print(f"[ gpSP stage ] V21: SMALL JIT memory + 4 MiB paged ROM + TFA pre-reserve (V15 SIO) + pager I/O + full PS2 JIT cache sync: {stage}")
 
