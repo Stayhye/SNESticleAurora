@@ -807,6 +807,20 @@ static Bool _SNRomHasBSXSlot(const Uint8 *pRom, Uint32 nRomBytes,
     if (p[-14] != 'Z' || p[-11] != 'J')
         return FALSE;
 
+    /* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_SNES_8M
+     * RPG Tsukuru 2 is SHVC-ZR2J-JPN on a BSC-1A7M-01 slotted board.
+     * The generic extended-header heuristic below is deliberately strict,
+     * but this known physical product code must not be rejected merely
+     * because its publisher/license bytes do not match that heuristic.
+     *
+     * p[-14..-11] is the four-byte product code.  The function has already
+     * established byte 0 == 'Z' and byte 3 == 'J', so R2 identifies ZR2J.
+     * Keep this hardware-specific: Turbo File support by itself does NOT
+     * imply an 8M Memory Pack slot.
+     */
+    if (p[-13] == 'R' && p[-12] == '2')
+        return TRUE;
+
     uCode = p[-13];
     if (!((uCode >= 'A' && uCode <= 'Z') ||
           (uCode >= '0' && uCode <= '9')))

@@ -894,6 +894,41 @@ void retro_run(void) {
     ):
         if marker not in text:
             fail(f"libretro marker missing: {marker}")
+    # AURORA_FDS_SAVE_GPSP_BUILD_FIX_V4_20260913_FDS_NV
+    # FCEUmm already persists FDS diskdata[] via FCEUMKF_FDS. Keep that
+    # separate from the source image and point its NV directory at NES.
+    if "AURORA_FDS_SAVE_GPSP_BUILD_FIX_V4_20260913_FDS_NV" not in text:
+        _a = 'static char aurora_system_directory[PATH_MAX] = "SYSTEM";\n'
+        _d = (
+            '/* AURORA_FDS_SAVE_GPSP_BUILD_FIX_V4_20260913_FDS_NV: separate writable FDS save directory. */\n'
+            'static char aurora_save_directory[PATH_MAX] = {0};\n\n'
+            'void aurora_fds_set_save_directory(const char *dir) {\n'
+            '\tif (!dir || !dir[0]) {\n'
+            '\t\taurora_save_directory[0] = 0;\n'
+            '\t\treturn;\n'
+            '\t}\n'
+            '\tstrncpy(aurora_save_directory, dir, '
+            'sizeof(aurora_save_directory) - 1);\n'
+            '\taurora_save_directory['
+            'sizeof(aurora_save_directory) - 1] = 0;\n'
+            '}\n\n'
+        )
+        if _a not in text:
+            fail("libretro FDS save: SYSTEM anchor missing")
+        text = text.replace(_a, _a + _d, 1)
+
+        _base = '\tFCEUI_SetBaseDirectory(aurora_system_directory);\n'
+        _with_nv = (
+            _base +
+            '\tFCEUI_SetDirOverride(FCEUIOD_NV, '
+            'aurora_save_directory[0] ? '
+            'aurora_save_directory : NULL);\n'
+        )
+        if _with_nv not in text:
+            if _base not in text:
+                fail("libretro FDS save: base-directory anchor missing")
+            text = text.replace(_base, _with_nv, 1)
+
     return text
 
 

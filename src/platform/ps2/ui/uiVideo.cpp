@@ -1327,28 +1327,28 @@ void CVideoScreen::Draw()
 	}
 	else if (iPage == 1)
 	{
-		_VideoHeader(vy, "Audio"); vy += 14;
+		_VideoHeader(vy, "Audio"); vy += 10; /* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_AUDIO_UI */
 		_VideoRow(vy, 50, m_iSelect, "Menu Music",
-		          BgmIsEnabled() ? "ON" : "OFF"); vy += 12;
+		          BgmIsEnabled() ? "ON" : "OFF"); vy += 10;
 		snprintf(buf, sizeof(buf), "%d", BgmGetVolume() / 2);
-		_VideoRow(vy, 51, m_iSelect, "Menu volume", buf); vy += 12;
+		_VideoRow(vy, 51, m_iSelect, "Menu volume", buf); vy += 10;
 		snprintf(buf, sizeof(buf), "%d", AudMixGameGetVolume() / 2);
-		_VideoRow(vy, 52, m_iSelect, "SNES volume", buf); vy += 12;
+		_VideoRow(vy, 52, m_iSelect, "SNES volume", buf); vy += 10;
 		snprintf(buf, sizeof(buf), "%d", AudMixSegaGetVolume() / 2);
-		_VideoRow(vy, 53, m_iSelect, "SEGA volume", buf); vy += 12;
+		_VideoRow(vy, 53, m_iSelect, "SEGA volume", buf); vy += 10;
 		snprintf(buf, sizeof(buf), "%d", AudMixPceGetVolume() / 2);
-		_VideoRow(vy, 54, m_iSelect, "PCE volume", buf); vy += 12;
-		_VideoRow(vy, 55, m_iSelect, "SNES audio", "32 kHz native"); vy += 12;
+		_VideoRow(vy, 54, m_iSelect, "PCE volume", buf); vy += 10;
+		_VideoRow(vy, 55, m_iSelect, "SNES audio", "32 kHz native"); vy += 10;
 		snprintf(buf, sizeof(buf), "%d kHz", (PicoDriveBridge_GetAudioRate() + 500) / 1000);
-		_VideoRow(vy, 56, m_iSelect, "SEGA audio", buf); vy += 12;
+		_VideoRow(vy, 56, m_iSelect, "SEGA audio", buf); vy += 10;
 		_VideoRow(vy, 57, m_iSelect, "SMS FM audio",
-		          PicoDriveBridge_GetSmsFm() ? "Enable" : "Disable"); vy += 12;
+		          PicoDriveBridge_GetSmsFm() ? "Enable" : "Disable"); vy += 10;
 		_VideoRow(vy, 58, m_iSelect, "CD music",
-		          g_CdMusicEnabled ? "ON" : "OFF"); vy += 12; /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
+		          g_CdMusicEnabled ? "ON" : "OFF"); vy += 10; /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
 		snprintf(buf, sizeof(buf), "%d", g_GbcVolume / 2);
-		_VideoRow(vy, 59, m_iSelect, "GBC volume", buf); vy += 12;
+		_VideoRow(vy, 59, m_iSelect, "GBC volume", buf); vy += 10;
 		snprintf(buf, sizeof(buf), "%d", g_GbaVolume / 2);
-		_VideoRow(vy, 60, m_iSelect, "GBA volume", buf); vy += 12;
+		_VideoRow(vy, 60, m_iSelect, "GBA volume", buf); vy += 10;
 	}
 	else if (iPage == 5)
 	{

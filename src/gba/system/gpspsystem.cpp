@@ -561,6 +561,43 @@ static Bool AuroraGpSPTurboFileAdvanceCRC(Uint32 crc)
             crc == AURORA_GBA_TFA_CRC_TSUKURU) ? TRUE : FALSE;
 }
 
+/* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_GPSP_TFA_ORDER
+ * gpSP retro_init() owns the essential allocations: ROM paging blocks,
+ * framebuffer/audio state and the PS2 JIT path.  Reserving the optional
+ * 2 MiB TFA image before retro_init can leave the core without even one
+ * 1 MiB ROM block on a fragmented/tight EE heap, making retro_load_game()
+ * reject an otherwise valid cartridge (notably the 8 MiB Tsukuru Advance).
+ *
+ * Attach TFA only after retro_init has established a runnable core. This does
+ * not change the protocol or its 2 MiB image: it only changes allocation
+ * order. The accessory is still attached before retro_load_game() returns
+ * control to Aurora and therefore before the first emulated frame/SIO access.
+ */
+static void AuroraGpSPAttachTurboFileAdvance(GpSPSystem::Impl *p)
+{
+    if (!p)
+        return;
+
+    /* Be explicit even though UnloadGame detaches the previous backing. */
+    GPSP_aurora_tfa_set_storage(NULL, 0U);
+
+    if (!AuroraGpSPTurboFileAdvanceCRC(p->romCRC))
+        return;
+
+    if (!p->tfaData)
+        p->tfaData = new (std::nothrow) Uint8[AURORA_GBA_TFA_BYTES];
+
+    if (!p->tfaData)
+    {
+        printf("[gpSP] Turbo File Advance disabled: "
+               "2 MiB post-init allocation failed\n");
+        return;
+    }
+
+    memset(p->tfaData, 0xff, AURORA_GBA_TFA_BYTES);
+    GPSP_aurora_tfa_set_storage(p->tfaData, AURORA_GBA_TFA_BYTES);
+}
+
 static Bool AuroraGpSPCRC32File(const Char *pPath, Uint32 *pCRC,
                                    Uint32 *pBytes)
 {
@@ -638,16 +675,7 @@ Bool GpSPSystem::LoadGame(const Char *pPath, const Char *pSystemDirectory)
             m_p->romCRC = crc;
             m_p->romBytes = bytes;
         }
-        if (AuroraGpSPTurboFileAdvanceCRC(m_p->romCRC))
-        {
-            m_p->tfaData =
-                new (std::nothrow) Uint8[AURORA_GBA_TFA_BYTES];
-            if (m_p->tfaData)
-                memset(m_p->tfaData, 0xff, AURORA_GBA_TFA_BYTES);
-            else
-                printf("[gpSP] Turbo File Advance disabled: "
-                       "2 MiB pre-allocation failed\n");
-        }
+        /* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_GPSP_TFA_ORDER: TFA backing is attached after GPSP_retro_init(). */
     }
 
     GPSP_retro_set_environment(AuroraGpSPEnvironment);
@@ -659,9 +687,7 @@ Bool GpSPSystem::LoadGame(const Char *pPath, const Char *pSystemDirectory)
     GPSP_retro_init();
     m_p->initialized = TRUE;
     GPSP_retro_set_controller_port_device(0, RETRO_DEVICE_JOYPAD);
-    GPSP_aurora_tfa_set_storage(
-        m_p->tfaData,
-        m_p->tfaData ? AURORA_GBA_TFA_BYTES : 0U); /* AURORA_GPSP_GBA_V21_TFA_PREALLOC_20260912 */
+    AuroraGpSPAttachTurboFileAdvance(m_p);
 
     memset(&info, 0, sizeof(info));
     info.path = pPath;
@@ -712,14 +738,7 @@ Bool GpSPSystem::LoadGameMemory(const void *pData, Uint32 nBytes, Uint32 uCRC,
      * identity/TFA selection come from that same in-RAM byte stream. */
     m_p->romCRC = uCRC;
     m_p->romBytes = nBytes;
-    if (AuroraGpSPTurboFileAdvanceCRC(m_p->romCRC))
-    {
-        m_p->tfaData = new (std::nothrow) Uint8[AURORA_GBA_TFA_BYTES];
-        if (m_p->tfaData)
-            memset(m_p->tfaData, 0xff, AURORA_GBA_TFA_BYTES);
-        else
-            printf("[gpSP] Turbo File Advance disabled: 2 MiB pre-allocation failed\n");
-    }
+    /* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_GPSP_TFA_ORDER: TFA backing is attached after GPSP_retro_init(). */
 
     GPSP_retro_set_environment(AuroraGpSPEnvironment);
     GPSP_retro_set_video_refresh(AuroraGpSPVideo);
@@ -730,8 +749,7 @@ Bool GpSPSystem::LoadGameMemory(const void *pData, Uint32 nBytes, Uint32 uCRC,
     GPSP_retro_init();
     m_p->initialized = TRUE;
     GPSP_retro_set_controller_port_device(0, RETRO_DEVICE_JOYPAD);
-    GPSP_aurora_tfa_set_storage(
-        m_p->tfaData, m_p->tfaData ? AURORA_GBA_TFA_BYTES : 0U);
+    AuroraGpSPAttachTurboFileAdvance(m_p);
 
     memset(&info, 0, sizeof(info));
     info.path = pContentName;

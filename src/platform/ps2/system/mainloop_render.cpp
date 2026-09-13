@@ -10,6 +10,7 @@
  */
 
 #include <stdio.h>
+#include <string.h> /* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_RED_ERRORS */
 
 #include "mainloop_debug.h"
 #include "mainloop_shared.h"
@@ -884,12 +885,31 @@ void MainLoopRender()
 		{
 			const Int32 textW = FontGetStrWidth(_MainLoop_ModalStr);
 			const Int32 textX = 128 - textW / 2;
+			const Bool bErrorModal =
+				!strncmp(_MainLoop_ModalStr, "ERROR:", 6) ? TRUE : FALSE;
 
-			/* AURORA_GB_HOTFIX_R13E_20260909_MODAL_BOX
-			 * Opaque black backing only behind the centered modal/error text. */
+			/* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_RED_ERRORS
+			 * Loader failures can leave the previous framebuffer white, black or
+			 * partially rendered. ERROR: is already Aurora's modal error contract;
+			 * erase that accidental background and give every error the same
+			 * opaque red screen. Non-error informational modals retain the old
+			 * compact black backing.
+			 */
 			PolyTexture(NULL);
 			PolyBlend(FALSE);
-			PolyColor4f(0.0f, 0.0f, 0.0f, 1.0f);
+			if (bErrorModal)
+			{
+				PolyColor4f(0.55f, 0.0f, 0.0f, 1.0f);
+				PolyRect(0.0f, 0.0f,
+				         (Float32)MAINLOOP_SCREENWIDTH,
+				         (Float32)MAINLOOP_SCREENHEIGHT);
+				/* Darker red text plate: readable but still visibly an error. */
+				PolyColor4f(0.30f, 0.0f, 0.0f, 1.0f);
+			}
+			else
+			{
+				PolyColor4f(0.0f, 0.0f, 0.0f, 1.0f);
+			}
 			PolyRect((Float32)(textX - 4), 96.0f,
 			         (Float32)(textW + 8), 16.0f);
 			PolyBlend(TRUE);

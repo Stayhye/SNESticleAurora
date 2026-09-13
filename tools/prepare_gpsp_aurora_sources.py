@@ -1879,6 +1879,154 @@ static s32 load_gamepak_raw_memory(const void *data, size_t data_size)
         _ram_s = _ram_s.replace(_ram_old, _ram_new, 1)
         _ram_gm.write_text(_ram_s, encoding="utf-8", newline="\n")
 
+    # AURORA_GPSP_GBA_MARIO_BIOS_LATCH_V1_20260913
+    # GBA protected-BIOS reads outside 00000000h..00003FFFh expose the last
+    # BIOS-prefetch word, not arbitrary current bus data. gpSP models that
+    # latch with REG_BUS_VALUE. reset_gba() calls init_memory() before
+    # init_cpu(), and init_cpu() clears the value memory init placed there.
+    # Restore the post-startup/SoftReset value after that clear. Actual BIOS
+    # execution is unaffected, and existing SWI/IRQ paths still update the
+    # latch later as before.
+    _bios_cpu = stage / "cpu.cc"
+    _bios_s = _bios_cpu.read_text(encoding="utf-8")
+    _bios_anchor = (
+        "  // Initialize CPU registers\n"
+        "  memset(reg, 0, REG_USERDEF * sizeof(u32));\n"
+        "  memset(reg_mode, 0, sizeof(reg_mode));\n"
+    )
+    _bios_new = (
+        "  // Initialize CPU registers\n"
+        "  memset(reg, 0, REG_USERDEF * sizeof(u32));\n"
+        "  /* AURORA_GPSP_GBA_MARIO_BIOS_LATCH_V1_20260913: preserve protected-BIOS latch across reset. */\n"
+        "  reg[REG_BUS_VALUE] = 0xe129f000;\n"
+        "  memset(reg_mode, 0, sizeof(reg_mode));\n"
+    )
+    if _bios_s.count(_bios_anchor) != 1:
+        raise SystemExit("gpSP Mario/BIOS latch: init_cpu anchor missing/ambiguous")
+    _bios_s = _bios_s.replace(_bios_anchor, _bios_new, 1)
+    _bios_cpu.write_text(_bios_s, encoding="utf-8", newline="\n")
+
+    # AURORA_GPSP_PROTECTED_BIOS_LATCH_V2_20260913
+    # Dedicated GBA protected-BIOS prefetch latch.
+    #
+    # REG_BUS_VALUE is ordinary open-bus state and changes during normal game
+    # execution. GBA BIOS protection instead returns the last prefetched BIOS
+    # instruction when PC is outside 00000000h..00003FFFh.
+    _pb_mem = stage / "gba_memory.c"
+    _pb_cpu = stage / "cpu.cc"
+
+    _pb_ms = _pb_mem.read_text(encoding="utf-8")
+    _pb_decl = "u32 aurora_bios_protected_latch = 0xe129f000U;"
+    if _pb_decl not in _pb_ms:
+        _pb_inc = '#include "streams/file_stream.h"\n'
+        if _pb_ms.count(_pb_inc) != 1:
+            raise SystemExit(
+                "gpSP protected BIOS latch: gba_memory include anchor "
+                "missing/ambiguous")
+        _pb_ms = _pb_ms.replace(
+            _pb_inc,
+            _pb_inc +
+            "\n/* AURORA_GPSP_PROTECTED_BIOS_LATCH_V2_20260913: separate from ordinary open-bus state. */\n" +
+            _pb_decl + "\n",
+            1)
+
+    _pb_old_read = (
+        "reg[REG_BUS_VALUE] >> ((address & 0x03) << 3)"
+    )
+    _pb_new_read = (
+        "aurora_bios_protected_latch >> ((address & 0x03) << 3)"
+    )
+    # AURORA_FDS_SAVE_GPSP_BUILD_FIX_V4_20260913_GPSP_BIOS_ANCHOR
+    # REG_BUS_VALUE has legitimate users outside BIOS. Restrict this edit
+    # to read_memory()'s BIOS branch instead of counting the whole file.
+    if _pb_new_read not in _pb_ms:
+        _pb_tag = "/* BIOS */"
+        _pb_a = _pb_ms.find(_pb_tag)
+        _pb_b = _pb_ms.find("case 0x02:", _pb_a + 1) if _pb_a >= 0 else -1
+        if _pb_a < 0 or _pb_b <= _pb_a:
+            raise SystemExit(
+                "gpSP protected BIOS latch: BIOS block not found")
+        _pb_chunk = _pb_ms[_pb_a:_pb_b]
+        if _pb_old_read not in _pb_chunk:
+            raise SystemExit(
+                "gpSP protected BIOS latch: protected read missing in BIOS")
+        _pb_chunk = _pb_chunk.replace(
+            _pb_old_read, _pb_new_read, 1)
+        _pb_ms = _pb_ms[:_pb_a] + _pb_chunk + _pb_ms[_pb_b:]
+
+    _pb_mem.write_text(
+        _pb_ms, encoding="utf-8", newline="\n")
+
+    _pb_cs = _pb_cpu.read_text(encoding="utf-8")
+
+    _pb_extern = "  extern u32 aurora_bios_protected_latch;\n"
+    if _pb_extern not in _pb_cs:
+        _pb_inc = '  #include "cpu_instrument.h"\n'
+        if _pb_cs.count(_pb_inc) != 1:
+            raise SystemExit(
+                "gpSP protected BIOS latch: cpu extern anchor "
+                "missing/ambiguous")
+        _pb_cs = _pb_cs.replace(
+            _pb_inc, _pb_inc + _pb_extern, 1)
+
+    _pb_init = "  aurora_bios_protected_latch = 0xe129f000U;\n"
+    if _pb_init not in _pb_cs:
+        _pb_v2 = "  reg[REG_BUS_VALUE] = 0xe129f000;\n"
+        if _pb_v2 in _pb_cs:
+            if _pb_cs.count(_pb_v2) != 1:
+                raise SystemExit(
+                    "gpSP protected BIOS latch: V2 reset anchor ambiguous")
+            _pb_cs = _pb_cs.replace(
+                _pb_v2, _pb_v2 + _pb_init, 1)
+        else:
+            _pb_zero = (
+                "  memset(reg, 0, REG_USERDEF * sizeof(u32));\n"
+            )
+            if _pb_cs.count(_pb_zero) != 1:
+                raise SystemExit(
+                    "gpSP protected BIOS latch: init_cpu memset anchor "
+                    "missing/ambiguous")
+            _pb_cs = _pb_cs.replace(
+                _pb_zero,
+                _pb_zero +
+                "  reg[REG_BUS_VALUE] = 0xe129f000;\n" +
+                _pb_init,
+                1)
+
+    _pb_irq = "    reg[REG_BUS_VALUE] = 0xe55ec002;\n"
+    _pb_irq_latch = (
+        "    aurora_bios_protected_latch = 0xe55ec002U;\n"
+    )
+    if _pb_irq_latch not in _pb_cs:
+        if _pb_cs.count(_pb_irq) != 1:
+            raise SystemExit(
+                "gpSP protected BIOS latch: IRQ anchor "
+                "missing/ambiguous")
+        _pb_cs = _pb_cs.replace(
+            _pb_irq, _pb_irq + _pb_irq_latch, 1)
+
+    _pb_swi = (
+        "reg[REG_BUS_VALUE] = 0xe3a02004;  "
+        "// After SWI, we read bios[0xE4]"
+    )
+    _pb_swi_latch = (
+        "aurora_bios_protected_latch = 0xe3a02004U;"
+    )
+    if _pb_swi_latch not in _pb_cs:
+        _pb_count = _pb_cs.count(_pb_swi)
+        if _pb_count != 2:
+            raise SystemExit(
+                "gpSP protected BIOS latch: expected ARM+THUMB SWI "
+                f"anchors, found {_pb_count}")
+        _pb_cs = _pb_cs.replace(
+            _pb_swi,
+            _pb_swi + "\n"
+            "             " + _pb_swi_latch,
+        )
+
+    _pb_cpu.write_text(
+        _pb_cs, encoding="utf-8", newline="\n")
+
     stamp.write_text(digest + "\n", encoding="utf-8")
     print(f"[ gpSP stage ] V21: SMALL JIT memory + 4 MiB paged ROM + TFA pre-reserve (V15 SIO) + pager I/O + full PS2 JIT cache sync: {stage}")
 
