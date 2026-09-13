@@ -70,7 +70,10 @@ jobs:
           grep -q 'aurora_mix_history_valid' tools/prepare_gpsp_aurora_sources.py
           grep -q 'aurora_set_frontend_skip' tools/prepare_gpsp_aurora_sources.py
           grep -q 'ROM_BUFFER_SIZE=4' tools/prepare_gpsp_aurora_sources.py
-          grep -q 'AURORA_GPSP_GBA_V21_MEMORY_TFA_DYNAREC_20260912' tools/prepare_gpsp_aurora_sources.py
+          grep -q 'AURORA_PCE_SSF2_FINAL_R4_CLEANUP_20260913_GPSP_STAGE' tools/prepare_gpsp_aurora_sources.py
+          grep -q 'override MMAP_JIT_CACHE := 1' tools/prepare_gpsp_aurora_sources.py
+          grep -q 'AURORA_PCE_SSF2_FINAL_R4_CLEANUP_20260913_GPSP_JIT_ONLY_GUARD' Makefile
+          grep -q 'platform=ps2 MMAP_JIT_CACHE=1' Makefile
           grep -Fq 'ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 2)' tools/prepare_gpsp_aurora_sources.py
           grep -q 'AURORA_GPSP_GBA_V21_DYNAREC_FULL_CACHE_SYNC_20260912' tools/prepare_gpsp_aurora_sources.py
           ! grep -Fq 'ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 4)' tools/prepare_gpsp_aurora_sources.py
