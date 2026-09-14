@@ -45,6 +45,7 @@ Emulation:
 
 * Support added for more NES mappers: 13, 16, 18, 27, 48, 64, 65, 67, 68, 72, 77, 80, 82, 92, 96, 99, 101, 105, 118, 119, 151, 153, 155, 157, 158, 159, 185, 188, 210, 216, and 552. Every licensed NES and Famicom game and most of the bootleg and unlicensed games will boot now.
 * Famicom Disk System (firmware not included), press L2+TRIANGLE to change the disk side.
+* Famiclone audio option for NES games (swap duty cycles, a known hardware bug in some Famiclones you can intentionally turn on)
 * Changed SRAM and RAM initialization for both NES and SNES. This will fix all the very few games that rely on specific initial values to work properly.
 * Mega Drive / Genesis + Sega Master System / Mark III + Game Gear + 32X + Sega CD emulation with PicoDrive
 * PC Engine / TurboGrafx-16 HuCard and PC Engine CD emulation with Beetle PCE Fast
@@ -73,24 +74,22 @@ User interface:
 
 *(**NOTE**: to find the options above, go to the Video Settings and change the pages with the circle button.)*
 
-Just for fun:
-
-* Famiclone audio option for NES games (swap duty cycles, a known hardware bug in some Famiclones you can intentionally turn on)
-
-
 
 <!-- AURORA_CD_FIRMWARE_V6_20260824 -->
-CD firmware and images **(experimental)**
+## BIOS and firmware
 
-* Aurora creates `SYSTEM` under the active SNESticle data root, normally `mass0:/SNESticle/SYSTEM` when USB/MX4SIO is available or the configured Memory Card SNESticle directory otherwise.
-* Firmware is **not included**. For PC Engine CD, place `syscard3.pce` in `SYSTEM`. PicoDrive accepts regional Sega CD BIOS names documented in [THIRD_PARTY.md](THIRD_PARTY.md), preferably as `.bin`.
-* Only `.cue` is exposed by this PS2 build. Keep every BIN/audio track referenced by the CUE at the relative location named inside it. CHD is intentionally not exposed because libchdr plus its compression dependencies has not been validated inside the PS2's 32 MiB memory budget.
+* Aurora creates `SYSTEM` under the active SNESticle data root. Firmware and BIOS files are **not included**.
+* For PC Engine CD, place `syscard3.pce` in `SYSTEM`.
+* For Sega CD, place the corresponding region BIOS (use PicoDrive as a reference) in `SYSTEM`.
+* For GBC and GBA, place `cgb_boot.bin` and `gba_bios.bin` in `SYSTEM`.
+* For Famicom Disk System, place `disksys.rom` in `SYSTEM`.
 
 **FIXED:**
 
 * PC Engine alternative video modes (Ninja Spirits, Aoi Blink, Toumaden, Puyo Puyo and more)
 * Pilotwings (SNES) and Secret of Mana (SNES) mode 7 rendering, also fixes other games that rely on it
 * Secret of Mana (SNES) mode 5 rendering, also fixes other games that rely on it
+* Addams Family (SNES) graphical glitches and timing issues
 * Accele Brid (SNES) freeze fix
 * Speedy Gonzales in Los Gatos Banditos (SNES) performance *(with special safe frameskip)*
 * Top Gear (SNES) performance *(with special safe frameskip)*
@@ -106,7 +105,6 @@ CD firmware and images **(experimental)**
 * Krazy Creatures (NES) minor graphical glitches
 * Super Mario World 2 (SNES) performance (Super FX2)
 * The Lost Vikings 1 and 2 (SNES) black screen
-* Addams Family (SNES) graphical glitches and timing issues
 * Sunset Riders (SNES) graphical glitches
 * Sonic Blast Man (SNES) wrong colors
 * Any other games with performance or graphical issues

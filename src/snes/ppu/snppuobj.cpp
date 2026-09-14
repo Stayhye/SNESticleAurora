@@ -526,13 +526,18 @@ void SnesPPURender::UpdateOBJVisibility(Uint8 *pObjY, Uint8 *pObjSize, Int32 iOb
 		}
 	}
 
+	/* AURORA_V3_OBJ_Y_WRAP_FIX
+	 * OBJ Y is 8-bit hardware state.  The canonical CheckOBJ path already
+	 * tests ((line - Y) & 0xff), but the cached visibility builder used y++
+	 * without wrapping.  Sprites spanning $ff->$00 therefore lost their
+	 * wrapped scanlines.  Keep every cached path modulo 256 too. */
 	if (!screenLimited && !trackTiles)
 	{
 		while (nObjs>0)
 		{
 			Uint32 y,h; iObj&=0x7F; h=pObjSize[iObj]; y=pObjY[iObj];
 			if (_SnesPPUOBJVisibleX(m_Objs[iObj].uPosX,m_Objs[iObj].uWidth))
-				while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; y++; h--; }
+				while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; y=(y+1)&0xFF; h--; }
 			iObj++; nObjs--;
 		}
 		return;
@@ -546,7 +551,7 @@ void SnesPPURender::UpdateOBJVisibility(Uint8 *pObjY, Uint8 *pObjSize, Int32 iOb
 			{
 				Int32 x=(m_Objs[iObj].uPosX&0x100)?((Int32)(m_Objs[iObj].uPosX&0x1FF)-512):(Int32)(m_Objs[iObj].uPosX&0x1FF);
 				for (Int32 t=0;t<(m_Objs[iObj].uWidth>>3);t++) if (_SnesPPUOBJTileCountedX(m_Objs[iObj].uPosX,x+(t<<3))) counted++;
-				while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) { m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; m_nObjTilePotential[y]+=(Uint16)counted; } y++; h--; }
+				while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) { m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; m_nObjTilePotential[y]+=(Uint16)counted; } y=(y+1)&0xFF; h--; }
 			}
 			iObj++; nObjs--;
 		}
@@ -574,7 +579,7 @@ void SnesPPURender::UpdateOBJVisibility(Uint8 *pObjY, Uint8 *pObjSize, Int32 iOb
 		while (nObjs>0)
 		{
 			Uint32 y,h; iObj&=0x7F; h=pObjSize[iObj]; y=pObjY[iObj];
-			if (selected[iObj]) while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; y++; h--; }
+			if (selected[iObj]) while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; y=(y+1)&0xFF; h--; }
 			iObj++; nObjs--;
 		}
 	}

@@ -3079,20 +3079,28 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
 
         assert(m_DMAC.GetMDMAEnable() == 0);
 
-        /* AURORA_SA1_INTERLEAVED_CHUNK_SCHEDULER_V7_2_20260903
-         * AURORA_SA1_SCHEDULER_V8_3_20260903
-         * WAI stops instruction issue, not physical time or the SA-1.
-         * V8.3 uses the conservative 128-master-clock public SA-1 quantum. */
-        if (m_SA1.IsActive() && (m_Cpu.uSignal & SNCPU_SIGNAL_WAI))
+        /* AURORA_V3_WAI_SCHEDULER_FIX
+         * 65C816 WAI stops instruction issue until IRQ/NMI releases it.
+         * Physical scheduler time still advances on every cartridge.
+         * If an SA-1 is active, it continues running in the existing bounded
+         * interleave quantum while the main S-CPU sleeps. */
+        if (m_Cpu.uSignal & SNCPU_SIGNAL_WAI)
         {
             Int32 nWait = m_Cpu.Cycles;
-            if (nWait > SNSA1::MAIN_INTERLEAVE_QUANTUM)
+
+            if (m_SA1.IsActive() &&
+                nWait > SNSA1::MAIN_INTERLEAVE_QUANTUM)
                 nWait = SNSA1::MAIN_INTERLEAVE_QUANTUM;
+
             if (nWait > 0)
             {
                 SNCPUConsumeCycles(&m_Cpu, nWait);
-                m_SA1.Run(nWait);
-                nSA1Synced += nWait;
+
+                if (m_SA1.IsActive())
+                {
+                    m_SA1.Run(nWait);
+                    nSA1Synced += nWait;
+                }
             }
             continue;
         }
