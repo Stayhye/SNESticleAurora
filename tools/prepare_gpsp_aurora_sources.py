@@ -337,14 +337,29 @@ def main():
         "             $(CORE_DIR)/serial.c \\\n",
         "             $(CORE_DIR)/serial.c \\\n             $(CORE_DIR)/aurora_tfa.c \\\n")
 
-    # Route TFA through Normal 8-bit external-clock SIO.  Aurora's frontend
+    # Route TFA through Normal 8-bit external-clock SIO. Aurora's frontend
     # keeps gpsp_serial=disabled, so no RFU/link-cable mode can steal it.
     ser = stage / "serial.c"
     patch_once(ser, '#include "common.h"\n',
                     '#include "common.h"\n#include "aurora_tfa.h"\n')
+
+    # AURORA_FDS_BUBBLE_TFA_TRANSPORT_V5_20260913_TFA_EXTERNAL_CLOCK
+    patch_once(
+        ser,
+        "static u32 serial_irq_cycles = 0;\n",
+        "static u32 serial_irq_cycles = 0;\n"
+        "/* AURORA_FDS_BUBBLE_TFA_TRANSPORT_V5_20260913_TFA_EXTERNAL_CLOCK */\n"
+        "static u8 aurora_tfa_pending_rx = 0xffU;\n"
+        "static bool aurora_tfa_pending_valid = false;\n",
+    )
+
     old = """  case SERIAL_MODE_NORMAL:\n    // For connected Wireless devices\n    if (serial_mode == SERIAL_MODE_RFU) {\n"""
-    new = """  case SERIAL_MODE_NORMAL:\n    /* AURORA_GPSP_GBA_V2_TFA_BLEND_20260911\n     * Turbo File Advance is an external-clock Normal 8-bit peripheral.\n     * A 256 kHz byte-time is used as a conservative completion delay; data\n     * exchange itself is byte-exact and the normal serial event clears START\n     * and raises the requested IRQ. */\n    if (aurora_tfa_active()) {\n      if ((newval & 0x0080) && !(newval & 0x0001) &&\n          !(newval & 0x1000) && !serial_irq_cycles) {\n        u8 in = aurora_tfa_transfer((u8)(read_ioreg(REG_SIODATA8) & 0xffU));\n        write_ioreg(REG_SIODATA8, (u16)in);\n        serial_irq_cycles = CLOCK_CYC_256KHZ_8BIT;\n      }\n    }\n    // For connected Wireless devices\n    else if (serial_mode == SERIAL_MODE_RFU) {\n"""
+    new = """  case SERIAL_MODE_NORMAL:\n    /* AURORA_FDS_BUBBLE_TFA_TRANSPORT_V5_20260913_TFA_EXTERNAL_CLOCK\n     * TFA supplies the clock in Normal 8-bit slave mode. Calculate the\n     * peripheral response now, but expose it only when the byte completes. */\n    if (aurora_tfa_active()) {\n      if ((newval & 0x0080) && !(newval & 0x0001) &&\n          !(newval & 0x1000) && !serial_irq_cycles) {\n        aurora_tfa_pending_rx =\n          aurora_tfa_transfer((u8)(read_ioreg(REG_SIODATA8) & 0xffU));\n        aurora_tfa_pending_valid = true;\n        serial_irq_cycles = CLOCK_CYC_256KHZ_8BIT;\n      }\n    }\n    // For connected Wireless devices\n    else if (serial_mode == SERIAL_MODE_RFU) {\n"""
     patch_once(ser, old, new)
+
+    old_complete = """    case SERIAL_MODE_NORMAL:\n      // Clear the send bit, signal data is ready.\n      // Set the device busy bit, to perform the weird SO/SI handshake.\n      write_ioreg(REG_SIOCNT, (read_ioreg(REG_SIOCNT) & ~0x80) | 0x04);\n      // Return if IRQs are enabled.\n      return read_ioreg(REG_SIOCNT) & 0x4000;\n"""
+    new_complete = """    case SERIAL_MODE_NORMAL:\n      if (aurora_tfa_active() && aurora_tfa_pending_valid) {\n        /* External-clock TFA completion: make RX visible now, clear START,\n         * and preserve SI instead of forcing gpSP's generic bit-2 state. */\n        write_ioreg(REG_SIODATA8, (u16)aurora_tfa_pending_rx);\n        aurora_tfa_pending_valid = false;\n        write_ioreg(REG_SIOCNT, read_ioreg(REG_SIOCNT) & ~0x0080);\n        return read_ioreg(REG_SIOCNT) & 0x4000;\n      }\n      write_ioreg(REG_SIOCNT, (read_ioreg(REG_SIOCNT) & ~0x80) | 0x04);\n      return read_ioreg(REG_SIOCNT) & 0x4000;\n"""
+    patch_once(ser, old_complete, new_complete)
 
     # gpSP's generic mix constant is for RGB565 (channel LSBs 11,5,0).
     # platform=ps2 uses XBGR1555 (10,5,0), so use 0x0421 there.
@@ -1525,7 +1540,7 @@ void render_scanline_objs(
     ss = ser.read_text(encoding="utf-8")
     v15_tfa_mark = "AURORA_GPSP_GBA_V15_TFA_EXTERNAL_CLOCK_20260912"
 
-    if v15_tfa_mark not in ss:
+    if v15_tfa_mark not in ss and "AURORA_FDS_BUBBLE_TFA_TRANSPORT_V5_20260913_TFA_EXTERNAL_CLOCK" not in ss:
         tfa_start_old = """      if ((newval & 0x0080) && !(newval & 0x0001) &&
           !(newval & 0x1000) && !serial_irq_cycles) {
         u8 in = aurora_tfa_transfer((u8)(read_ioreg(REG_SIODATA8) & 0xffU));

@@ -507,6 +507,271 @@ def patch_fds(text: str) -> str:
         "src/fds.c success trace",
     )
 
+    # AURORA_FDS_BUBBLE_TFA_TRANSPORT_V5_20260913_FDS_BLOCK_AWARE
+    # Port of FCEUX's block-aware FDS transfer model, historically needed by
+    # Bubble Bobble / Super Lode Runner II. Aurora's separate FCEUMKF_FDS save
+    # image remains authoritative; DiskWritten is set on every accepted write.
+    if "AURORA_FDS_BUBBLE_TFA_TRANSPORT_V5_20260913_FDS_BLOCK_AWARE" not in text:
+        text = replace_once(
+            text,
+            "static uint8 SelectDisk, InDisk;\n\n"
+            "uint32 lastDiskPtrRead, lastDiskPtrWrite;\n",
+            "static uint8 SelectDisk, InDisk;\n\n"
+            "/* AURORA_FDS_BUBBLE_TFA_TRANSPORT_V5_20260913_FDS_BLOCK_AWARE */\n"
+            "enum AuroraFDSBlockID {\n"
+            "\tAURORA_FDS_INIT = 0,\n"
+            "\tAURORA_FDS_VOLUME,\n"
+            "\tAURORA_FDS_FILECNT,\n"
+            "\tAURORA_FDS_FILEHDR,\n"
+            "\tAURORA_FDS_FILEDATA\n"
+            "};\n"
+            "static uint8 mapperFDS_control;\n"
+            "static uint16 mapperFDS_filesize;\n"
+            "static uint8 mapperFDS_block;\n"
+            "static uint16 mapperFDS_blockstart;\n"
+            "static uint16 mapperFDS_blocklen;\n"
+            "static uint16 mapperFDS_diskaddr;\n"
+            "static uint8 mapperFDS_diskaccess;\n\n"
+            "uint32 lastDiskPtrRead, lastDiskPtrWrite;\n",
+            "src/fds.c block-aware state",
+        )
+
+        text = replace_once(
+            text,
+            "\tFDSSoundReset();\n"
+            "\tInDisk = 0;\n"
+            "\tSelectDisk = 0;\n"
+            "}\n",
+            "\tFDSSoundReset();\n"
+            "\tInDisk = 0;\n"
+            "\tSelectDisk = 0;\n"
+            "\tmapperFDS_control = 0;\n"
+            "\tmapperFDS_filesize = 0;\n"
+            "\tmapperFDS_block = AURORA_FDS_INIT;\n"
+            "\tmapperFDS_blockstart = 0;\n"
+            "\tmapperFDS_blocklen = 0;\n"
+            "\tmapperFDS_diskaddr = 0;\n"
+            "\tmapperFDS_diskaccess = 0;\n"
+            "}\n",
+            "src/fds.c block-aware reset",
+        )
+
+        old_4031 = '''static DECLFR(FDSRead4031) {
+\tstatic uint8 z = 0;
+\tif (InDisk != 255) {
+\t\tz = diskdata[InDisk][DiskPtr];
+\t\tlastDiskPtrRead = DiskPtr;
+\t\t#ifdef FCEUDEF_DEBUGGER
+\t\tif (!fceuindbg)
+\t\t#endif
+\t\t{
+\t\t\tif (DiskPtr < 64999) DiskPtr++;
+\t\t\tDiskSeekIRQ = 150;
+\t\t\tX6502_IRQEnd(FCEU_IQEXT2);
+\t\t}
+\t}
+\treturn z;
+}
+'''
+        new_4031 = '''static DECLFR(FDSRead4031) {
+\tuint8 ret = 0xff;
+\tuint32 pos;
+
+\tif (InDisk != 255 && (mapperFDS_control & 0x04)) {
+\t\tmapperFDS_diskaccess = 1;
+\t\tret = 0;
+\t\tpos = (uint32)mapperFDS_blockstart + (uint32)mapperFDS_diskaddr;
+\t\tif (mapperFDS_diskaddr < mapperFDS_blocklen && pos < 65500U) {
+\t\t\tret = diskdata[InDisk][pos];
+\t\t\tlastDiskPtrRead = pos;
+\t\t\tif (mapperFDS_block == AURORA_FDS_FILEHDR) {
+\t\t\t\tif (mapperFDS_diskaddr == 13)
+\t\t\t\t\tmapperFDS_filesize = ret;
+\t\t\t\telse if (mapperFDS_diskaddr == 14)
+\t\t\t\t\tmapperFDS_filesize |= (uint16)ret << 8;
+\t\t\t}
+\t\t\tmapperFDS_diskaddr++;
+\t\t}
+\t\tDiskSeekIRQ = 150;
+\t\tX6502_IRQEnd(FCEU_IQEXT2);
+\t}
+\treturn ret;
+}
+'''
+        text = replace_once(text, old_4031, new_4031,
+                            "src/fds.c block-aware $4031 read")
+
+        text = replace_once(
+            text,
+            "static DECLFR(FDSRead4030) {\n"
+            "\tuint8 ret = 0;\n\n"
+            "\t/* Cheap hack. */\n",
+            "static DECLFR(FDSRead4030) {\n"
+            "\tuint8 ret = 0;\n"
+            "\tret |= mapperFDS_control & 0x08;\n\n"
+            "\t/* Cheap hack. */\n",
+            "src/fds.c $4030 mirror/control read",
+        )
+
+        old_write = '''static DECLFW(FDSWrite) {
+\tswitch (A) {
+\tcase 0x4020:
+\t\tX6502_IRQEnd(FCEU_IQEXT);
+\t\tIRQLatch &= 0xFF00;
+\t\tIRQLatch |= V;
+\t\tbreak;
+\tcase 0x4021:
+\t\tX6502_IRQEnd(FCEU_IQEXT);
+\t\tIRQLatch &= 0xFF;
+\t\tIRQLatch |= V << 8;
+\t\tbreak;
+\tcase 0x4022:
+\t\tX6502_IRQEnd(FCEU_IQEXT);
+\t\tIRQCount = IRQLatch;
+\t\tIRQa = V & 3;
+\t\tbreak;
+\tcase 0x4024:
+\t\tif ((InDisk != 255) && !(FDSRegs[5] & 0x4) && (FDSRegs[3] & 0x1)) {
+\t\t\tif (DiskPtr >= 0 && DiskPtr < 65500) {
+\t\t\t\tif (writeskip)
+\t\t\t\t\twriteskip--;
+\t\t\t\telse if (DiskPtr >= 2) {
+\t\t\t\t\tDiskWritten = 1;
+\t\t\t\t\tdiskdata[InDisk][DiskPtr - 2] = V;
+\t\t\t\t\tlastDiskPtrWrite = DiskPtr - 2;
+\t\t\t\t}
+\t\t\t}
+\t\t}
+\t\tbreak;
+\tcase 0x4025:
+\t\tX6502_IRQEnd(FCEU_IQEXT2);
+\t\tif (InDisk != 255) {
+\t\t\tif (!(V & 0x40)) {
+\t\t\t\tif ((FDSRegs[5] & 0x40) && !(V & 0x10)) {
+\t\t\t\t\tDiskSeekIRQ = 200;
+\t\t\t\t\tDiskPtr -= 2;
+\t\t\t\t}
+\t\t\t\tif (DiskPtr < 0) DiskPtr = 0;
+\t\t\t}
+\t\t\tif (!(V & 0x4)) writeskip = 2;
+\t\t\tif (V & 2) {
+\t\t\t\tDiskPtr = 0; DiskSeekIRQ = 200;
+\t\t\t}
+\t\t\tif (V & 0x40) DiskSeekIRQ = 200;
+\t\t}
+\t\tsetmirror(((V >> 3) & 1) ^ 1);
+\t\tbreak;
+\t}
+\tFDSRegs[A & 7] = V;
+}
+'''
+        new_write = '''static DECLFW(FDSWrite) {
+\tswitch (A) {
+\tcase 0x4020:
+\t\tX6502_IRQEnd(FCEU_IQEXT);
+\t\tIRQLatch &= 0xFF00;
+\t\tIRQLatch |= V;
+\t\tbreak;
+\tcase 0x4021:
+\t\tX6502_IRQEnd(FCEU_IQEXT);
+\t\tIRQLatch &= 0xFF;
+\t\tIRQLatch |= V << 8;
+\t\tbreak;
+\tcase 0x4022:
+\t\tX6502_IRQEnd(FCEU_IQEXT);
+\t\tIRQCount = IRQLatch;
+\t\tIRQa = V & 3;
+\t\tbreak;
+\tcase 0x4023:
+\t\tbreak;
+\tcase 0x4024:
+\t\tif (InDisk != 255 && !(mapperFDS_control & 0x04)) {
+\t\t\tuint32 pos;
+\t\t\tif (!mapperFDS_diskaccess) {
+\t\t\t\tmapperFDS_diskaccess = 1;
+\t\t\t\tbreak;
+\t\t\t}
+\t\t\tpos = (uint32)mapperFDS_blockstart + (uint32)mapperFDS_diskaddr;
+\t\t\tif (mapperFDS_diskaddr < mapperFDS_blocklen && pos < 65500U) {
+\t\t\t\tdiskdata[InDisk][pos] = V;
+\t\t\t\tDiskWritten = 1;
+\t\t\t\tlastDiskPtrWrite = pos;
+\t\t\t\tif (mapperFDS_block == AURORA_FDS_FILEHDR) {
+\t\t\t\t\tif (mapperFDS_diskaddr == 13)
+\t\t\t\t\t\tmapperFDS_filesize = V;
+\t\t\t\t\telse if (mapperFDS_diskaddr == 14)
+\t\t\t\t\t\tmapperFDS_filesize |= (uint16)V << 8;
+\t\t\t\t}
+\t\t\t\tmapperFDS_diskaddr++;
+\t\t\t}
+\t\t}
+\t\tbreak;
+\tcase 0x4025:
+\t\tX6502_IRQEnd(FCEU_IQEXT2);
+\t\tif (InDisk != 255) {
+\t\t\tif ((V & 0x40) && !(mapperFDS_control & 0x40)) {
+\t\t\t\tmapperFDS_diskaccess = 0;
+\t\t\t\tDiskSeekIRQ = 150;
+\t\t\t\tmapperFDS_blockstart = (uint16)(mapperFDS_blockstart + mapperFDS_diskaddr);
+\t\t\t\tmapperFDS_diskaddr = 0;
+\t\t\t\tmapperFDS_block++;
+\t\t\t\tif (mapperFDS_block > AURORA_FDS_FILEDATA)
+\t\t\t\t\tmapperFDS_block = AURORA_FDS_FILEHDR;
+\t\t\t\tswitch (mapperFDS_block) {
+\t\t\t\tcase AURORA_FDS_VOLUME:
+\t\t\t\t\tmapperFDS_blocklen = 0x38;
+\t\t\t\t\tbreak;
+\t\t\t\tcase AURORA_FDS_FILECNT:
+\t\t\t\t\tmapperFDS_blocklen = 0x02;
+\t\t\t\t\tbreak;
+\t\t\t\tcase AURORA_FDS_FILEHDR:
+\t\t\t\t\tmapperFDS_blocklen = 0x10;
+\t\t\t\t\tmapperFDS_filesize = 0;
+\t\t\t\t\tbreak;
+\t\t\t\tcase AURORA_FDS_FILEDATA:
+\t\t\t\t\tmapperFDS_blocklen = (uint16)(1U + mapperFDS_filesize);
+\t\t\t\t\tbreak;
+\t\t\t\tdefault:
+\t\t\t\t\tmapperFDS_blocklen = 0;
+\t\t\t\t\tbreak;
+\t\t\t\t}
+\t\t\t}
+\t\t\tif (V & 0x02) {
+\t\t\t\tmapperFDS_block = AURORA_FDS_INIT;
+\t\t\t\tmapperFDS_blockstart = 0;
+\t\t\t\tmapperFDS_blocklen = 0;
+\t\t\t\tmapperFDS_diskaddr = 0;
+\t\t\t\tmapperFDS_filesize = 0;
+\t\t\t\tmapperFDS_diskaccess = 0;
+\t\t\t\tDiskSeekIRQ = 150;
+\t\t\t}
+\t\t\tif (V & 0x40)
+\t\t\t\tDiskSeekIRQ = 150;
+\t\t}
+\t\tmapperFDS_control = V;
+\t\tsetmirror(((V >> 3) & 1) ^ 1);
+\t\tbreak;
+\t}
+\tFDSRegs[A & 7] = V;
+}
+'''
+        text = replace_once(text, old_write, new_write,
+                            "src/fds.c block-aware $4024/$4025")
+
+        text = replace_once(
+            text,
+            "\tAddExState(&DiskWritten, 1, 0, \"DSKW\");\n",
+            "\tAddExState(&DiskWritten, 1, 0, \"DSKW\");\n"
+            "\tAddExState(&mapperFDS_control, 1, 0, \"CTRG\");\n"
+            "\tAddExState(&mapperFDS_filesize, 2, 1, \"FLSZ\");\n"
+            "\tAddExState(&mapperFDS_block, 1, 0, \"BLCK\");\n"
+            "\tAddExState(&mapperFDS_blockstart, 2, 1, \"BLKS\");\n"
+            "\tAddExState(&mapperFDS_blocklen, 2, 1, \"BLKL\");\n"
+            "\tAddExState(&mapperFDS_diskaddr, 2, 1, \"DADR\");\n"
+            "\tAddExState(&mapperFDS_diskaccess, 1, 0, \"DACC\");\n",
+            "src/fds.c block-aware savestate",
+        )
+
     # FDSClose leaked all FDS allocations if DiskWritten == 0.
     start = text.index("void FDSClose(void) {\n")
     end = len(text)
