@@ -123,7 +123,7 @@ jobs:
           set -euo pipefail
           {
             (cd build && sha256sum SNESticle.elf)
-            (cd /tmp && sha256sum "$AURORA_SOURCE_NAME")
+            (cd /tmp && sha256sum "$AURORA_SOURCE_NAME") 
           } > /tmp/SHA256SUMS.txt
 
       - name: Continuous release
