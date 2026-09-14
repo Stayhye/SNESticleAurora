@@ -12,7 +12,9 @@ import re
 import shutil
 from pathlib import Path
 
-VERSION = "AURORA_GPSP_GBA_V13_SAFE_PERF_20260911_STAGE_1"  # AURORA_GPSP_GBA_V13_SAFE_PERF_20260911
+# AURORA_TFA_RESYNC_R2_TURBO_OR_V1_20260913
+
+VERSION = "AURORA_TFA_RESYNC_R2_TURBO_OR_V1_20260913_GPSP_STAGE"
 
 TFA_H = r'''#ifndef AURORA_TFA_H
 #define AURORA_TFA_H
@@ -24,6 +26,7 @@ TFA_H = r'''#ifndef AURORA_TFA_H
 
 void aurora_tfa_set_storage(u8 *data, u32 bytes);
 void aurora_tfa_reset_protocol(void);
+void aurora_tfa_transport_reset(void); /* AURORA_TFA_TRANSPORT_RESET_V1 */
 bool aurora_tfa_active(void);
 u8 aurora_tfa_transfer(u8 out);
 bool aurora_tfa_dirty(void);
@@ -67,6 +70,9 @@ static u32 tfa_out_pos = 0;
 
 void aurora_tfa_reset_protocol(void)
 {
+  /* AURORA_TFA_TRANSPORT_RESET_V1
+   * FSM e scheduler serial formam um único dispositivo lógico. */
+  aurora_tfa_transport_reset();
   tfa_state = TFA_WAIT_SYNC;
   tfa_counter = 0;
   tfa_command = 0;
@@ -103,7 +109,7 @@ static u32 tfa_body_final_counter(u8 command)
     case 0x10: return 2U;  /* 5A cmd checksum */
     case 0x20: return 3U;  /* 5A cmd param checksum */
     case 0x22:
-    case 0x23: return 4U;  /* 5A cmd bankHi bankLo checksum */
+    case 0x23: return 4U;  /* AURORA_TFA_PROTOCOL_FIX_V3_20260913: bankHi bankLo checksum */
     case 0x24: return 2U;
     case 0x30: return 68U; /* 5A cmd offHi offLo + 64 data + checksum */
     case 0x34: return 5U;  /* TFA: offHi offLo fill + checksum */
@@ -224,11 +230,33 @@ static void tfa_process_command(void)
   }
 }
 
+static u8 tfa_begin_sync(void)
+{
+  /* AURORA_TFA_COMMAND_RESYNC_V1
+   * Reinicia somente a transação incompleta. Banco/status persistem. */
+  tfa_state = TFA_PACKET_BODY;
+  tfa_counter = 0;
+  tfa_command = 0;
+  tfa_sync1 = false;
+  tfa_sync2 = false;
+  tfa_out_length = 0;
+  tfa_out_pos = 0;
+  memset(tfa_packet, 0, sizeof(tfa_packet));
+  memset(tfa_out, 0, sizeof(tfa_out));
+  return 0xc6U;
+}
+
 u8 aurora_tfa_transfer(u8 out)
 {
   u8 in = 0x00;
   if (!aurora_tfa_active())
     return 0xffU;
+
+  /* AURORA_TFA_COMMAND_RESYNC_V1
+   * 0x6C pode reiniciar recepção/packet-end após retry do jogo.
+   * Não roube 0x6C enquanto uma resposta já construída é lida. */
+  if (out == 0x6cU && tfa_state != TFA_DATA_RESPONSE)
+    return tfa_begin_sync();
 
   switch (tfa_state) {
     case TFA_WAIT_SYNC:
@@ -259,9 +287,10 @@ u8 aurora_tfa_transfer(u8 out)
       if (out == 0xf1U) {
         in = 0xe7U;
         tfa_sync1 = true;
-      } else if (out == 0x7eU) {
+      } else if (out == 0x7eU && tfa_sync1) {
+        /* AURORA_TFA_PROTOCOL_FIX_V3_20260913: ignore stray 0x7E until the required 0xF1 arrived. */
         in = 0xa5U;
-        if (tfa_sync1) tfa_sync2 = true;
+        tfa_sync2 = true;
       }
       if (tfa_sync1 && tfa_sync2) {
         tfa_state = TFA_DATA_RESPONSE;
@@ -316,7 +345,7 @@ def main():
         raise SystemExit(f"invalid gpSP source tree: {src}")
 
     digest = tree_hash(src, me)
-    stamp = stage / ".aurora-gpsp-stage-v13"
+    stamp = stage / ".aurora-gpsp-stage-v16"
     if stamp.is_file() and stamp.read_text().strip() == digest and \
        (stage / "aurora_tfa.c").is_file():
         print(f"[ gpSP stage ] up-to-date: {stage}")
@@ -336,14 +365,37 @@ def main():
         "             $(CORE_DIR)/serial.c \\\n",
         "             $(CORE_DIR)/serial.c \\\n             $(CORE_DIR)/aurora_tfa.c \\\n")
 
-    # Route TFA through Normal 8-bit external-clock SIO.  Aurora's frontend
+    # Route TFA through Normal 8-bit external-clock SIO. Aurora's frontend
     # keeps gpsp_serial=disabled, so no RFU/link-cable mode can steal it.
     ser = stage / "serial.c"
     patch_once(ser, '#include "common.h"\n',
                     '#include "common.h"\n#include "aurora_tfa.h"\n')
+
+    # AURORA_FDS_BUBBLE_TFA_TRANSPORT_V5_20260913_TFA_EXTERNAL_CLOCK
+    patch_once(
+        ser,
+        "static u32 serial_irq_cycles = 0;\n",
+        "static u32 serial_irq_cycles = 0;\n"
+        "/* AURORA_FDS_BUBBLE_TFA_TRANSPORT_V5_20260913_TFA_EXTERNAL_CLOCK */\n"
+        "static u8 aurora_tfa_pending_rx = 0xffU;\n"
+        "static bool aurora_tfa_pending_valid = false;\n"
+        "\n"
+        "void aurora_tfa_transport_reset(void)\n"
+        "{\n"
+        "  /* AURORA_TFA_TRANSPORT_RESET_V1 */\n"
+        "  serial_irq_cycles = 0;\n"
+        "  aurora_tfa_pending_rx = 0xffU;\n"
+        "  aurora_tfa_pending_valid = false;\n"
+        "}\n",
+    )
+
     old = """  case SERIAL_MODE_NORMAL:\n    // For connected Wireless devices\n    if (serial_mode == SERIAL_MODE_RFU) {\n"""
-    new = """  case SERIAL_MODE_NORMAL:\n    /* AURORA_GPSP_GBA_V2_TFA_BLEND_20260911\n     * Turbo File Advance is an external-clock Normal 8-bit peripheral.\n     * A 256 kHz byte-time is used as a conservative completion delay; data\n     * exchange itself is byte-exact and the normal serial event clears START\n     * and raises the requested IRQ. */\n    if (aurora_tfa_active()) {\n      if ((newval & 0x0080) && !(newval & 0x0001) &&\n          !(newval & 0x1000) && !serial_irq_cycles) {\n        u8 in = aurora_tfa_transfer((u8)(read_ioreg(REG_SIODATA8) & 0xffU));\n        write_ioreg(REG_SIODATA8, (u16)in);\n        serial_irq_cycles = CLOCK_CYC_256KHZ_8BIT;\n      }\n    }\n    // For connected Wireless devices\n    else if (serial_mode == SERIAL_MODE_RFU) {\n"""
+    new = """  case SERIAL_MODE_NORMAL:\n    /* AURORA_FDS_BUBBLE_TFA_TRANSPORT_V5_20260913_TFA_EXTERNAL_CLOCK\n     * TFA supplies the clock in Normal 8-bit slave mode. Calculate the\n     * peripheral response now, but expose it only when the byte completes. */\n    if (aurora_tfa_active()) {\n      if ((newval & 0x0080) && !(newval & 0x0001) &&\n          !(newval & 0x1000) && !serial_irq_cycles) {\n        aurora_tfa_pending_rx =\n          aurora_tfa_transfer((u8)(read_ioreg(REG_SIODATA8) & 0xffU));\n        aurora_tfa_pending_valid = true;\n        serial_irq_cycles = CLOCK_CYC_256KHZ_8BIT;\n      }\n    }\n    // For connected Wireless devices\n    else if (serial_mode == SERIAL_MODE_RFU) {\n"""
     patch_once(ser, old, new)
+
+    old_complete = """    case SERIAL_MODE_NORMAL:\n      // Clear the send bit, signal data is ready.\n      // Set the device busy bit, to perform the weird SO/SI handshake.\n      write_ioreg(REG_SIOCNT, (read_ioreg(REG_SIOCNT) & ~0x80) | 0x04);\n      // Return if IRQs are enabled.\n      return read_ioreg(REG_SIOCNT) & 0x4000;\n"""
+    new_complete = """    case SERIAL_MODE_NORMAL:\n      if (aurora_tfa_active() && aurora_tfa_pending_valid) {\n        /* External-clock TFA completion: make RX visible now, clear START,\n         * and preserve SI instead of forcing gpSP's generic bit-2 state. */\n        write_ioreg(REG_SIODATA8, (u16)aurora_tfa_pending_rx);\n        aurora_tfa_pending_valid = false;\n        write_ioreg(REG_SIOCNT, read_ioreg(REG_SIOCNT) & ~0x0080);\n        return read_ioreg(REG_SIOCNT) & 0x4000;\n      }\n      write_ioreg(REG_SIOCNT, (read_ioreg(REG_SIOCNT) & ~0x80) | 0x04);\n      return read_ioreg(REG_SIOCNT) & 0x4000;\n"""
+    patch_once(ser, old_complete, new_complete)
 
     # gpSP's generic mix constant is for RGB565 (channel LSBs 11,5,0).
     # platform=ps2 uses XBGR1555 (10,5,0), so use 0x0421 there.
@@ -392,17 +444,90 @@ def main():
 
     # AURORA_GPSP_GBA_V13_STAGE_SAFE_PERF_20260911
     # ROM_BUFFER_SIZE is a resident LRU cache, not a ROM-size limit. Keep
-    # 8 MiB on PS2 and let gpSP page larger carts in 32 KiB blocks from the
-    # still-open ROM file. This reserves heap for Aurora/video/TFA/states.
+    # 4 MiB on PS2 and let gpSP page larger carts in 32 KiB blocks from the
+    # still-open ROM file. The extra 4 MiB of headroom matters on the 32 MiB
+    # EE, especially for TFA titles and transition-heavy games.
     mfps2 = stage / "Makefile"
     ms = mfps2.read_text(encoding="utf-8")
     cache_old = "-DPS2 -DUSE_XBGR1555_FORMAT -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=16"
-    cache_new = "-DPS2 -DUSE_XBGR1555_FORMAT -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=8"
+    cache_new = "-DPS2 -DUSE_XBGR1555_FORMAT -DSMALL_TRANSLATION_CACHE -DROM_BUFFER_SIZE=4"
     if cache_new not in ms:
         if cache_old not in ms:
             raise SystemExit("gpSP PS2 ROM cache anchor missing")
         ms = ms.replace(cache_old, cache_new, 1)
         mfps2.write_text(ms, encoding="utf-8", newline="\n")
+
+    # AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_LAZY_ALLOC_STAGE
+    # gpSP's MIPS translation caches used to be emitted as permanent .bss in
+    # the final Aurora ELF. That reserves 2 MiB + 384 KiB even while MD/PCE
+    # are running. Enable gpSP's existing lazy MMAP_JIT_CACHE lifetime on PS2:
+    # allocate at retro_init(), release at retro_deinit(). Cache sizes and the
+    # dynarec itself stay unchanged while GBA is active.
+    ms = mfps2.read_text(encoding="utf-8")
+    mmap_old = ("\tHAVE_DYNAREC = 1\n"
+                "\tCPU_ARCH := mips\n"
+                "\tSTATIC_LINKING = 1\n")
+    mmap_new = ("\tHAVE_DYNAREC = 1\n"
+                "\tMMAP_JIT_CACHE = 1 # AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_LAZY_ALLOC_STAGE\n"
+                "\tCPU_ARCH := mips\n"
+                "\tSTATIC_LINKING = 1\n")
+    if mmap_new not in ms:
+        if mmap_old not in ms:
+            raise SystemExit("gpSP PS2 MMAP_JIT_CACHE anchor missing")
+        ms = ms.replace(mmap_old, mmap_new, 1)
+        mfps2.write_text(ms, encoding="utf-8", newline="\n")
+
+    mm = stage / "memmap.c"
+    mms = mm.read_text(encoding="utf-8")
+
+    # Upstream's dormant MIPS mmap branch has a stale third parameter in the
+    # validator declaration although _VALIDATE_BLOCK_FN supplies two. It was
+    # invisible while PS2 used static .bss; make it compile before enabling it.
+    sig_old = "bool validate_addr_section_mips(void *ptr, unsigned size, unsigned max_offset_mb) {"
+    sig_new = "bool validate_addr_section_mips(void *ptr, unsigned size) { /* AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_LAZY_ALLOC_STAGE */"
+    if sig_new not in mms:
+        if sig_old not in mms:
+            raise SystemExit("gpSP MIPS JIT validator anchor missing")
+        mms = mms.replace(sig_old, sig_new, 1)
+
+    ps2_backend_mark = "AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_LAZY_ALLOC_STAGE_PS2_ALLOC"
+    if ps2_backend_mark not in mms:
+        posix_anchor = "\n#else\n\n\t#include <sys/mman.h>\n"
+        ps2_backend = r'''
+#elif defined(PS2)
+
+    /* AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_LAZY_ALLOC_STAGE_PS2_ALLOC
+     * EE RAM is executable; cache coherency is handled by platform_cache_sync.
+     * Keep one 64-byte-aligned contiguous block so the existing gpSP split
+     * (ROM cache followed by RAM cache) remains unchanged. */
+    #include <malloc.h>
+    #include <stdlib.h>
+
+    void *map_jit_block(unsigned size) {
+        void *p = memalign(64, size);
+        if (!p)
+            return 0;
+        if (!_VALIDATE_BLOCK_FN(p, size)) {
+            free(p);
+            return 0;
+        }
+        return p;
+    }
+
+    void unmap_jit_block(void *bufptr, unsigned size) {
+        (void)size;
+        free(bufptr);
+    }
+
+#else
+
+	#include <sys/mman.h>
+'''
+        if mms.count(posix_anchor) != 1:
+            raise SystemExit("gpSP memmap POSIX backend anchor missing/ambiguous")
+        mms = mms.replace(posix_anchor, ps2_backend, 1)
+
+    mm.write_text(mms, encoding="utf-8", newline="\n")
 
     # AURORA_GPSP_GBA_V13_SHOULDER_TURBO_CORE_20260911
     # Aurora maps the two physical PS2 chords to private virtual L3/R3 signals.
@@ -509,11 +634,11 @@ def main():
     # Safe PS2 performance pass. These changes do not alter GBA timing,
     # serial/TFA semantics, save data, RTC or frame count.
 
-    # 1) Rebalance the fixed JIT caches. Upstream SMALL_TRANSLATION_CACHE gives
-    # PS2 only 2 MiB ROM + 384 KiB RAM translated code. Aurora simultaneously
-    # reduced gpSP's dynamic ROM page-cache ceiling by 8 MiB, so a conservative
-    # 4 MiB + 512 KiB JIT still leaves the integrated build below the V1/V2
-    # worst-case memory envelope while reducing full-cache flush/retranslation.
+    # 1) V21 memory recovery. These MIPS JIT buffers live in the linked ELF
+    # even while another emulator core is active. Keep PS2 at upstream SMALL:
+    # 2 MiB ROM + 384 KiB RAM. V13's 4 MiB + 512 KiB permanently consumed
+    # another 2176 KiB and matches the cross-core "not enough memory" regression.
+    # Prefer occasional gpSP JIT turnover over starving GBC/MD/PCE/CD loaders.
     cfg = stage / "gpsp_config.h"
     cs = cfg.read_text(encoding="utf-8")
     jit_old = ("#if defined(SMALL_TRANSLATION_CACHE)\n"
@@ -525,8 +650,8 @@ def main():
                "#endif")
     jit_new = ("/* AURORA_GPSP_GBA_V13_CORE_SAFE_PERF_20260911 */\n"
                "#if defined(PS2)\n"
-               "  #define ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 4)\n"
-               "  #define RAM_TRANSLATION_CACHE_SIZE (1024 * 512)\n"
+               "  #define ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 2)\n"
+               "  #define RAM_TRANSLATION_CACHE_SIZE (1024 * 384)\n"
                "#elif defined(SMALL_TRANSLATION_CACHE)\n"
                "  #define ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 2)\n"
                "  #define RAM_TRANSLATION_CACHE_SIZE (1024 * 384)\n"
@@ -540,10 +665,11 @@ def main():
         cs = cs.replace(jit_old, jit_new, 1)
         cfg.write_text(cs, encoding="utf-8", newline="\n")
 
-    # 2) gpSP's PS2 dynarec used FlushCache(0) for every newly emitted code
-    # range. PS2SDK exposes SyncDCache(start,end), so write back only the bytes
-    # that grew. Keep FlushCache(2) exactly as upstream: instruction-cache
-    # invalidation remains global, preserving the conservative JIT contract.
+    # 2) V21 dynarec correctness. The MIPS emitter can backpatch code that was
+    # emitted before the current [baseaddr,endptr) tail. A range-only D-cache
+    # writeback can therefore leave a modified older cache line dirty while the
+    # full I-cache invalidation exposes stale memory. Preserve upstream PS2's
+    # full D-cache writeback + full I-cache invalidate.
     cpu = stage / "cpu_threaded.c"
     cps = cpu.read_text(encoding="utf-8")
     sync_old = ("#elif defined(PS2)\n"
@@ -553,10 +679,11 @@ def main():
                 "  }")
     sync_new = ("#elif defined(PS2)\n"
                 "  void platform_cache_sync(void *baseaddr, void *endptr) {\n"
-                "    /* AURORA_GPSP_GBA_V13_CORE_SAFE_PERF_20260911 */\n"
-                "    if (baseaddr < endptr)\n"
-                "      SyncDCache(baseaddr, endptr); /* range D-cache writeback */\n"
-                "    FlushCache(2);                  /* keep full I-cache invalidate */\n"
+                "    /* AURORA_GPSP_GBA_V21_DYNAREC_FULL_CACHE_SYNC_20260912 */\n"
+                "    (void)baseaddr;\n"
+                "    (void)endptr;\n"
+                "    FlushCache(0);   /* full D-cache writeback */\n"
+                "    FlushCache(2);   /* full I-cache invalidate */\n"
                 "  }")
     if sync_new not in cps:
         if sync_old not in cps:
@@ -868,8 +995,1091 @@ def main():
                 head + arr + "};" + suffix)
         lut.write_text(luts, encoding="utf-8", newline="\n")
 
+
+    # AURORA_GPSP_GBA_V14_SPRITE_PERF_20260911
+    # Renderer-only optimization pass.  The cache is refreshed exclusively
+    # inside order_obj(), i.e. at the exact same OAM_UPDATED boundary gpSP
+    # already uses to rebuild per-scanline OBJ lists.  No GBA timing, sprite
+    # limits, window semantics, blending rules or dynarec behavior are changed.
+    vid = stage / "video.cc"
+    vs = vid.read_text(encoding="utf-8")
+    v14_mark = "AURORA_GPSP_GBA_V14_SPRITE_PERF_20260911"
+
+    def v14_replace(text, old, new, label, count=1):
+        if old not in text:
+            raise SystemExit("gpSP V14 anchor missing (%s)" % label)
+        return text.replace(old, new, count)
+
+    def v14_region(text, start_mark, end_mark, replacement, label):
+        a = text.find(start_mark)
+        if a < 0:
+            raise SystemExit("gpSP V14 region start missing (%s)" % label)
+        b = text.find(end_mark, a)
+        if b < 0:
+            raise SystemExit("gpSP V14 region end missing (%s)" % label)
+        if text.find(start_mark, a + len(start_mark)) >= 0:
+            raise SystemExit("gpSP V14 region start is not unique (%s)" % label)
+        return text[:a] + replacement + "\n\n" + text[b:]
+
+    if v14_mark not in vs:
+        # 1) Compact decoded-OBJ cache.  obj_w/obj_h remain the *base* GBA
+        # dimensions; affine double-size is still applied exactly where the
+        # original renderer applied it.  Affine matrix words live in OAM too,
+        # therefore the existing OAM_UPDATED contract also makes caching them
+        # safe (all CPU/DMA writes to OAM set that flag).
+        old = """typedef struct {
+  s32 obj_x, obj_y;
+  s32 obj_w, obj_h;
+  u32 attr1, attr2;
+  bool is_double;
+} t_sprite;
+"""
+        new = """typedef struct {
+  s16 obj_x, obj_y;
+  s16 aff_dx, aff_dy, aff_dmx, aff_dmy;
+  u16 attr0, attr1, attr2;
+  u8 obj_w, obj_h;
+} t_sprite;
+
+/* AURORA_GPSP_GBA_V14_SPRITE_PERF_20260911
+ * Decoded once whenever order_obj() observes OAM_UPDATED, then reused by
+ * every scanline.  20 bytes x 128 = 2.5 KiB, avoiding repeated endian swaps,
+ * shape/size table lookups, X sign-extension and affine-matrix loads. */
+static t_sprite obj_cache[128];
+"""
+        vs = v14_replace(vs, old, new, "compact OBJ cache type")
+
+        # Small hot-loop cleanup: make palette invariance explicit.  GCC often
+        # hoists this already, but doing it in source guarantees the sprite
+        # inner loops contain no repeated palette-base formation.
+        old = """  } else {
+    // Only 32 bits (8 pixels * 4 bits)
+    for (u32 i = start; i < end; i++, dest_ptr++) {
+      u32 selb = hflip ? (3-i/2) : i/2;
+      u32 seln = hflip ? ((i & 1) ^ 1) : (i & 1);
+      u8 pval = (tile_ptr[selb] >> (seln * 4)) & 0xF;
+      const u16 *subpal = &pal[palette];
+"""
+        new = """  } else {
+    // Only 32 bits (8 pixels * 4 bits)
+    const u16 *subpal = &pal[palette];
+    for (u32 i = start; i < end; i++, dest_ptr++) {
+      u32 selb = hflip ? (3-i/2) : i/2;
+      u32 seln = hflip ? ((i & 1) ^ 1) : (i & 1);
+      u8 pval = (tile_ptr[selb] >> (seln * 4)) & 0xF;
+"""
+        vs = v14_replace(vs, old, new, "partial OBJ tile subpalette")
+
+        old = """  } else {
+    u32 tilepix = eswap32(*(u32*)tile_ptr);
+    if (tilepix) {   // Can skip all pixels if the row is just transparent
+      for (u32 i = 0; i < 8; i++, dest_ptr++) {
+        u8 pval = (hflip ? (tilepix >> ((7-i)*4)) : (tilepix >> (i*4))) & 0xF;
+        const u16 *subpal = &pal[palette];
+"""
+        new = """  } else {
+    u32 tilepix = eswap32(*(u32*)tile_ptr);
+    const u16 *subpal = &pal[palette];
+    if (tilepix) {   // Can skip all pixels if the row is just transparent
+      for (u32 i = 0; i < 8; i++, dest_ptr++) {
+        u8 pval = (hflip ? (tilepix >> ((7-i)*4)) : (tilepix >> (i*4))) & 0xF;
+"""
+        vs = v14_replace(vs, old, new, "full OBJ tile subpalette")
+
+        old = """  u32 px_attr = px_comb | palette | 0x100;  // Combine flags + high palette bit
+
+  u8 pval = 0;
+  u32 mctr = 0;
+"""
+        new = """  u32 px_attr = px_comb | palette | 0x100;  // Combine flags + high palette bit
+  const u16 *subpal = &pal[palette];
+
+  u8 pval = 0;
+  u32 mctr = 0;
+"""
+        vs = v14_replace(vs, old, new, "mosaic OBJ subpalette", 1)
+        old = """    // Write the pixel value as required
+    const u16 *subpal = &pal[palette];
+    if (pval) {
+"""
+        new = """    // Write the pixel value as required
+    if (pval) {
+"""
+        vs = v14_replace(vs, old, new, "mosaic OBJ inner subpalette", 1)
+
+        # 2) Affine OBJ: preserve the full rotation path, but the dy==0
+        # specialization has a scanline-constant source Y.  Hoist Y tile-row
+        # address formation out of the pixel loop and consume affine values
+        # already decoded by order_obj().
+        affine_start = """template <typename stype, rendtype rdtype, bool mosaic, bool is8bpp, bool rotate>
+static void render_affine_object("""
+        affine_end = "// Renders a single sprite on the current scanline."
+        affine_new = r"""template <typename stype, rendtype rdtype, bool mosaic, bool is8bpp, bool rotate>
+static void render_affine_object(
+  const t_sprite *obji,
+  u32 start, u32 end, stype *dst_ptr, u32 mosv, u32 mosh,
+  u32 base_tile, u32 pxcomb, u16 palette, const u16 *palptr,
+  s32 vcount, bool obj1dmap
+) {
+  // Tile size in bytes for each mode
+  const u32 tile_bsize = is8bpp ? tile_size_8bpp : tile_size_4bpp;
+  const u32 tile_bwidth = is8bpp ? tile_width_8bpp : tile_width_4bpp;
+
+  // Affine parameters are decoded once from OAM by order_obj().
+  const s32 dx  = obji->aff_dx;
+  const s32 dy  = obji->aff_dy;
+  const s32 dmx = obji->aff_dmx;
+  const s32 dmy = obji->aff_dmy;
+  const bool is_double = (obji->attr0 & 0x0200) != 0;
+
+  // Object dimensions and boundaries
+  const u32 obj_dimw = obji->obj_w;
+  const u32 obj_dimh = obji->obj_h;
+  s32 middle_x = is_double ? obji->obj_w : (obji->obj_w / 2);
+  const s32 middle_y = is_double ? obji->obj_h : (obji->obj_h / 2);
+  const s32 obj_width  = is_double ? obji->obj_w * 2 : obji->obj_w;
+  const s32 obj_height = is_double ? obji->obj_h * 2 : obji->obj_h;
+
+  if (mosaic)
+    vcount -= vcount % mosv;
+  const s32 y_delta = vcount - (obji->obj_y + middle_y);
+
+  if (obji->obj_x < (signed)start)
+    middle_x -= (start - obji->obj_x);
+  s32 source_x = (obj_dimw << 7) + (y_delta * dmx) - (middle_x * dx);
+  s32 source_y = (obj_dimh << 7) + (y_delta * dmy) - (middle_x * dy);
+
+  // Retain upstream's early rejection.
+  if (!rotate && ((u32)(source_y >> 8)) >= (u32)obj_height)
+    return;
+
+  const u32 d_start = MAX((signed)start, obji->obj_x);
+  const u32 d_end   = MIN((signed)end,   obji->obj_x + obj_width);
+  u32 cnt = d_end - d_start;
+  dst_ptr += d_start;
+
+  const u32 tile_pitch = obj1dmap ? (obj_dimw / 8) * tile_bsize : 1024;
+  const u32 px_attr = pxcomb | palette | 0x100;
+
+  // In the no-rotation specialization source_y never changes.  The original
+  // loop therefore recomputed an identical tile-row term for every pixel.
+  u32 fixed_pixel_y = 0;
+  u32 fixed_y_tile_off = 0;
+  if (!rotate) {
+    fixed_pixel_y = (u32)(source_y >> 8);
+    // This is equivalent to the original per-pixel source bounds check:
+    // with dy==0 an out-of-range Y can never become valid later in the row.
+    if (fixed_pixel_y >= obj_dimh)
+      return;
+    fixed_y_tile_off =
+      ((fixed_pixel_y >> 3) * tile_pitch) +
+      ((fixed_pixel_y & 0x7) * tile_bwidth);
+  }
+
+  // Skip output pixels until their source position enters the sprite.
+  while (cnt) {
+    const u32 pixel_x = (u32)(source_x >> 8);
+    if (!rotate) {
+      if (pixel_x < obj_dimw)
+        break;
+    } else {
+      const u32 pixel_y = (u32)(source_y >> 8);
+      if (pixel_x < obj_dimw && pixel_y < obj_dimh)
+        break;
+    }
+
+    dst_ptr++;
+    source_x += dx;
+    if (rotate)
+      source_y += dy;
+    cnt--;
+  }
+
+  u8 pixval = 0;
+  u32 mctr = 0;
+  for (u32 i = 0; i < cnt; i++) {
+    const u32 pixel_x = (u32)(source_x >> 8);
+    const u32 pixel_y = rotate ? (u32)(source_y >> 8) : fixed_pixel_y;
+
+    if (pixel_x >= obj_dimw || (rotate && pixel_y >= obj_dimh))
+      return;
+
+    if (!mosaic || !mctr) {
+      const u32 y_tile_off = rotate
+        ? ((pixel_y >> 3) * tile_pitch) + ((pixel_y & 0x7) * tile_bwidth)
+        : fixed_y_tile_off;
+
+      if (is8bpp) {
+        const u32 tile_off =
+          base_tile +
+          y_tile_off +
+          ((pixel_x >> 3) * tile_bsize) +
+          (pixel_x & 0x7);
+
+        pixval = vram[0x10000 + (tile_off & 0x7FFF)];
+      } else {
+        const u32 tile_off =
+          base_tile +
+          y_tile_off +
+          ((pixel_x >> 3) * tile_bsize) +
+          ((pixel_x >> 1) & 0x3);
+
+        const u8 pixpair = vram[0x10000 + (tile_off & 0x7FFF)];
+        pixval = (pixel_x & 1) ? (pixpair >> 4) : (pixpair & 0xF);
+      }
+      mctr = mosh;
+    }
+    if (mosaic)
+      mctr--;
+
+    if (pixval) {
+      if (rdtype == FULLCOLOR)
+        *dst_ptr = palptr[pixval | palette];
+      else if (rdtype == INDXCOLOR)
+        *dst_ptr = pixval | px_attr;
+      else if (rdtype == STCKCOLOR) {
+        if (*dst_ptr & 0x100)
+          *dst_ptr = pixval | px_attr | ((*dst_ptr) & 0xFFFF0000);
+        else
+          *dst_ptr = pixval | px_attr | ((*dst_ptr) << 16);
+      }
+      else if (rdtype == PIXCOPY)
+        *dst_ptr = dst_ptr[240];
+    }
+
+    dst_ptr++;
+    source_x += dx;
+    if (rotate)
+      source_y += dy;
+  }
+}"""
+        vs = v14_region(vs, affine_start, affine_end, affine_new, "affine OBJ renderer")
+
+        # 3) Sprite dispatcher: VCOUNT, DISPCNT OBJ mapping and MOSAIC are
+        # scanline invariants.  Receive them from render_scanline_objs instead
+        # of rereading global ioreg state once (or more) for every object.
+        sprite_start = """template <typename stype, rendtype rdtype, bool is8bpp, bool mosaic>
+inline static void render_sprite("""
+        sprite_end = "// Renders objects on a scanline for a given priority."
+        sprite_new = r"""template <typename stype, rendtype rdtype, bool is8bpp, bool mosaic>
+inline static void render_sprite(
+  const t_sprite *obji, u32 start, u32 end, stype *scanline,
+  u32 pxcomb, const u16* palptr, s32 vcount, bool obj1dmap, u32 mosaic_reg
+) {
+  const bool is_affine = (obji->attr0 & 0x0100) != 0;
+  const u32 msk = is8bpp && !obj1dmap ? 0x3FE : 0x3FF;
+  const u32 base_tile = (obji->attr2 & msk) * 32;
+
+  const u32 mosv = (mosaic ? (mosaic_reg >> 12) & 0xF : 0) + 1;
+  const u32 mosh = (mosaic ? (mosaic_reg >>  8) & 0xF : 0) + 1;
+
+  // Objects use the higher palette part in 4bpp mode.
+  const u16 pal = is8bpp ? 0 : ((obji->attr2 >> 8) & 0xF0);
+
+  if (is_affine) {
+    if (obji->aff_dy == 0)
+      render_affine_object<stype, rdtype, mosaic, is8bpp, false>(
+        obji, start, end, scanline, mosv, mosh,
+        base_tile, pxcomb, pal, palptr, vcount, obj1dmap);
+    else
+      render_affine_object<stype, rdtype, mosaic, is8bpp, true>(
+        obji, start, end, scanline, mosv, mosh,
+        base_tile, pxcomb, pal, palptr, vcount, obj1dmap);
+  } else {
+    if (obji->obj_x >= (signed)end || obji->obj_x + obji->obj_w <= (signed)start)
+      return;
+
+    const bool hflip = (obji->attr1 & 0x1000) != 0;
+    const bool vflip = (obji->attr1 & 0x2000) != 0;
+
+    u32 voffset = vflip ? obji->obj_y + obji->obj_h - vcount - 1
+                        : vcount - obji->obj_y;
+    if (mosaic)
+      voffset -= voffset % mosv;
+
+    const u32 tile_bsize  = is8bpp ? tile_size_8bpp : tile_size_4bpp;
+    const u32 tile_bwidth = is8bpp ? tile_width_8bpp : tile_width_4bpp;
+    const u32 obj_pitch = obj1dmap ? (obji->obj_w / 8) * tile_bsize : 1024;
+    const u32 hflip_off = hflip ? ((obji->obj_w / 8) - 1) * tile_bsize : 0;
+
+    const u32 tile_offset =
+      base_tile +
+      (voffset / 8) * obj_pitch +
+      (voffset % 8) * tile_bwidth +
+      hflip_off;
+
+    const s32 obj_x_offset = obji->obj_x - (s32)start;
+    const u32 clipped_width =
+      obj_x_offset >= 0 ? obji->obj_w : obji->obj_w + obj_x_offset;
+    const u32 max_range =
+      obj_x_offset >= 0 ? end - obji->obj_x : end - start;
+    const u32 max_draw = MIN(max_range, clipped_width);
+
+    if (mosaic && mosh > 1) {
+      if (hflip)
+        render_object_mosaic<stype, rdtype, is8bpp, true>(
+          obj_x_offset, max_draw, &scanline[start], tile_offset,
+          mosh, pxcomb, pal, palptr);
+      else
+        render_object_mosaic<stype, rdtype, is8bpp, false>(
+          obj_x_offset, max_draw, &scanline[start], tile_offset,
+          mosh, pxcomb, pal, palptr);
+    } else {
+      if (hflip)
+        render_object<stype, rdtype, is8bpp, true>(
+          obj_x_offset, max_draw, &scanline[start], tile_offset,
+          pxcomb, pal, palptr);
+      else
+        render_object<stype, rdtype, is8bpp, false>(
+          obj_x_offset, max_draw, &scanline[start], tile_offset,
+          pxcomb, pal, palptr);
+    }
+  }
+}"""
+        vs = v14_region(vs, sprite_start, sprite_end, sprite_new, "OBJ dispatcher")
+
+        # 4) Per-priority scanline pass: consume decoded OBJ metadata directly.
+        # color_flags(4), MOSAIC, OBJ mapping and WINOUT do not change while
+        # update_scanline() is executing, so read once per pass rather than per
+        # sprite.  Window segmentation is deliberately left untouched.
+        scan_start = """template <typename stype, rendtype rdtype>
+void render_scanline_objs("""
+        scan_end = "// Goes through the object list in the OAM"
+        scan_new = r"""template <typename stype, rendtype rdtype>
+void render_scanline_objs(
+  u32 priority, u32 start, u32 end, void *raw_ptr, const u16* palptr
+) {
+  stype *scanline = (stype*)raw_ptr;
+  const s32 vcount = read_ioreg(REG_VCOUNT);
+  const u32 obj_color_flags = color_flags(4);
+  const u32 mosaic_reg = read_ioreg(REG_MOSAIC);
+  const bool obj1dmap = (read_ioreg(REG_DISPCNT) & 0x40) != 0;
+  const u32 obj_enable =
+    (rdtype == PIXCOPY) ? (read_ioreg(REG_WINOUT) >> 8) : 0;
+
+  const u32 objcnt = obj_priority_count[priority][vcount];
+  const u8 *objlist = obj_priority_list[priority][vcount];
+
+  // Render all visible objects for this priority, back to front.
+  for (s32 objn = (s32)objcnt - 1; objn >= 0; objn--) {
+    const u32 objoff = objlist[objn];
+    const t_sprite *obji = &obj_cache[objoff];
+    const u16 obj_attr0 = obji->attr0;
+    const bool is_affine = (obj_attr0 & 0x0100) != 0;
+    const bool is_trans =
+      ((obj_attr0 >> 10) & 0x3) == OBJ_MOD_SEMITRAN;
+    const bool is_double = (obj_attr0 & 0x0200) != 0;
+
+    const s32 obj_maxw =
+      (is_affine && is_double) ? obji->obj_w * 2 : obji->obj_w;
+
+    if (obji->obj_x >= (signed)end ||
+        obji->obj_x + obj_maxw <= (signed)start)
+      continue;
+
+    const bool forcebld = is_trans && rdtype != FULLCOLOR;
+
+    if (rdtype == PIXCOPY) {
+      const u32 sec_start = MAX((signed)start, obji->obj_x);
+      const u32 sec_end   = MIN((signed)end, obji->obj_x + obj_maxw);
+      u16 *tmp_ptr = (u16*)&scanline[GBA_SCREEN_PITCH];
+      render_scanline_conditional(sec_start, sec_end, tmp_ptr, obj_enable);
+    }
+
+    const u32 pxcomb = (forcebld ? 0x800 : 0) | obj_color_flags;
+    const bool emosaic = (obj_attr0 & 0x1000) != 0;
+    const bool is_8bpp = (obj_attr0 & 0x2000) != 0;
+    const bool mosaic_active = emosaic && (mosaic_reg & 0xFF00);
+
+    if (mosaic_active) {
+      if (is_8bpp)
+        render_sprite<stype, rdtype, true, true>(
+          obji, start, end, scanline, pxcomb, palptr,
+          vcount, obj1dmap, mosaic_reg);
+      else
+        render_sprite<stype, rdtype, false, true>(
+          obji, start, end, scanline, pxcomb, palptr,
+          vcount, obj1dmap, mosaic_reg);
+    } else {
+      if (is_8bpp)
+        render_sprite<stype, rdtype, true, false>(
+          obji, start, end, scanline, pxcomb, palptr,
+          vcount, obj1dmap, mosaic_reg);
+      else
+        render_sprite<stype, rdtype, false, false>(
+          obji, start, end, scanline, pxcomb, palptr,
+          vcount, obj1dmap, mosaic_reg);
+    }
+  }
+}"""
+        vs = v14_region(vs, scan_start, scan_end, scan_new, "OBJ scanline pass")
+
+        # 5) order_obj remains the sole invalidation/rebuild point, but now it
+        # stores the already-decoded values it was computing anyway.  The
+        # hardware cycle-limit logic and row lists are intentionally byte-for-
+        # byte equivalent in structure to upstream.
+        order_start = "static void order_obj(u32 video_mode)\n"
+        order_end = "u32 layer_order[16];"
+        order_new = r"""static void order_obj(u32 video_mode)
+{
+  u32 obj_num;
+  u32 row;
+  t_oam *oam_base = (t_oam*)oam_ram;
+  u16 rend_cycles[160];
+
+  const bool hblank_free = read_ioreg(REG_DISPCNT) & 0x20;
+  const u16 max_rend_cycles = !sprite_limit ? REND_CYC_MAX :
+                               hblank_free  ? REND_CYC_REDUCED :
+                                              REND_CYC_SCANLINE;
+
+  memset(obj_priority_count, 0, sizeof(obj_priority_count));
+  memset(obj_alpha_count, 0, sizeof(obj_alpha_count));
+  memset(rend_cycles, 0, sizeof(rend_cycles));
+
+  for (obj_num = 0; obj_num < 128; obj_num++)
+  {
+    t_oam *oam_ptr = &oam_base[obj_num];
+    const u16 obj_attr0 = eswap16(oam_ptr->attr0);
+
+    // Bit 9 disables regular sprites (that is, non-affine ones).
+    if ((obj_attr0 & 0x0300) == 0x0200)
+      continue;
+
+    const u16 obj_shape = obj_attr0 >> 14;
+    const u32 obj_mode = (obj_attr0 >> 10) & 0x03;
+
+    if ((obj_shape == 0x3) || (obj_mode == OBJ_MOD_INVALID))
+      continue;
+
+    const u16 obj_attr2 = eswap16(oam_ptr->attr2);
+
+    // On bitmap modes, objs 0-511 are not usable.
+    if ((video_mode >= 3) && (!(obj_attr2 & 0x200)))
+      continue;
+
+    const u16 obj_attr1 = eswap16(oam_ptr->attr1);
+    const u16 obj_size = obj_attr1 >> 14;
+    const s32 obj_base_height = obj_dim_table[obj_shape][obj_size][1];
+    const s32 obj_base_width  = obj_dim_table[obj_shape][obj_size][0];
+    s32 obj_height = obj_base_height;
+    s32 obj_width  = obj_base_width;
+    s32 obj_y = obj_attr0 & 0xFF;
+
+    if (obj_y > 160)
+      obj_y -= 256;
+
+    if (obj_attr0 & 0x0200)
+    {
+      obj_height *= 2;
+      obj_width *= 2;
+    }
+
+    if (((obj_y + obj_height) > 0) && (obj_y < 160))
+    {
+      const s32 obj_x = (s32)(obj_attr1 << 23) >> 23;
+
+      if (((obj_x + obj_width) > 0) && (obj_x < 240))
+      {
+        const bool is_affine = (obj_attr0 & 0x0100) != 0;
+        t_sprite *cached = &obj_cache[obj_num];
+
+        cached->obj_x = (s16)obj_x;
+        cached->obj_y = (s16)obj_y;
+        cached->obj_w = (u8)obj_base_width;
+        cached->obj_h = (u8)obj_base_height;
+        cached->attr0 = obj_attr0;
+        cached->attr1 = obj_attr1;
+        cached->attr2 = obj_attr2;
+
+        if (is_affine) {
+          const u32 pnum = (obj_attr1 >> 9) & 0x1F;
+          const t_affp *affp_base = (const t_affp*)oam_ram;
+          const t_affp *affp = &affp_base[pnum];
+          cached->aff_dx  = (s16)eswap16(affp->dx);
+          cached->aff_dmx = (s16)eswap16(affp->dmx);
+          cached->aff_dy  = (s16)eswap16(affp->dy);
+          cached->aff_dmy = (s16)eswap16(affp->dmy);
+        } else {
+          cached->aff_dx = cached->aff_dmx =
+          cached->aff_dy = cached->aff_dmy = 0;
+        }
+
+        u32 obj_priority = (obj_attr2 >> 10) & 0x03;
+        const u32 starty = MAX(obj_y, 0);
+        const u32 endy   = MIN(obj_y + obj_height, 160);
+        const u16 cyccnt = is_affine ? (10 + obj_width * 2) : obj_width;
+
+        switch (obj_mode) {
+        case OBJ_MOD_SEMITRAN:
+          for (row = starty; row < endy; row++)
+          {
+            if (rend_cycles[row] < max_rend_cycles) {
+              const u32 cur_cnt = obj_priority_count[obj_priority][row];
+              obj_priority_list[obj_priority][row][cur_cnt] = obj_num;
+              obj_priority_count[obj_priority][row] = cur_cnt + 1;
+              rend_cycles[row] += cyccnt;
+              obj_alpha_count[row] = 1;
+            }
+          }
+          break;
+
+        case OBJ_MOD_WINDOW:
+          obj_priority = 4;
+          /* fallthrough */
+        case OBJ_MOD_NORMAL:
+          for (row = starty; row < endy; row++)
+          {
+            if (rend_cycles[row] < max_rend_cycles) {
+              const u32 cur_cnt = obj_priority_count[obj_priority][row];
+              obj_priority_list[obj_priority][row][cur_cnt] = obj_num;
+              obj_priority_count[obj_priority][row] = cur_cnt + 1;
+              rend_cycles[row] += cyccnt;
+            }
+          }
+          break;
+        };
+      }
+    }
+  }
+}"""
+        vs = v14_region(vs, order_start, order_end, order_new, "OBJ ordering/cache rebuild")
+
+        # Audit the transformed source before committing it to the stage.
+        required = (
+            "static t_sprite obj_cache[128];",
+            "const u32 obj_color_flags = color_flags(4);",
+            "fixed_y_tile_off",
+            "cached->aff_dy",
+            "vcount, obj1dmap, mosaic_reg",
+        )
+        for token in required:
+            if token not in vs:
+                raise SystemExit("gpSP V14 post-patch audit failed: missing %r" % token)
+
+        forbidden = (
+            "const t_affp *affp = &affp_base[pnum];\n\n    if (affp->dy == 0)",
+            "s32 vcount = read_ioreg(REG_VCOUNT);\n  bool obj1dmap = read_ioreg(REG_DISPCNT) & 0x40;",
+        )
+        for token in forbidden:
+            if token in vs:
+                raise SystemExit("gpSP V14 post-patch audit failed: stale hot-path code remains")
+
+        vid.write_text(vs, encoding="utf-8", newline="\n")
+
+    # AURORA_GPSP_GBA_V15_ACCURACY_PERF_20260912
+    # Accuracy + performance pass:
+    #   - TFA external-clock completion must not inherit gpSP's RFU/GBP SI handshake.
+    #   - Cache the last affine BG tile pointer inside one scanline.
+
+    # 1) Turbo File Advance SIO completion.
+    ser = stage / "serial.c"
+    ss = ser.read_text(encoding="utf-8")
+    v15_tfa_mark = "AURORA_GPSP_GBA_V15_TFA_EXTERNAL_CLOCK_20260912"
+
+    if v15_tfa_mark not in ss and "AURORA_FDS_BUBBLE_TFA_TRANSPORT_V5_20260913_TFA_EXTERNAL_CLOCK" not in ss:
+        tfa_start_old = """      if ((newval & 0x0080) && !(newval & 0x0001) &&
+          !(newval & 0x1000) && !serial_irq_cycles) {
+        u8 in = aurora_tfa_transfer((u8)(read_ioreg(REG_SIODATA8) & 0xffU));
+"""
+        tfa_start_new = """      if ((newval & 0x0080) && !(newval & 0x0001) &&
+          !(newval & 0x1000) && !serial_irq_cycles) {
+        /* AURORA_GPSP_GBA_V15_TFA_EXTERNAL_CLOCK_20260912
+         * TFA is a Normal-8 external-clock device. SI must not inherit the
+         * RFU/GBP busy handshake between byte transfers. */
+        newval &= ~0x0004U;
+        u8 in = aurora_tfa_transfer((u8)(read_ioreg(REG_SIODATA8) & 0xffU));
+"""
+        if tfa_start_old not in ss:
+            raise SystemExit("gpSP V15 TFA start anchor missing")
+        ss = ss.replace(tfa_start_old, tfa_start_new, 1)
+
+        normal_done_old = """    case SERIAL_MODE_NORMAL:
+      // Clear the send bit, signal data is ready.
+      // Set the device busy bit, to perform the weird SO/SI handshake.
+      write_ioreg(REG_SIOCNT, (read_ioreg(REG_SIOCNT) & ~0x80) | 0x04);
+      // Return if IRQs are enabled.
+      return read_ioreg(REG_SIOCNT) & 0x4000;
+"""
+        normal_done_new = """    case SERIAL_MODE_NORMAL:
+      /* AURORA_GPSP_GBA_V15_TFA_EXTERNAL_CLOCK_20260912
+       * The generic path below intentionally raises SI for RFU/GBP's
+       * SO/SI handshake. Turbo File Advance does not use that handshake:
+       * complete the externally-clocked byte by clearing START and stale SI. */
+      if (aurora_tfa_active())
+        write_ioreg(REG_SIOCNT,
+                    read_ioreg(REG_SIOCNT) & ~(0x0080U | 0x0004U));
+      else {
+        // Clear the send bit, signal data is ready.
+        // Set the device busy bit, to perform the weird SO/SI handshake.
+        write_ioreg(REG_SIOCNT, (read_ioreg(REG_SIOCNT) & ~0x80) | 0x04);
+      }
+      // Return if IRQs are enabled.
+      return read_ioreg(REG_SIOCNT) & 0x4000;
+"""
+        if normal_done_old not in ss:
+            raise SystemExit("gpSP V15 Normal-SIO completion anchor missing")
+        ss = ss.replace(normal_done_old, normal_done_new, 1)
+
+        if ss.count(v15_tfa_mark) < 2:
+            raise SystemExit("gpSP V15 TFA post-patch audit failed")
+        ser.write_text(ss, encoding="utf-8", newline="\n")
+
+    # 2) Affine BG last-tile cache.
+    vid = stage / "video.cc"
+    vs = vid.read_text(encoding="utf-8")
+    v15_aff_mark = "AURORA_GPSP_GBA_V15_AFFINE_TILE_CACHE_20260912"
+
+    if v15_aff_mark not in vs:
+        helper_anchor = """static inline u8 lookup_pix_8bpp(
+  u32 px, u32 py, const u8 *tile_base, const u8 *map_base, u32 map_size
+) {
+  // Pitch represents the log2(number of tiles per row) (from 16 to 128)
+  u32 map_pitch = map_size + 4;
+  // Given coords (px,py) in the background space, find the tile.
+  u32 mapoff = (px / 8) + ((py / 8) << map_pitch);
+  // Each tile is 8x8, so 64 bytes each.
+  const u8 *tile_ptr = &tile_base[map_base[mapoff] * tile_size_8bpp];
+  // Read the 8bit color within the tile.
+  return tile_ptr[(px % 8) + ((py % 8) * 8)];
+}
+"""
+        helper_new = helper_anchor + """
+/* AURORA_GPSP_GBA_V15_AFFINE_TILE_CACHE_20260912
+ * The renderer is not interleaved with CPU/DMA while this scanline call runs,
+ * so repeated samples from one 8x8 affine tile can safely reuse its pointer. */
+static inline u8 lookup_pix_8bpp_cached(
+  u32 px, u32 py, const u8 *tile_base, const u8 *map_base, u32 map_pitch,
+  u32 *cached_mapoff, const u8 **cached_tile
+) {
+  const u32 mapoff = (px >> 3) + ((py >> 3) << map_pitch);
+  const u8 *tile_ptr = *cached_tile;
+
+  if (mapoff != *cached_mapoff) {
+    *cached_mapoff = mapoff;
+    tile_ptr = &tile_base[((u32)map_base[mapoff]) << 6];
+    *cached_tile = tile_ptr;
+  }
+
+  return tile_ptr[(px & 7U) + ((py & 7U) << 3)];
+}
+"""
+        if helper_anchor not in vs:
+            raise SystemExit("gpSP V15 affine helper anchor missing")
+        vs = vs.replace(helper_anchor, helper_new, 1)
+
+        cache_anchor = """  // Maps are squared, four sizes available (128x128 to 1024x1024)
+  u32 width_height = 128 << map_size;
+
+  // Horizontal mosaic effect.
+"""
+        cache_new = """  // Maps are squared, four sizes available (128x128 to 1024x1024)
+  u32 width_height = 128 << map_size;
+
+  /* AURORA_GPSP_GBA_V15_AFFINE_TILE_CACHE_20260912 */
+  const u32 map_pitch = map_size + 4;
+  u32 cached_mapoff = ~0U;
+  const u8 *cached_tile = NULL;
+
+  // Horizontal mosaic effect.
+"""
+        if cache_anchor not in vs:
+            raise SystemExit("gpSP V15 affine cache-state anchor missing")
+        vs = vs.replace(cache_anchor, cache_new, 1)
+
+        old_call = "lookup_pix_8bpp(pix_x, pix_y, tile_base, map_base, map_size)"
+        new_call = ("lookup_pix_8bpp_cached(pix_x, pix_y, tile_base, map_base, "
+                    "map_pitch, &cached_mapoff, &cached_tile)")
+        n_calls = vs.count(old_call)
+        if n_calls != 4:
+            raise SystemExit("gpSP V15 affine-call audit failed: expected 4, found %d" % n_calls)
+        vs = vs.replace(old_call, new_call)
+
+        if vs.count(v15_aff_mark) < 2 or vs.count(new_call) != 4:
+            raise SystemExit("gpSP V15 affine post-patch audit failed")
+        vid.write_text(vs, encoding="utf-8", newline="\n")
+
+
+    # ------------------------------------------------------------------
+    # V21: large-ROM pager correctness. TFA SIO remains owned by V15.
+    # ------------------------------------------------------------------
+    mem = stage / "gba_memory.c"
+    ms = mem.read_text(encoding="utf-8")
+    pager_mark = "AURORA_GPSP_GBA_V21_PAGER_IO_20260912"
+    if pager_mark not in ms:
+        page_old = (
+            "  filestream_seek(gamepak_file_large, file_index * (32 * 1024), SEEK_SET);\n"
+            "  {\n"
+            "    u32 read_len = (u32)filestream_read(gamepak_file_large, swap_location, (32 * 1024));\n"
+            "    if (read_len < (32 * 1024))\n"
+            "      memset(swap_location + read_len, 0xFF, (32 * 1024) - read_len);\n"
+            "  }\n"
+        )
+        page_new = (
+            "  /* " + pager_mark + "\n"
+            "   * Large carts are demand-paged in 32 KiB units. A failed seek or\n"
+            "   * negative read must never be cast to u32 and mistaken for a full\n"
+            "   * page; map deterministic open-cart data instead. */\n"
+            "  if (!gamepak_file_large ||\n"
+            "      filestream_seek(gamepak_file_large,\n"
+            "                      (int64_t)file_index * (32 * 1024), SEEK_SET) < 0)\n"
+            "  {\n"
+            "    memset(swap_location, 0xFF, (32 * 1024));\n"
+            "  }\n"
+            "  else\n"
+            "  {\n"
+            "    int64_t got = filestream_read(gamepak_file_large,\n"
+            "                                  swap_location, (32 * 1024));\n"
+            "    if (got <= 0)\n"
+            "      memset(swap_location, 0xFF, (32 * 1024));\n"
+            "    else if (got < (32 * 1024))\n"
+            "      memset(swap_location + (u32)got, 0xFF,\n"
+            "             (32 * 1024) - (u32)got);\n"
+            "  }\n"
+        )
+        if page_old not in ms:
+            raise SystemExit("gpSP V21 32 KiB ROM pager anchor missing")
+        ms = ms.replace(page_old, page_new, 1)
+        mem.write_text(ms, encoding="utf-8", newline="\n")
+
+
+    # AURORA_PCE_SSF2_FINAL_20260913_GPSP_RESIDENT_FINAL_BEGIN
+    # AURORA_PCE_SSF2_FINAL_R4_CLEANUP_20260913_UPSTREAM_WORKRAM
+    # Keep gpSP's pinned MIPS IWRAM/VRAM/EWRAM layout unchanged.  R4 narrows
+    # the cross-core memory fix to gpSP's own MMAP_JIT_CACHE mechanism only.
+
+    # Make the existing lazy JIT real on PS2 and make Aurora's final
+    # --gc-sections useful inside gpSP object files.  The upstream .S rule also
+    # includes CFLAGS, and CXXFLAGS is derived from CFLAGS, so one PS2 CFLAGS
+    # line covers C, C++ and preprocessed MIPS assembly consistently.
+    _fmk = stage / "Makefile"
+    _fmks = _fmk.read_text(encoding="utf-8")
+    _fmks, _fn = re.subn(r"^MMAP_JIT_CACHE\s*[:?+]?=\s*.*$",
+                          "MMAP_JIT_CACHE := 1", _fmks,
+                          count=1, flags=re.MULTILINE)
+    if _fn != 1:
+        raise SystemExit("gpSP FINAL: MMAP_JIT_CACHE assignment missing")
+
+    _fflags = "CFLAGS += -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables # AURORA_PCE_SSF2_FINAL_20260913_GPSP_GC_SECTIONS\n"
+    if "AURORA_PCE_SSF2_FINAL_20260913_GPSP_GC_SECTIONS" not in _fmks:
+        _fps2 = "else ifeq ($(platform), ps2)\n"
+        _fpos = _fmks.find(_fps2)
+        if _fpos < 0:
+            raise SystemExit("gpSP FINAL: PS2 Makefile branch missing")
+        _fpos += len(_fps2)
+        _fmks = _fmks[:_fpos] + _fflags + _fmks[_fpos:]
+    _fmk.write_text(_fmks, encoding="utf-8", newline="\n")
+    # AURORA_PCE_SSF2_FINAL_20260913_GPSP_RESIDENT_FINAL_END
+    # AURORA_PCE_SSF2_FINAL_R3_20260913_MMAP_HARDEN_BEGIN
+    _r3_mk = stage / "Makefile"
+    _r3_ms = _r3_mk.read_text(encoding="utf-8")
+    _r3_gate = "ifeq ($(MMAP_JIT_CACHE), 1)\n"
+    _r3_force = """# AURORA_PCE_SSF2_FINAL_R3_20260913_MMAP_EXACT_PS2
+ifeq ($(platform), ps2)
+override MMAP_JIT_CACHE := 1
+endif
+
+ifeq ($(MMAP_JIT_CACHE), 1)
+"""
+    if "AURORA_PCE_SSF2_FINAL_R3_20260913_MMAP_EXACT_PS2" not in _r3_ms:
+        if _r3_ms.count(_r3_gate) != 1:
+            raise SystemExit("gpSP R3: MMAP_JIT_CACHE gate missing/ambiguous")
+        _r3_ms = _r3_ms.replace(_r3_gate, _r3_force, 1)
+
+    # Also normalise the known malformed Aurora PS2 assignment when present.
+    # This is not relied upon for correctness (the override above is), but it
+    # prevents the bad value from surviving in the staged Makefile.
+    _r3_ms = re.sub(
+        r'^(\s*)MMAP_JIT_CACHE\s*=\s*1\s+#\s*AURORA_SSF2_PCECD_LAZY_GPSP_JIT_V1_20260912_LAZY_ALLOC_STAGE\s*$',
+        r'\1MMAP_JIT_CACHE := 1 # AURORA_PCE_SSF2_FINAL_R3_20260913_MMAP_NORMALIZED',
+        _r3_ms, count=1, flags=re.M)
+
+    if "override MMAP_JIT_CACHE := 1" not in _r3_ms:
+        raise SystemExit("gpSP R3: exact PS2 MMAP override was not installed")
+    _r3_mk.write_text(_r3_ms, encoding="utf-8", newline="\n")
+    # AURORA_PCE_SSF2_FINAL_R3_20260913_MMAP_HARDEN_END
+    # AURORA_GPSP_RAMONLY_ZIP_V2_20260913
+    _ram_gm = stage / "gba_memory.c"
+    _ram_s = _ram_gm.read_text(encoding="utf-8")
+    _ram_marker = "AURORA_GPSP_RAMONLY_ZIP_V2_20260913"
+    if _ram_marker not in _ram_s:
+        _ram_anchor = "static s32 load_gamepak_raw(const char *name)\n"
+        if _ram_s.count(_ram_anchor) != 1:
+            raise SystemExit("gpSP RAM-only ZIP: load_gamepak_raw anchor missing/ambiguous")
+        _ram_helper = r'''/* AURORA_GPSP_RAMONLY_ZIP_V2_20260913
+ * Frontend-owned memory source for compressed cartridges.
+ * This intentionally has NO file/path fallback: every ROM page must fit the
+ * core's existing buffers while retro_load_game() consumes info->data. */
+static s32 load_gamepak_raw_memory(const void *data, size_t data_size)
+{
+  const u8 *src = (const u8 *)data;
+  u32 source_size, raw_size, buf_blocks, rom_blocks;
+  unsigned i, j;
+
+  if (!src || data_size == 0 || data_size > (size_t)0x02000000U)
+    return -1;
+
+  source_size = (u32)data_size;
+  raw_size = (source_size + 0x7FFFU) & ~0x7FFFU;
+  if (raw_size < source_size || raw_size > 0x02000000U)
+    return -1;
+
+  if (gamepak_file_large)
+  {
+    filestream_close(gamepak_file_large);
+    gamepak_file_large = NULL;
+  }
+  if (gamepak_mini_rom)
+  {
+    free(gamepak_mini_rom);
+    gamepak_mini_rom = NULL;
+  }
+  gamepak_mini_materialized = false;
+
+  gamepak_file_blocks = raw_size >> 15;
+  gamepak_mirror_1m = (raw_size == 0x00100000U);
+  gamepak_size = gamepak_mirror_1m ? 0x00400000U : raw_size;
+
+  /* Preserve gpSP's special 1 MiB cartridge mirroring without storage I/O. */
+  if (gamepak_mirror_1m)
+  {
+    u32 map_blocks = gamepak_size >> 15;
+    u32 phyn;
+    u32 first_copy;
+
+    gamepak_mini_rom = (u8 *)malloc(gamepak_size);
+    if (!gamepak_mini_rom)
+      return -1;
+
+    memset(gamepak_mini_rom, 0xFF, gamepak_size);
+    memcpy(gamepak_mini_rom, src, source_size);
+    memcpy(gamepak_mini_rom + 0x100000U, gamepak_mini_rom, 0x100000U);
+    memcpy(gamepak_mini_rom + 0x200000U, gamepak_mini_rom, 0x100000U);
+    memcpy(gamepak_mini_rom + 0x300000U, gamepak_mini_rom, 0x100000U);
+
+    if (!gamepak_buffer_count || !gamepak_buffers[0])
+    {
+      free(gamepak_mini_rom);
+      gamepak_mini_rom = NULL;
+      return -1;
+    }
+    first_copy = gamepak_buffer_blocksize < 0x100000U
+                   ? gamepak_buffer_blocksize : 0x100000U;
+    memcpy(gamepak_buffers[0], gamepak_mini_rom, first_copy);
+
+    map_null(read, 0x8000000, 0xD000000);
+    for (phyn = 0; phyn < map_blocks; phyn++)
+    {
+      u8 *blkptr = &gamepak_mini_rom[32U * 1024U * phyn];
+      map_rom_entry(read, phyn, blkptr, map_blocks);
+    }
+    update_gpio_romregs();
+    gamepak_mirror_1m = false;
+    gamepak_mini_materialized = true;
+    return 0;
+  }
+
+  buf_blocks = (raw_size + gamepak_buffer_blocksize - 1U) /
+               gamepak_buffer_blocksize;
+
+  /* There is deliberately no memory->file spill and no path-backed pager.
+   * If the complete ROM cannot fit now, the frontend reports a clean ZIP
+   * too-large-for-RAM error. */
+  if (!buf_blocks || buf_blocks > gamepak_buffer_count)
+    return -1;
+
+  rom_blocks = gamepak_size >> 15;
+  map_null(read, 0x8000000, 0xD000000);
+
+  for (i = 0; i < buf_blocks; i++)
+  {
+    u32 off = (u32)i * gamepak_buffer_blocksize;
+    u32 take = 0;
+    if (off < source_size)
+    {
+      take = source_size - off;
+      if (take > gamepak_buffer_blocksize)
+        take = gamepak_buffer_blocksize;
+      memcpy(gamepak_buffers[i], src + off, take);
+    }
+    if (take < gamepak_buffer_blocksize)
+      memset(gamepak_buffers[i] + take, 0xFF,
+             gamepak_buffer_blocksize - take);
+
+    for (j = 0; j < 32 && i * 32 + j < gamepak_file_blocks; j++)
+    {
+      u32 phyn = i * 32 + j;
+      u8 *blkptr = &gamepak_buffers[i][32U * 1024U * j];
+      u32 entry = evict_gamepak_page();
+      gamepak_blk_queue[entry].phy_rom = phyn;
+      map_rom_entry(read, phyn, blkptr, rom_blocks);
+    }
+  }
+
+  update_gpio_romregs();
+  return 0;
+}
+
+'''
+        _ram_s = _ram_s.replace(_ram_anchor, _ram_helper + _ram_anchor, 1)
+        _ram_old = "if (load_gamepak_raw(name))"
+        if _ram_s.count(_ram_old) != 1:
+            raise SystemExit("gpSP RAM-only ZIP: load_gamepak call anchor missing/ambiguous")
+        _ram_new = "if ((info && info->data && info->size) ?\n" \
+                   "      load_gamepak_raw_memory(info->data, info->size) :\n" \
+                   "      load_gamepak_raw(name))"
+        _ram_s = _ram_s.replace(_ram_old, _ram_new, 1)
+        _ram_gm.write_text(_ram_s, encoding="utf-8", newline="\n")
+
+    # AURORA_GPSP_GBA_MARIO_BIOS_LATCH_V1_20260913
+    # GBA protected-BIOS reads outside 00000000h..00003FFFh expose the last
+    # BIOS-prefetch word, not arbitrary current bus data. gpSP models that
+    # latch with REG_BUS_VALUE. reset_gba() calls init_memory() before
+    # init_cpu(), and init_cpu() clears the value memory init placed there.
+    # Restore the post-startup/SoftReset value after that clear. Actual BIOS
+    # execution is unaffected, and existing SWI/IRQ paths still update the
+    # latch later as before.
+    _bios_cpu = stage / "cpu.cc"
+    _bios_s = _bios_cpu.read_text(encoding="utf-8")
+    _bios_anchor = (
+        "  // Initialize CPU registers\n"
+        "  memset(reg, 0, REG_USERDEF * sizeof(u32));\n"
+        "  memset(reg_mode, 0, sizeof(reg_mode));\n"
+    )
+    _bios_new = (
+        "  // Initialize CPU registers\n"
+        "  memset(reg, 0, REG_USERDEF * sizeof(u32));\n"
+        "  /* AURORA_GPSP_GBA_MARIO_BIOS_LATCH_V1_20260913: preserve protected-BIOS latch across reset. */\n"
+        "  reg[REG_BUS_VALUE] = 0xe129f000;\n"
+        "  memset(reg_mode, 0, sizeof(reg_mode));\n"
+    )
+    if _bios_s.count(_bios_anchor) != 1:
+        raise SystemExit("gpSP Mario/BIOS latch: init_cpu anchor missing/ambiguous")
+    _bios_s = _bios_s.replace(_bios_anchor, _bios_new, 1)
+    _bios_cpu.write_text(_bios_s, encoding="utf-8", newline="\n")
+
+    # AURORA_GPSP_PROTECTED_BIOS_LATCH_V2_20260913
+    # Dedicated GBA protected-BIOS prefetch latch.
+    #
+    # REG_BUS_VALUE is ordinary open-bus state and changes during normal game
+    # execution. GBA BIOS protection instead returns the last prefetched BIOS
+    # instruction when PC is outside 00000000h..00003FFFh.
+    _pb_mem = stage / "gba_memory.c"
+    _pb_cpu = stage / "cpu.cc"
+
+    _pb_ms = _pb_mem.read_text(encoding="utf-8")
+    _pb_decl = "u32 aurora_bios_protected_latch = 0xe129f000U;"
+    if _pb_decl not in _pb_ms:
+        _pb_inc = '#include "streams/file_stream.h"\n'
+        if _pb_ms.count(_pb_inc) != 1:
+            raise SystemExit(
+                "gpSP protected BIOS latch: gba_memory include anchor "
+                "missing/ambiguous")
+        _pb_ms = _pb_ms.replace(
+            _pb_inc,
+            _pb_inc +
+            "\n/* AURORA_GPSP_PROTECTED_BIOS_LATCH_V2_20260913: separate from ordinary open-bus state. */\n" +
+            _pb_decl + "\n",
+            1)
+
+    _pb_old_read = (
+        "reg[REG_BUS_VALUE] >> ((address & 0x03) << 3)"
+    )
+    _pb_new_read = (
+        "aurora_bios_protected_latch >> ((address & 0x03) << 3)"
+    )
+    # AURORA_FDS_SAVE_GPSP_BUILD_FIX_V4_20260913_GPSP_BIOS_ANCHOR
+    # REG_BUS_VALUE has legitimate users outside BIOS. Restrict this edit
+    # to read_memory()'s BIOS branch instead of counting the whole file.
+    if _pb_new_read not in _pb_ms:
+        _pb_tag = "/* BIOS */"
+        _pb_a = _pb_ms.find(_pb_tag)
+        _pb_b = _pb_ms.find("case 0x02:", _pb_a + 1) if _pb_a >= 0 else -1
+        if _pb_a < 0 or _pb_b <= _pb_a:
+            raise SystemExit(
+                "gpSP protected BIOS latch: BIOS block not found")
+        _pb_chunk = _pb_ms[_pb_a:_pb_b]
+        if _pb_old_read not in _pb_chunk:
+            raise SystemExit(
+                "gpSP protected BIOS latch: protected read missing in BIOS")
+        _pb_chunk = _pb_chunk.replace(
+            _pb_old_read, _pb_new_read, 1)
+        _pb_ms = _pb_ms[:_pb_a] + _pb_chunk + _pb_ms[_pb_b:]
+
+    _pb_mem.write_text(
+        _pb_ms, encoding="utf-8", newline="\n")
+
+    _pb_cs = _pb_cpu.read_text(encoding="utf-8")
+
+    _pb_extern = "  extern u32 aurora_bios_protected_latch;\n"
+    if _pb_extern not in _pb_cs:
+        _pb_inc = '  #include "cpu_instrument.h"\n'
+        if _pb_cs.count(_pb_inc) != 1:
+            raise SystemExit(
+                "gpSP protected BIOS latch: cpu extern anchor "
+                "missing/ambiguous")
+        _pb_cs = _pb_cs.replace(
+            _pb_inc, _pb_inc + _pb_extern, 1)
+
+    _pb_init = "  aurora_bios_protected_latch = 0xe129f000U;\n"
+    if _pb_init not in _pb_cs:
+        _pb_v2 = "  reg[REG_BUS_VALUE] = 0xe129f000;\n"
+        if _pb_v2 in _pb_cs:
+            if _pb_cs.count(_pb_v2) != 1:
+                raise SystemExit(
+                    "gpSP protected BIOS latch: V2 reset anchor ambiguous")
+            _pb_cs = _pb_cs.replace(
+                _pb_v2, _pb_v2 + _pb_init, 1)
+        else:
+            _pb_zero = (
+                "  memset(reg, 0, REG_USERDEF * sizeof(u32));\n"
+            )
+            if _pb_cs.count(_pb_zero) != 1:
+                raise SystemExit(
+                    "gpSP protected BIOS latch: init_cpu memset anchor "
+                    "missing/ambiguous")
+            _pb_cs = _pb_cs.replace(
+                _pb_zero,
+                _pb_zero +
+                "  reg[REG_BUS_VALUE] = 0xe129f000;\n" +
+                _pb_init,
+                1)
+
+    _pb_irq = "    reg[REG_BUS_VALUE] = 0xe55ec002;\n"
+    _pb_irq_latch = (
+        "    aurora_bios_protected_latch = 0xe55ec002U;\n"
+    )
+    if _pb_irq_latch not in _pb_cs:
+        if _pb_cs.count(_pb_irq) != 1:
+            raise SystemExit(
+                "gpSP protected BIOS latch: IRQ anchor "
+                "missing/ambiguous")
+        _pb_cs = _pb_cs.replace(
+            _pb_irq, _pb_irq + _pb_irq_latch, 1)
+
+    _pb_swi = (
+        "reg[REG_BUS_VALUE] = 0xe3a02004;  "
+        "// After SWI, we read bios[0xE4]"
+    )
+    _pb_swi_latch = (
+        "aurora_bios_protected_latch = 0xe3a02004U;"
+    )
+    if _pb_swi_latch not in _pb_cs:
+        _pb_count = _pb_cs.count(_pb_swi)
+        if _pb_count != 2:
+            raise SystemExit(
+                "gpSP protected BIOS latch: expected ARM+THUMB SWI "
+                f"anchors, found {_pb_count}")
+        _pb_cs = _pb_cs.replace(
+            _pb_swi,
+            _pb_swi + "\n"
+            "             " + _pb_swi_latch,
+        )
+
+    _pb_cpu.write_text(
+        _pb_cs, encoding="utf-8", newline="\n")
+
     stamp.write_text(digest + "\n", encoding="utf-8")
-    print(f"[ gpSP stage ] prepared TFA + PS2 safe perf + Safe Frameskip resync + Color Correction + 8 MiB ROM cache + L/R turbo: {stage}")
+    print(f"[ gpSP stage ] V21: SMALL JIT memory + 4 MiB paged ROM + TFA pre-reserve (V15 SIO) + pager I/O + full PS2 JIT cache sync: {stage}")
 
 
 if __name__ == "__main__":

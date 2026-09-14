@@ -1,4 +1,5 @@
 /* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910 */
+/* AURORA_VOLUME_TFA_N163_V4_20260913 */
 /* AURORA_GAMBATTE_STANDALONE_V2_20260908
  *
  * Standalone Game Boy / Game Boy Color frontend for Aurora.
@@ -17,6 +18,8 @@
 #include "rendersurface.h"
 #include "mixbuffer.h"
 #include "snio.h"
+
+extern Int32 VideoGetGbcVolume(void);
 
 #ifndef HAVE_STDINT_H
 #define HAVE_STDINT_H 1
@@ -1100,6 +1103,18 @@ static unsigned AuroraGbMapInput(const Emu::SysInputT *pInput,
     return out;
 }
 
+/* AURORA_VOLUME_TFA_N163_V4_20260913 */
+static Int16 AuroraGbScaleVolume(Int16 sample, Int32 gain)
+{
+    Int32 v;
+    if (gain <= 0) return 0;
+    if (gain == 200) return sample;
+    v = ((Int32)sample * gain) / 200;
+    if (v > 32767) v = 32767;
+    if (v < -32768) v = -32768;
+    return (Int16)v;
+}
+
 static void AuroraGbOutputAudio(CMixBuffer *pMix,
                                 const gambatte::uint_least32_t *pPacked,
                                 Uint32 nFrames)
@@ -1110,6 +1125,8 @@ static void AuroraGbOutputAudio(CMixBuffer *pMix,
 
     if (!pMix || !pPacked)
         return;
+
+    const Int32 gain = VideoGetGbcVolume();
 
     while (pos < nFrames)
     {
@@ -1122,6 +1139,7 @@ static void AuroraGbOutputAudio(CMixBuffer *pMix,
             Int16 l = (Int16)(packed & 0xffffU);
             Int16 r = (Int16)((packed >> 16) & 0xffffU);
             Int16 mono = (Int16)(((Int32)l + (Int32)r) / 2);
+            mono = AuroraGbScaleVolume(mono, gain);
             /* GB/GBC internal speaker: mono signal replicated to host L/R. */
             left[i] = mono;
             right[i] = mono;

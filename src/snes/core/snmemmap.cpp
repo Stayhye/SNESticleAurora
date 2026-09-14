@@ -606,13 +606,38 @@ static void _SnesMapBSCROMPage(SNCpuT *pCpu, Uint8 *pRom, Uint32 nRomBytes,
  * Derby Stallion 96 and Sound Novel Tsukuru use the newer-observed BSC-LoROM
  * slot decode: C0-DF with A15 ignored (32 KiB per bank). Keep every other
  * BSC-LoROM board on Aurora's existing C0-EF / 64 KiB decode. */
-static Bool _SnesBSCUses32KPackDecode(const SnesRom *pRom)
+/* AURORA_ZIP_FILEONLY_MARIO_BIOS_TSUKURU8M_V3_20260913_ZR2J_32K_PACK
+ * BSC-LoROM creation carts expose the 8M Memory Pack as C0-DF with A15
+ * ignored: each CPU bank contributes only 32 KiB to the physical pack.
+ *
+ * Aurora already used this wiring for Derby Stallion 96 and Sound Novel
+ * Tsukuru. RPG Tsukuru 2 is SHVC-ZR2J-JPN on the same slotted-cart class;
+ * identify it from the extended LoROM product code instead of guessing its
+ * internal title string.
+ */
+static Bool _SnesBSCUses32KPackDecode(SnesRom *pRom)
 {
     const char *pTitle = pRom ? pRom->GetRomTitle() : NULL;
-    return pTitle &&
+    const Uint8 *pData = pRom ? pRom->GetData() : NULL;
+    Uint32 nBytes = pRom ? pRom->GetBytes() : 0;
+
+    if (pTitle &&
         (!strcmp(pTitle, "DERBY STALLION 96") ||
-         !strcmp(pTitle, "SOUND NOVEL-TCOOL"))
-        ? TRUE : FALSE;
+         !strcmp(pTitle, "SOUND NOVEL-TCOOL")))
+        return TRUE;
+
+    if (pData &&
+        nBytes >= 0x7FC0u + (Uint32)sizeof(SNRomInfoT))
+    {
+        const Uint8 *pInfo = pData + 0x7FC0u;
+        if (pInfo[-14] == 'Z' &&
+            pInfo[-13] == 'R' &&
+            pInfo[-12] == '2' &&
+            pInfo[-11] == 'J')
+            return TRUE;
+    }
+
+    return FALSE;
 }
 
 void SnesSystem::MapBSCLoRom(void)

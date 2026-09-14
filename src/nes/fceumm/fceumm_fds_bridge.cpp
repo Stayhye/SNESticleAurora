@@ -15,6 +15,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <limits.h>
+#include <sys/stat.h>
 
 #include "nes/fceumm/fceumm_fds_bridge.h"
 #include "types.h"
@@ -59,6 +60,7 @@ bool FDS_retro_serialize(void *, size_t);
 bool FDS_retro_unserialize(const void *, size_t);
 void FDS_retro_get_system_av_info(struct retro_system_av_info *);
 void FDS_aurora_fds_set_system_directory(const char *);
+void FDS_aurora_fds_set_save_directory(const char *);
 void FDS_aurora_fds_set_skip_video(int);
 /* AURORA_FCEUMM_FDS_PERF_DIRECT_T8_V3_20260827: generated libretro native-video accessors. */
 const uint8_t *FDS_aurora_fds_get_video_pixels(void);
@@ -362,6 +364,48 @@ void FceummFdsBridge_Shutdown(void)
     s_Initialized = false;
 }
 
+/* AURORA_FDS_SAVE_GPSP_BUILD_FIX_V4_20260913_FDS_NV
+ * FCEUmm's FDS driver writes modified diskdata[] through FCEUMKF_FDS on
+ * GI_CLOSE. Redirect only that save image to SNESticle/NES.
+ */
+static bool fdsConfigureSaveDirectory(const char *systemPath)
+{
+    char root[PATH_MAX];
+    char save[PATH_MAX];
+    struct stat st;
+    size_t n;
+    int chars;
+
+    if (!systemPath || !*systemPath)
+        return false;
+
+    chars = snprintf(root, sizeof(root), "%s", systemPath);
+    if (chars < 0 || chars >= (int)sizeof(root))
+        return false;
+
+    n = strlen(root);
+    while (n > 0 && (root[n - 1] == '/' || root[n - 1] == '\\'))
+        root[--n] = 0;
+
+    if (n < 7 || strcmp(root + n - 7, "/SYSTEM"))
+        return false;
+    root[n - 7] = 0;
+
+    chars = snprintf(save, sizeof(save), "%s/NES", root);
+    if (chars < 0 || chars >= (int)sizeof(save))
+        return false;
+
+    if (mkdir(save, 0777) != 0)
+    {
+        if (stat(save, &st) != 0 || !S_ISDIR(st.st_mode))
+            return false;
+    }
+
+    FDS_aurora_fds_set_save_directory(save);
+    printf("[FCEUmm/FDS] save directory: %s\n", save);
+    return true;
+}
+
 bool FceummFdsBridge_LoadDisk(const char *path, const char *systemPath,
                               unsigned totalSides)
 {
@@ -373,6 +417,8 @@ bool FceummFdsBridge_LoadDisk(const char *path, const char *systemPath,
         FceummFdsBridge_UnloadGame();
 
     FDS_aurora_fds_set_system_directory(systemPath);
+    if (!fdsConfigureSaveDirectory(systemPath))
+        return false;
     if (!FceummFdsBridge_Init())
         return false;
 
@@ -433,6 +479,8 @@ bool FceummFdsBridge_LoadDiskMemory(const void *data, Uint32 bytes,
         FceummFdsBridge_UnloadGame();
 
     FDS_aurora_fds_set_system_directory(systemPath);
+    if (!fdsConfigureSaveDirectory(systemPath))
+        return false;
     if (!FceummFdsBridge_Init())
         return false;
 

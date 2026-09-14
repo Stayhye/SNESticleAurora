@@ -55,6 +55,8 @@ void GSK_SetGameplayYOffsetBias(int y);
 /* AURORA_MD_UI256_320FB_V1_20260823
  * Present logical 256-wide UI without fractional scaling while MD keeps
  * its physical 320-wide 240p framebuffer alive. */
+/* AURORA_PCE_SSF2_FINAL_R2_20260913_PCE_UI256_WIDE */
+void GSK_SetUi256OnWideFramebuffer(int on);
 void GSK_SetUi256On320Framebuffer(int on);
 /* AURORA_PCE_NATIVE_GS_RASTER_V5_20260830
  * 240p physical sample raster:

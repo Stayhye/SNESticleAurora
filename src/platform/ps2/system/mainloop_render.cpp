@@ -10,6 +10,7 @@
  */
 
 #include <stdio.h>
+#include <string.h> /* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_RED_ERRORS */
 
 #include "mainloop_debug.h"
 #include "mainloop_shared.h"
@@ -24,6 +25,7 @@
 #include "nes/fceumm/fceumm_fds_bridge.h"
 #include "pce/beetle/pce_bridge.h"
 #include "gb/system/gambattesystem.h" /* AURORA_GAMBATTE_SQUARE_ASPECT_V13_20260911 */
+#include "gba/system/gpspsystem.h" /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912 */
 
 /* AURORA_PS2_PERF_V4_20260824 */
 #include "types.h"
@@ -309,7 +311,7 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
      * limited by max_skip. Here the menu level IS max_skip. */
     /* AURORA_V13: tolerate ordinary scheduling jitter; catch up only
      * once host debt exceeds 1.25 learned VBlank periods. */
-    if ((Int64)diff * 4 < -(Int64)target * 5)
+    if (diff < -target)
     {
         if (s_SafeFrameskipConsecutive < (Uint32)s_SafeFrameskipLevel)
         {
@@ -442,16 +444,18 @@ void MainLoopRender()
                 wantedRaster = 320;
 
 
-            if (_pSystem == _pPce && !_bMenu && !_MainLoop_BlackScreen)
-            {
-                /* AURORA_PCE_FIXED512_DBX0_CUMULATIVE_V8_20260830
-                 * One aligned PCE framebuffer for 256/342/512 dot clocks. */
+            /* AURORA_PCE_SSF2_FINAL_R2_20260913_PCE_FIXED512_MENU256
+             * Real PS2: rebuilding 512->256 while Beetle/PCE-CD is alive can
+             * destroy the live GS/VRAM epoch and hang the console.  Keep the
+             * physical PCE raster at 512 for the entire core lifetime.  The
+             * menu is a 256-sample presentation inside that backing instead. */
+            if (_pSystem == _pPce)
                 wantedRaster = 512;
-            }
             /* Menu/prompts use exact 256-source integer presentation on the
              * still-alive 320 framebuffer, not 256->320 resampling. */
-            GSK_SetUi256On320Framebuffer(
-                (_bMenu && bMdVideo) ? 1 : 0);
+            /* AURORA_PCE_SSF2_FINAL_R2_20260913_PCE_FIXED512_MENU256 */
+            GSK_SetUi256OnWideFramebuffer(
+                (_bMenu && (bMdVideo || _pSystem == _pPce)) ? 1 : 0);
 
             if (_bMenu)
                 GSK_SetNative240pPar(0);
@@ -462,13 +466,12 @@ void MainLoopRender()
                        (int)wantedRaster);
             }
 
-            /* AURORA_PCE_ROOT512_KRAZY_LATCH_V12_20260830: clear window */
+            /* AURORA_PCE_SSF2_FINAL_20260913_PCE_MENU_CLEAR_GAME_WINDOW
+             * A gameplay crop/window never belongs to Aurora UI. */
             if (_pSystem != _pPce || _bMenu || _MainLoop_BlackScreen)
                 GSK_Clear240pVisibleWindow();
 
-            /* AURORA_PCE_FIXED512_DBX0_CUMULATIVE_V8_20260830: clear window */
-            if (_pSystem != _pPce || _bMenu || _MainLoop_BlackScreen)
-                GSK_Clear240pVisibleWindow();
+
         }
 
 
@@ -566,7 +569,10 @@ void MainLoopRender()
            (PicoDriveBridge_IsMegaDriveVideo() ||
             g_GskVideoMode == GSK_VIDMODE_240P)) ||
           ((_pSystem == _pPce) &&
-           PceBridge_CanDirectGsVideo()))) ? TRUE : FALSE);
+           PceBridge_CanDirectGsVideo()) ||
+          ((_pSystem == _pGba) && _pGba &&
+           _pGba->CanDirectGsVideo() &&
+           GSK_GetActiveVideoMode() == GSK_VIDMODE_240P))) ? TRUE : FALSE); /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912 */
     /* AURORA_GPSP_GBA_V14_NATIVE_SQUARE_20260911
      * Interlaced 2x2 handheld presentation leaves physical side bars, so use
      * the existing complete framebuffer clear instead of full-width fast-clear. */
@@ -652,11 +658,31 @@ void MainLoopRender()
                 fColor);
         }
         else if (_pSystem == _pPce &&
+                 !_bMenu && /* AURORA_PCE_SSF2_FINAL_20260913_PCE_NO_DIRECT_UNDER_MENU */
                  PceBridge_CanDirectGsVideo())
         {
             /* AURORA_PCE_EXPERIMENTAL_V10_DIRECT_GS */
             PceBridge_DrawDirectGs(
                 _MainLoop_uOutTexTBP, fColor);
+        }
+        else if (_pSystem == _pGba && _pGba &&
+                 _pGba->CanDirectGsVideo())
+        {
+            /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912
+             * GPPrimTexRect uses the same transform as PolyRect. Scope the
+             * interlaced exact-2x handheld transform around the direct draw,
+             * then restore normal UI/status geometry immediately. */
+            const Bool bGbaSquareDraw =
+                (GSK_GetActiveVideoMode() != GSK_VIDMODE_240P &&
+                 bSquareHandheldGameplay) ? TRUE : FALSE;
+
+            if (bGbaSquareDraw)
+                GSK_SetGbSquarePixelDraw(1);
+
+            _pGba->DrawDirectGs(_MainLoop_uOutTexTBP, fColor);
+
+            if (bGbaSquareDraw)
+                GSK_SetGbSquarePixelDraw(0);
         }
         else if (_pSystem == _pSega &&
                  PicoDriveBridge_CanDirectGsVideo())
@@ -845,6 +871,7 @@ void MainLoopRender()
 		 * BGM may scan/open storage, so it is legal only for a session that
 		 * successfully entered through _MenuEnable(TRUE). */
 		if (MainLoopNormalMenuBgmSessionActive() &&
+		    MainLoopCdUiReady() && /* AURORA_SSF2_PCE_MENU_FIX_V2_20260913_PCE_MENU_ASYNC */
 		    _MainLoop_pScreen != (CScreen *)_MainLoop_pStateConfirmScreen)
 			BgmUpdate();
 		/* Draw the live menu first, then place modal/status text on top. The
@@ -858,12 +885,31 @@ void MainLoopRender()
 		{
 			const Int32 textW = FontGetStrWidth(_MainLoop_ModalStr);
 			const Int32 textX = 128 - textW / 2;
+			const Bool bErrorModal =
+				!strncmp(_MainLoop_ModalStr, "ERROR:", 6) ? TRUE : FALSE;
 
-			/* AURORA_GB_HOTFIX_R13E_20260909_MODAL_BOX
-			 * Opaque black backing only behind the centered modal/error text. */
+			/* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_RED_ERRORS
+			 * Loader failures can leave the previous framebuffer white, black or
+			 * partially rendered. ERROR: is already Aurora's modal error contract;
+			 * erase that accidental background and give every error the same
+			 * opaque red screen. Non-error informational modals retain the old
+			 * compact black backing.
+			 */
 			PolyTexture(NULL);
 			PolyBlend(FALSE);
-			PolyColor4f(0.0f, 0.0f, 0.0f, 1.0f);
+			if (bErrorModal)
+			{
+				PolyColor4f(0.55f, 0.0f, 0.0f, 1.0f);
+				PolyRect(0.0f, 0.0f,
+				         (Float32)MAINLOOP_SCREENWIDTH,
+				         (Float32)MAINLOOP_SCREENHEIGHT);
+				/* Darker red text plate: readable but still visibly an error. */
+				PolyColor4f(0.30f, 0.0f, 0.0f, 1.0f);
+			}
+			else
+			{
+				PolyColor4f(0.0f, 0.0f, 0.0f, 1.0f);
+			}
 			PolyRect((Float32)(textX - 4), 96.0f,
 			         (Float32)(textW + 8), 16.0f);
 			PolyBlend(TRUE);

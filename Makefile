@@ -122,7 +122,11 @@ GPSP_DIR ?= $(CURDIR)/src/third_party/gpsp
 # frame-mix fix are injected only into this build-tree staging copy.
 GPSP_STAGE_DIR ?= $(CURDIR)/build/gpsp-src
 # AURORA_GPSP_GBA_V13_SAFE_PERF_20260911
-GPSP_STAGE_STAMP := $(GPSP_STAGE_DIR)/.aurora-gpsp-stage-v13
+# AURORA_GPSP_GBA_V14_SPRITE_PERF_20260911
+# AURORA_GPSP_GBA_V15_ACCURACY_PERF_20260912
+GPSP_STAGE_STAMP := $(GPSP_STAGE_DIR)/.aurora-gpsp-stage-final-r5-20260913
+# AURORA_PCE_SSF2_FINAL_R2_20260913_BUILD
+# AURORA_PCE_SSF2_FINAL_20260913_BUILD
 GPSP_RAW_LIB ?= $(GPSP_STAGE_DIR)/gpsp_libretro_ps2.a
 GPSP_BUILD_DIR ?= $(CURDIR)/build/gpsp
 GPSP_LIB ?= $(GPSP_BUILD_DIR)/gpsp_libretro_ps2.a
@@ -344,7 +348,8 @@ CXXFLAGS += -DLIBXMP_CORE_PLAYER
 # sem numero ou APP_VERSION=x.y.z para testar uma versao futura.
 # __DATE__/__TIME__ pegariam UTC (3h adiantado no Brasil); por isso a
 # data/hora vem do Makefile com TZ fixo de Brasilia.
-APP_VERSION ?= 1.0.0
+# AURORA_V22_APP_VERSION_1_0_1_20260912
+APP_VERSION ?= 1.0.1
 ifeq ($(strip $(APP_VERSION)),)
 VER_SUFFIX      :=
 APP_VERSION_DEF :=
@@ -1143,7 +1148,9 @@ $(GPSP_STAGE_STAMP): FORCE_GPSP_STAGE $(GPSP_PREPARE_TOOL)
 
 $(GPSP_RAW_LIB): $(GPSP_STAGE_STAMP)
 	@printf '[ gpSP GBA ] checking incremental staged PS2 dynarec core\n'
-	+@PATH="$(PS2DEV)/ee/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" $(MAKE) --no-print-directory -C "$(GPSP_STAGE_DIR)" platform=ps2 PS2DEV="$(PS2DEV)" PS2SDK="$(PS2SDK)" all
+	+@PATH="$(PS2DEV)/ee/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" $(MAKE) --no-print-directory -C "$(GPSP_STAGE_DIR)" platform=ps2 MMAP_JIT_CACHE=1 PS2DEV="$(PS2DEV)" PS2SDK="$(PS2SDK)" all # AURORA_PCE_SSF2_FINAL_R3_20260913_GPSP_MMAP_BUILD
+	@$(GPSP_NM) -S --size-sort --radix=d "$(GPSP_RAW_LIB)" | awk '($$NF=="rom_translation_cache" || $$NF=="ram_translation_cache") { sz=$$(NF-2)+0; if (sz > 64) { printf "ERROR: gpSP static JIT cache survived: %s (%d bytes)\n", $$NF, sz > "/dev/stderr"; bad=1; } } END { exit bad }' # AURORA_PCE_SSF2_FINAL_R4_CLEANUP_20260913_GPSP_JIT_ONLY_GUARD
+
 
 $(GPSP_LIB): $(GPSP_RAW_LIB) $(GPSP_NAMESPACE_TOOL)
 	@printf '[ gpSP GBA ] namespacing embedded core\n'

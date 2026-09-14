@@ -19,6 +19,9 @@ public:
     virtual ~GpSPSystem();
 
     Bool LoadGame(const Char *pPath, const Char *pSystemDirectory);
+    Bool LoadGameMemory(const void *pData, Uint32 nBytes, Uint32 uCRC,
+                        const Char *pContentName,
+                        const Char *pSystemDirectory); /* AURORA_ROM_LIFETIME_RAMONLY_ZIP_V2_20260913 */
     void UnloadGame();
     Bool IsGameLoaded() const;
 
@@ -46,6 +49,13 @@ public:
     virtual const char *GetString(Emu::System::StringE eString);
     virtual Uint32 GetSampleRate();
 
+    /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912
+     * Normal gpSP PS2 video is already 0BGR1555, the GS' native CT16
+     * channel ordering. Let the frontend upload it directly instead of
+     * expanding 38,400 pixels to Aurora RGBA32 first. */
+    Bool CanDirectGsVideo() const;
+    Bool DrawDirectGs(Uint32 auroraOutBaseTBP, Float32 intensity);
+
     /* AURORA_GPSP_GBA_V2_TFA_BLEND_20260911 */
     Bool HasTurboFileAdvance() const;
     Uint8 *GetTurboFileAdvanceData();
@@ -55,6 +65,7 @@ public:
     Bool TurboFileAdvanceDirty() const;
     void ClearTurboFileAdvanceDirty();
     Uint32 GetGameCRC() const;
+    Uint32 GetGameBytes() const; /* AURORA_GBA_STATE_TFA_CONNECTION_V1_20260913: state identity */
 
 private:
     Impl *m_p;

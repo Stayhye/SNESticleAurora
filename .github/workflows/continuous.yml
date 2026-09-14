@@ -1,0 +1,140 @@
+name: Continuous Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: continuous-release
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      # AURORA_CONTINUOUS_BEETLE_PCE_FAST_V14
+      - name: Verify required emulator submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f src/third_party/quicknes/Makefile
+          test -f src/third_party/picodrive/Makefile
+          test -f src/third_party/beetle-pce-fast/Makefile
+          test -f src/third_party/beetle-pce-fast/COPYING
+          # AURORA_FCEUMM_FDS_CONTINUOUS_V1
+          test -f src/third_party/fceumm-fds/Makefile
+          test -f src/third_party/fceumm-fds/Copying
+          test -f src/third_party/fceumm-fds/src/fds.c
+          test -f tools/Makefile.beetle-pce-fast-ps2
+          test -f tools/Makefile.fceumm-fds-ps2
+          test -f tools/prepare_fceumm_fds_sources.py
+          test -f tools/namespace_fceumm_fds_archive.py
+          # AURORA_GPSP_GBA_V1_20260911
+          test -f src/third_party/gpsp/Makefile
+          test -f src/third_party/gpsp/COPYING
+          test -f src/third_party/gpsp/libretro/libretro.c
+          test -f tools/namespace_gpsp_archive.py
+          test -f tools/prepare_gpsp_aurora_sources.py # AURORA_GPSP_GBA_V2_TFA_BLEND_20260911
+          # Validate current tooling syntactically; the actual build is the authoritative integration check.
+          python3 -m py_compile tools/prepare_gpsp_aurora_sources.py tools/namespace_gpsp_archive.py tools/prepare_fceumm_fds_sources.py tools/namespace_fceumm_fds_archive.py
+          test -f LICENSES/gpSP-GPL-2.0.txt
+
+
+
+          test "$(git config -f .gitmodules --get submodule.src/third_party/beetle-pce-fast.url)" = "https://github.com/itsveenee/beetle-pce-fast-libretro.git"
+          test "$(git config -f .gitmodules --get submodule.src/third_party/beetle-pce-fast.branch)" = "master"
+
+          test "$(git config -f .gitmodules --get submodule.src/third_party/fceumm-fds.url)" = "https://github.com/itsveenee/Fceumm-PS2.git"
+          test "$(git config -f .gitmodules --get submodule.src/third_party/fceumm-fds.branch)" = "master"
+
+          test "$(git config -f .gitmodules --get submodule.src/third_party/gpsp.url)" = "https://github.com/itsveenee/gpsp.git"
+          test "$(git config -f .gitmodules --get submodule.src/third_party/gpsp.branch)" = "master"
+
+
+          echo "Recursive submodules:"
+          git submodule status --recursive
+          echo "Beetle PCE Fast commit:"
+          git -C src/third_party/beetle-pce-fast rev-parse HEAD
+          echo "FCEUmm/FDS commit:"
+          git -C src/third_party/fceumm-fds rev-parse HEAD
+          test "$(git -C src/third_party/fceumm-fds rev-parse HEAD)" = "dc77e3ca4baad08f0023f61dba9846550735b74d"
+          echo "gpSP commit:"
+          git -C src/third_party/gpsp rev-parse HEAD
+          test "$(git -C src/third_party/gpsp rev-parse HEAD)" = "8d268a6bb2cd799f8f2791ebb544a7ef550cfc6f"
+
+
+      # AURORA_CONTINUOUS_PICODRIVE_SOURCE_V4_2
+      #
+      # Continuous intentionally remains the COMPLETE build, including
+      # PicoDrive and Beetle PCE Fast. Package the exact checked-out source
+      # tree BEFORE building, while recursive submodules are populated.
+      # while the recursive submodules are populated, so the release carries
+      # the source corresponding to the linked binary.
+      #
+      # This packaging is a redistribution/compliance aid; it is not a claim
+      # that every license in the combined binary is mutually compatible.
+      - name: Package checked-out source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA:0:12}"
+          source_name="SNESticleAurora-${short_sha}-source.tar.gz"
+
+          {
+            printf 'SNESticleAurora commit: %s\n' "$GITHUB_SHA"
+            printf 'Recursive submodules:\n'
+            git submodule status --recursive
+          } > /tmp/SOURCE-MANIFEST.txt
+
+          tar             --exclude='./.git'             --exclude='*/.git'             --exclude='./build'             --exclude='./.aurora_picodrive_stage2_backup'             -czf "/tmp/${source_name}"             -C "$GITHUB_WORKSPACE" .             -C /tmp SOURCE-MANIFEST.txt
+
+          echo "AURORA_SOURCE_NAME=${source_name}" >> "$GITHUB_ENV"
+          echo "AURORA_SOURCE_BUNDLE=/tmp/${source_name}" >> "$GITHUB_ENV"
+
+      - name: Build
+        # Limit only the final GCC LTO fan-out; normal compilation remains parallel.
+        run: make -j8 AUTO_INSTALL=yes LTO_LINK_JOBS=2
+
+      - name: Strip release ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          STRIP="$(command -v mips64r5900el-ps2-elf-strip || true)"
+          if [ -z "$STRIP" ] && [ -n "${PS2DEV:-}" ] && [ -x "$PS2DEV/ee/bin/mips64r5900el-ps2-elf-strip" ]; then STRIP="$PS2DEV/ee/bin/mips64r5900el-ps2-elf-strip"; fi
+          [ -n "$STRIP" ] || STRIP="$(command -v mips64r5900el-ps2-elf-strip 2>/dev/null || true)"
+          [ -n "$STRIP" ] || STRIP="$(find "${PS2DEV:-$HOME/.local/ps2dev}" "$HOME/.local/ps2dev" "$HOME/ps2dev" /usr/local/ps2dev /opt/ps2dev -type f -name mips64r5900el-ps2-elf-strip -print -quit 2>/dev/null || true)"
+          test -n "$STRIP"
+          "$STRIP" -o build/SNESticle.stripped.elf build/SNESticle.elf
+          mv -f build/SNESticle.stripped.elf build/SNESticle.elf
+
+      - name: Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            (cd build && sha256sum SNESticle.elf)
+            (cd /tmp && sha256sum "$AURORA_SOURCE_NAME") 
+          } > /tmp/SHA256SUMS.txt
+
+      - name: Continuous release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh release delete continuous --cleanup-tag --yes || true
+
+          # AURORA_BRANDING_RELEASE_ASSET_V9_20260821
+          gh release create continuous             build/SNESticle.elf             "$AURORA_SOURCE_BUNDLE"             /tmp/SOURCE-MANIFEST.txt             /tmp/SHA256SUMS.txt             LICENSE             BRANDING.md             LICENSES/PicoDrive-COPYING.txt             LICENSES/QuickNES-GPL-2.0.txt             LICENSES/Beetle-PCE-Fast-GPL-2.0.txt             LICENSES/FCEUmm-GPL-2.0.txt             LICENSES/Gambatte-GPL-2.0.txt             LICENSES/gpSP-GPL-2.0.txt             THIRD_PARTY.md             --target "$GITHUB_SHA"             --title "Continuous Build"             --prerelease             --notes-file CONTINUOUS_RELEASE.md  # AURORA_CONTINUOUS_RELEASE_FILE_V8_20260821
+

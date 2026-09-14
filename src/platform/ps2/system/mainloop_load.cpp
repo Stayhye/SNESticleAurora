@@ -436,6 +436,7 @@ static int _MainLoopZipNameIsRom(const char *pName)
                 case MAINLOOP_ENTRYTYPE_SEGAROM:
                 case MAINLOOP_ENTRYTYPE_PCEROM:
                 case MAINLOOP_ENTRYTYPE_GBROM:
+                case MAINLOOP_ENTRYTYPE_GBAROM: /* AURORA_ROM_LIFETIME_RAMONLY_ZIP_V2_20260913 */
                         return 1;
                 default:
                         return 0;
@@ -447,6 +448,7 @@ static int _MainLoopZipNameIsRom(const char *pName)
 #define MAINLOOP_LEGACY_ROM_MAX_BYTES (8U * 1024U * 1024U + 1024U)
 #define MAINLOOP_SEGA_ROM_MAX_BYTES   (16U * 1024U * 1024U)
 #define MAINLOOP_PCE_ROM_MAX_BYTES    (4U * 1024U * 1024U + 512U)
+#define MAINLOOP_GBA_ZIP_MAX_BYTES    (32U * 1024U * 1024U) /* AURORA_ROM_LIFETIME_RAMONLY_ZIP_V2_20260913: RAM-only */
 #define MAINLOOP_SEGA_PROBE_BYTES     0x8200U
 /* AURORA_FDS_V4_ZIP_LIMITS_20260828 */
 #define MAINLOOP_FDS_SIDE_BYTES       65500U
@@ -471,6 +473,120 @@ static void _MainLoopRemoveFdsZipTemp(void)
     }
 }
 
+/* AURORA_ZIP_FILEONLY_MARIO_BIOS_TSUKURU8M_V3_20260913_ZIP_FILEONLY
+ * ZIP cartridge/disk policy for path-based cores.
+ *
+ * Never hold a complete inflated GBA/FDS member in EE RAM. miniz writes the
+ * selected member directly to SYSTEM/UNZIP, then the normal path-based core
+ * loader owns that file for its complete lifetime.
+ */
+static Char s_GbaZipTempPath[1024] = {0};
+
+static void _MainLoopRemoveGbaZipTemp(void)
+{
+    if (s_GbaZipTempPath[0])
+    {
+        remove(s_GbaZipTempPath);
+        s_GbaZipTempPath[0] = 0;
+    }
+}
+
+static Bool _MainLoopPrepareZipTempPath(
+    Char *pOut, Int32 nOutBytes, const Char *pLeaf)
+{
+    Char systemDir[512];
+    Char unzipDir[768];
+    struct stat st;
+    int n;
+
+    if (!pOut || nOutBytes <= 0 || !pLeaf || !*pLeaf)
+        return FALSE;
+    pOut[0] = 0;
+
+    if (!MainLoopEnsureSystemDirectory(
+            systemDir, (Int32)sizeof(systemDir)))
+        return FALSE;
+
+    n = snprintf(unzipDir, sizeof(unzipDir),
+                 "%s/UNZIP", systemDir);
+    if (n < 0 || n >= (int)sizeof(unzipDir))
+        return FALSE;
+
+    if (mkdir(unzipDir, 0777) != 0)
+    {
+        if (stat(unzipDir, &st) != 0 || !S_ISDIR(st.st_mode))
+            return FALSE;
+    }
+
+    n = snprintf(pOut, (size_t)nOutBytes,
+                 "%s/%s", unzipDir, pLeaf);
+    return (n >= 0 && n < nOutBytes) ? TRUE : FALSE;
+}
+
+static Bool _MainLoopExtractZipEntryToFile(
+    const Char *pZipPath,
+    const Char *pMemberName,
+    unsigned int uZipIndex,
+    Int32 nExpectedBytes,
+    const Char *pOutPath)
+{
+    mz_zip_archive zip;
+    mz_zip_archive_file_stat zst;
+    struct stat fst;
+    Bool ok = FALSE;
+
+    if (!pZipPath || !*pZipPath ||
+        !pMemberName || !*pMemberName ||
+        !pOutPath || !*pOutPath ||
+        nExpectedBytes <= 0)
+        return FALSE;
+
+    memset(&zip, 0, sizeof(zip));
+    memset(&zst, 0, sizeof(zst));
+
+    if (!mz_zip_reader_init_file(&zip, pZipPath, 0))
+        return FALSE;
+
+    if (!mz_zip_reader_file_stat(
+            &zip, (mz_uint)uZipIndex, &zst))
+        goto done;
+
+    if (zst.m_is_directory ||
+        zst.m_uncomp_size != (mz_uint64)(Uint32)nExpectedBytes ||
+        strcmp(zst.m_filename, pMemberName) != 0)
+        goto done;
+
+    remove(pOutPath);
+
+#ifndef MINIZ_NO_STDIO
+    if (!mz_zip_reader_extract_to_file(
+            &zip, (mz_uint)uZipIndex, pOutPath, 0))
+        goto done;
+#else
+#error Aurora ZIP file-only path requires miniz stdio extraction
+#endif
+
+    if (stat(pOutPath, &fst) != 0 ||
+        S_ISDIR(fst.st_mode) ||
+        fst.st_size != nExpectedBytes)
+    {
+        remove(pOutPath);
+        goto done;
+    }
+
+    ok = TRUE;
+
+done:
+    mz_zip_reader_end(&zip);
+    if (!ok)
+        remove(pOutPath);
+    return ok;
+}
+
+
+/* AURORA_PCE_SSF2_FINAL_R4_CLEANUP_20260913_NORMAL_ALLOCATOR
+ * R4: no speculative cross-core SSF2 reservation.  Allocate only when the
+ * selected cartridge actually requests its backing. */
 static void _MainLoopFreeRomBuffer(void)
 {
     if (_RomData)
@@ -489,11 +605,7 @@ static Bool _MainLoopAllocRomBuffer(Uint32 capacity)
     if (!p)
     {
         /* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910
-         * Some PS2 heaps become fragmented by optional drivers/storage. ROM
-         * data is CPU-read backing, not a GS DMA buffer; PicoDrive requires
-         * only normal word-safe storage and separately receives the exact
-         * capacity. Retry with a weaker-but-safe 16-byte alignment before
-         * reporting OOM. The normal 64-byte path remains unchanged. */
+         * ROM backing is CPU memory, not a GS DMA surface. */
         p = (Uint8 *)memalign(16, (size_t)capacity);
     }
     if (!p)
@@ -566,6 +678,8 @@ static int _MainLoopZipDynamicEntryFilter(
             return nBytes <= MAINLOOP_SEGA_ROM_MAX_BYTES;
         case MAINLOOP_ENTRYTYPE_PCEROM:
             return nBytes <= MAINLOOP_PCE_ROM_MAX_BYTES;
+        case MAINLOOP_ENTRYTYPE_GBAROM:
+            return nBytes > 0U && nBytes <= MAINLOOP_GBA_ZIP_MAX_BYTES; /* AURORA_ROM_LIFETIME_RAMONLY_ZIP_V2_20260913 */
         default:
             return 0;
     }
@@ -879,6 +993,8 @@ _MainLoopSwcCartSRAMDetach();
 	if (_pPceRom) _pPceRom->Unload();
 	if (_pGb) _pGb->UnloadGame(); /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
 	if (_pGba) _pGba->UnloadGame(); /* AURORA_GPSP_GBA_V1_20260911 */
+    /* AURORA_ZIP_FILEONLY_MARIO_BIOS_TSUKURU8M_V3_20260913_ZIP_FILEONLY: gpSP paging file is closed now. */
+    _MainLoopRemoveGbaZipTemp();
 
     if (s_PceCdrdaoTempCue[0])
     {
@@ -1644,7 +1760,14 @@ static Bool _MainLoopExecuteFdsPath(const char *pMappedPath,
 
 
 /* AURORA_FDS_V4_ZIP_LOADER_20260828 */
-/* AURORA_FDS_ZIP_FULLPATH_TMP_V2_20260828 */
+/* AURORA_FDS_D88_TFA_SWC_V3_20260913 */
+/* AURORA_FDS_ZIP_RAMONLY_V3_20260913
+ * ZIP storage is input-only. miniz expands the selected .fds member into a
+ * small EE-RAM buffer and the existing FdsSystem/FCEUmm borrowed-memory path
+ * consumes it synchronously. FDSLoad copies all disk sides before returning,
+ * so this frontend buffer is released immediately after LoadDiskMemory().
+ * No temporary file is created on USB, memory card, HDD, or source storage. */
+/* AURORA_ZIP_FILEONLY_MARIO_BIOS_TSUKURU8M_V3_20260913_ZIP_FILEONLY: FDS ZIP -> SYSTEM/UNZIP -> FCEUmm full path. */
 static Bool _MainLoopExecuteFdsZip(const char *pZipPath,
                                    const char *pOriginalZipPath,
                                    const char *pMemberName,
@@ -1652,147 +1775,69 @@ static Bool _MainLoopExecuteFdsZip(const char *pZipPath,
                                    Int32 nExpectedBytes,
                                    Bool bLoadSRAM)
 {
-    Char SystemDirectory[512];
-    Char BiosPath[1024];
-    Char TempPath[1024];
-    char LoadedName[512];
-    FILE *pBios;
-    FILE *pTemp;
-    long nBiosBytes;
-    Uint8 *pData;
-    Int32 nRead;
-    size_t nWritten;
-    Bool bWriteOK;
-    Bool bLoaded;
+    Char tempPath[1024];
 
     if (!pZipPath || !*pZipPath ||
         !pOriginalZipPath || !*pOriginalZipPath ||
-        !pMemberName || !*pMemberName || !_pFds ||
+        !pMemberName || !*pMemberName ||
+        !_pFds ||
         nExpectedBytes < (Int32)MAINLOOP_FDS_ZIP_MIN_BYTES ||
-        (Uint32)nExpectedBytes > MAINLOOP_FDS_ZIP_MAX_BYTES)
-        return FALSE;
-
-    if (!MainLoopEnsureGameplayRasterWidth(256))
-        return FALSE;
-
-    if (!MainLoopFindSystemFileDirectory(
-            SystemDirectory, (Int32)sizeof(SystemDirectory), "disksys.rom") &&
-        !MainLoopEnsureSystemDirectory(
-            SystemDirectory, (Int32)sizeof(SystemDirectory)))
-        return FALSE;
-
-    if (snprintf(BiosPath, sizeof(BiosPath), "%s/disksys.rom",
-                 SystemDirectory) >= (int)sizeof(BiosPath))
-        return FALSE;
-
-    pBios = fopen(BiosPath, "rb");
-    if (!pBios)
+        nExpectedBytes > (Int32)MAINLOOP_FDS_ZIP_MAX_BYTES)
     {
-        MainLoopModalPrintf(60 * 5,
-            "ERROR: put disksys.rom in SNESticle/SYSTEM");
-        return FALSE;
-    }
-    if (fseek(pBios, 0, SEEK_END) != 0)
-    {
-        fclose(pBios);
-        return FALSE;
-    }
-    nBiosBytes = ftell(pBios);
-    fclose(pBios);
-    if (nBiosBytes != 8192)
-    {
-        MainLoopModalPrintf(60 * 5,
-            "ERROR: disksys.rom must be exactly 8192 bytes");
+        MainLoopModalPrintf(
+            60 * 4, "ERROR: invalid FDS image in ZIP");
         return FALSE;
     }
 
-    pData = (Uint8 *)memalign(64, (size_t)nExpectedBytes);
-    if (!pData)
+    _MainLoopRemoveFdsZipTemp();
+
+    if (!_MainLoopPrepareZipTempPath(
+            tempPath, (Int32)sizeof(tempPath),
+            "aurora_fds_zip.fds"))
     {
-        MainLoopModalPrintf(60 * 3,
-            "ERROR: not enough memory for FDS ZIP");
+        MainLoopModalPrintf(
+            60 * 4, "ERROR: cannot create SYSTEM/UNZIP");
         return FALSE;
     }
 
-    LoadedName[0] = 0;
-    nRead = MinizReadZipEntryToBuffer(
-        pZipPath, uZipIndex, pData, nExpectedBytes,
-        LoadedName, (int)sizeof(LoadedName));
-
-    if (nRead != nExpectedBytes || strcmp(LoadedName, pMemberName) != 0)
+    if (!_MainLoopExtractZipEntryToFile(
+            pZipPath, pMemberName, uZipIndex,
+            nExpectedBytes, tempPath))
     {
-        free(pData);
-        MainLoopModalPrintf(60 * 4,
-            "ERROR: cannot extract complete FDS from ZIP");
+        MainLoopModalPrintf(
+            60 * 4, "ERROR: Cannot extract complete FDS ZIP");
         return FALSE;
     }
 
-    if (snprintf(TempPath, sizeof(TempPath), "%s/__AURORA_FDS_TMP__.fds",
-                 SystemDirectory) >= (int)sizeof(TempPath))
+    if (snprintf(s_FdsZipTempPath,
+                 sizeof(s_FdsZipTempPath), "%s", tempPath) >=
+        (int)sizeof(s_FdsZipTempPath))
     {
-        free(pData);
+        remove(tempPath);
+        s_FdsZipTempPath[0] = 0;
+        MainLoopModalPrintf(60 * 4, "ERROR: FDS temp path too long");
         return FALSE;
     }
 
-    /* A previous crash may have left the temp file behind. It is never a
-     * user's source image, so replacing this fixed private name is safe. */
-    remove(TempPath);
-    pTemp = fopen(TempPath, "wb");
-    if (!pTemp)
+    /* FCEUmm need_fullpath keeps this .fds alive. The existing FDS cleanup
+     * runs only after SetRom(NULL), so eject/insert and side changes can keep
+     * using the same backing file. */
+    if (!_MainLoopExecuteFdsPath(
+            s_FdsZipTempPath, pOriginalZipPath, FALSE))
     {
-        free(pData);
-        MainLoopModalPrintf(60 * 4,
-            "ERROR: SYSTEM must be writable for FDS ZIP");
+        _MainLoopRemoveFdsZipTemp();
         return FALSE;
     }
 
-    nWritten = fwrite(pData, 1, (size_t)nRead, pTemp);
-    bWriteOK = (nWritten == (size_t)nRead && fflush(pTemp) == 0)
-        ? TRUE : FALSE;
-    if (fclose(pTemp) != 0)
-        bWriteOK = FALSE;
-    free(pData);
-
-    if (!bWriteOK)
-    {
-        remove(TempPath);
-        MainLoopModalPrintf(60 * 4,
-            "ERROR: cannot write temporary FDS image");
-        return FALSE;
-    }
-
-    _MainLoop_fOutputIntensity = 0.8f;
-    bLoaded = _pFds->LoadDisk(TempPath, SystemDirectory);
-
-    if (!bLoaded || !_pFds->IsRomReady())
-    {
-        _MainLoopUnloadRom();
-        remove(TempPath);
-        MainLoopModalPrintf(60 * 5,
-            "ERROR: FCEUmm could not boot FDS from ZIP");
-        return FALSE;
-    }
-
-    snprintf(s_FdsZipTempPath, sizeof(s_FdsZipTempPath), "%s", TempPath);
-
-    _pSystem = _pFds;
-    _pFds->Reset();
     _MainLoopGetName(_RomName, pMemberName);
     snprintf(_RomPath, sizeof(_RomPath), "%s", pOriginalZipPath);
     MainLoopStateOnRomChanged();
-    _MainLoopSetSampleRate(_pFds->GetSampleRate());
     if (bLoadSRAM)
         _MainLoopLoadSRAM();
 
-    if (_fbTexture[0]) _fbTexture[0]->Clear();
-    if (_fbTexture[1]) _fbTexture[1]->Clear();
-    if (_fbTexture[0])
-        TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
-
-    _MainLoop_iDisk = 0;
-    _MainLoop_bDiskInserted = TRUE;
-    ConPrint("FDS Loaded from ZIP/fullpath: %s -> %s (%d bytes)\n",
-             pZipPath, pMemberName, nRead);
+    ConPrint("FDS ZIP file-backed: %s -> %s -> %s (%d bytes)\n",
+             pZipPath, pMemberName, s_FdsZipTempPath,
+             nExpectedBytes);
     return TRUE;
 }
 
@@ -2371,8 +2416,17 @@ static Bool _MainLoopSwcInsertCartridge(const char *pPath)
 
     if (eError != Emu::Rom::LOADERROR_NONE)
     {
+        /* AURORA_SWC_CART_OOM_REPORT_V3_20260913
+         * Do not collapse an allocation failure into "Invalid cartridge".
+         * V3 also removes the resident D88 mirror, so the usual cause of this
+         * false error releases ~1.69 MiB before the cartridge is parsed. */
         _pSnesRom->Unload();
-        MainLoopStatusPrintf(180, "Invalid SNES cartridge");
+        if (eError == Emu::Rom::LOADERROR_OUTOFSPACE)
+            MainLoopStatusPrintf(240,
+                "Not enough EE memory for Wild Card cartridge");
+        else
+            MainLoopStatusPrintf(240,
+                "Invalid SNES cartridge (load error %d)", (int)eError);
         return FALSE;
     }
 
@@ -3796,6 +3850,88 @@ static Bool _MainLoopExecuteGbaPath(const char *pMappedPath,
     return TRUE;
 }
 
+
+/* AURORA_ROM_LIFETIME_RAMONLY_ZIP_V2_20260913
+ * GBA ZIP policy: storage is read-only. The selected member is decompressed
+ * only into EE RAM, then synchronously copied into gpSP's existing cartridge
+ * buffers. No mass:/, mc0:/, mc1:/, pfs:/ or source-directory temp is ever
+ * created. If the two in-RAM representations cannot coexist during load, the
+ * launch fails cleanly instead of spilling to storage. */
+/* AURORA_ZIP_FILEONLY_MARIO_BIOS_TSUKURU8M_V3_20260913_ZIP_FILEONLY: GBA ZIP -> SYSTEM/UNZIP -> gpSP file pager. */
+static Bool _MainLoopExecuteGbaZipMemory(const char *pZipPath,
+                                         const char *pOriginalPath,
+                                         const char *pMemberName,
+                                         unsigned int uZipIndex,
+                                         Int32 nExpectedBytes,
+                                         Bool bLoadSRAM)
+{
+    Char tempPath[1024];
+
+    if (!pZipPath || !*pZipPath ||
+        !pOriginalPath || !*pOriginalPath ||
+        !pMemberName || !*pMemberName ||
+        !_pGba ||
+        nExpectedBytes <= 0 ||
+        (Uint32)nExpectedBytes > MAINLOOP_GBA_ZIP_MAX_BYTES)
+    {
+        MainLoopModalPrintf(
+            60 * 4, "ZIP file too large for decompress");
+        return FALSE;
+    }
+
+    _MainLoopRemoveGbaZipTemp();
+
+    if (!_MainLoopPrepareZipTempPath(
+            tempPath, (Int32)sizeof(tempPath),
+            "aurora_gba_zip.gba"))
+    {
+        MainLoopModalPrintf(
+            60 * 4, "ERROR: cannot create SYSTEM/UNZIP");
+        return FALSE;
+    }
+
+    if (!_MainLoopExtractZipEntryToFile(
+            pZipPath, pMemberName, uZipIndex,
+            nExpectedBytes, tempPath))
+    {
+        MainLoopModalPrintf(
+            60 * 4, "ERROR: Cannot extract complete GBA ZIP");
+        return FALSE;
+    }
+
+    if (snprintf(s_GbaZipTempPath,
+                 sizeof(s_GbaZipTempPath), "%s", tempPath) >=
+        (int)sizeof(s_GbaZipTempPath))
+    {
+        remove(tempPath);
+        s_GbaZipTempPath[0] = 0;
+        MainLoopModalPrintf(60 * 4, "ERROR: GBA temp path too long");
+        return FALSE;
+    }
+
+    /* Load with SRAM deferred: save identity must use the ZIP member name,
+     * not the fixed temporary filename. gpSP keeps the file open for ROM
+     * paging, so s_GbaZipTempPath is retained until unload. */
+    if (!_MainLoopExecuteGbaPath(
+            s_GbaZipTempPath, pOriginalPath, FALSE))
+    {
+        _MainLoopRemoveGbaZipTemp();
+        return FALSE;
+    }
+
+    _MainLoopGetName(_RomName, pMemberName);
+    snprintf(_RomPath, sizeof(_RomPath), "%s", pOriginalPath);
+    MainLoopStateOnRomChanged();
+    if (bLoadSRAM)
+        _MainLoopLoadSRAM();
+
+    ConPrint("GBA ZIP file-backed: %s -> %s -> %s (%d bytes)\n",
+             pZipPath, pMemberName, s_GbaZipTempPath,
+             nExpectedBytes);
+    return TRUE;
+}
+
+
 Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
 {
     PathExtTypeE eType, eSourceType;
@@ -4019,6 +4155,18 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
         nExpectedRomBytes = _MainLoopGetBinarySize(pFileName);
     }
 
+    /* AURORA_ROM_LIFETIME_RAMONLY_ZIP_V2_20260913: compressed GBA may only enter through RAM. */
+    if (eType == MAINLOOP_ENTRYTYPE_GBAROM)
+    {
+        if (eSourceType == MAINLOOP_ENTRYTYPE_ZIP && bZipIndexValid)
+            return _MainLoopExecuteGbaZipMemory(
+                pFileName, OriginalPath, ZipMemberName,
+                uZipIndex, nExpectedRomBytes, bLoadSRAM);
+        MainLoopModalPrintf(60 * 4,
+            "Compressed GBA must be a RAM-only ZIP");
+        return FALSE;
+    }
+
     /* AURORA_FDS_V4_ZIP_DISPATCH_20260828 */
     if (eType == MAINLOOP_ENTRYTYPE_NESFDSDISK)
     {
@@ -4035,7 +4183,10 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
     if (nExpectedRomBytes <= 0 ||
         (Uint32)nExpectedRomBytes > _MainLoopRomPayloadLimit(eType))
     {
-        MainLoopModalPrintf(60 * 3, "ERROR: ROM is too large or unreadable");
+        MainLoopModalPrintf(60 * 3,
+            eSourceType == MAINLOOP_ENTRYTYPE_ZIP
+                ? "ZIP file too large for decompress"
+                : "ERROR: ROM is too large or unreadable");
         return FALSE;
     }
 
@@ -4077,7 +4228,19 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
             return FALSE;
     }
 
-    /* Resolve 240p physical raster before final ROM RAM is committed. */
+    /* AURORA_MEMORY_RASTER_REGRESSION_FIX_V3_20260913_ROM_BEFORE_RASTER
+     * Memory-regression fix: decide the target raster first, but do NOT
+     * rebuild gsKit before the largest EE allocation of this load.
+     *
+     * After gpSP/GBA enlarged the resident ELF, rebuilding 256->320/512
+     * before reserving a 5 MiB+ cartridge could fragment/consume the last
+     * sufficiently large contiguous heap block. SSF2 then failed here with
+     * "not enough memory for ROM" even after its backing was reduced from
+     * 8 MiB to ~5 MiB.
+     *
+     * Reserve the ROM while the old UI raster is still intact. Only after
+     * that succeeds may gsKit change raster. On raster failure the existing
+     * abort helper frees the ROM before restoring 256. */
     {
         Int32 rasterWidth = 256;
 
@@ -4144,32 +4307,34 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
                 rasterWidth = 320;
         }
 
-        if (!MainLoopEnsureGameplayRasterWidth(rasterWidth))
+        /* Allocate exact frontend backing policy for this cartridge. */
         {
-            if (rasterWidth != 256)
-                MainLoopEnsureGameplayRasterWidth(256);
-            MainLoopModalPrintf(60 * 3,
-                "ERROR: cannot configure video raster");
-            return FALSE;
+            size_t required;
+            if (eType == MAINLOOP_ENTRYTYPE_SEGAROM)
+                required = PicoDriveBridge_RequiredRomCapacity(
+                    (size_t)nExpectedRomBytes);
+            else
+                required = (size_t)nExpectedRomBytes + 1024U;
+
+            if (required < (size_t)nExpectedRomBytes ||
+                required > 0xFFFFFFFFU ||
+                !_MainLoopAllocRomBuffer((Uint32)required))
+            {
+                _MainLoopAbortPreCoreLoad();
+                MainLoopModalPrintf(60 * 3,
+                    eSourceType == MAINLOOP_ENTRYTYPE_ZIP
+                        ? "ZIP file too large for decompress"
+                        : "ERROR: not enough memory for ROM");
+                return FALSE;
+            }
         }
-    }
 
-    /* Allocate exact frontend backing policy for this cartridge. */
-    {
-        size_t required;
-        if (eType == MAINLOOP_ENTRYTYPE_SEGAROM)
-            required = PicoDriveBridge_RequiredRomCapacity(
-                (size_t)nExpectedRomBytes);
-        else
-            required = (size_t)nExpectedRomBytes + 1024U;
-
-        if (required < (size_t)nExpectedRomBytes ||
-            required > 0xFFFFFFFFU ||
-            !_MainLoopAllocRomBuffer((Uint32)required))
+        /* Commit video only after the large ROM backing is secured. */
+        if (!MainLoopEnsureGameplayRasterWidth(rasterWidth))
         {
             _MainLoopAbortPreCoreLoad();
             MainLoopModalPrintf(60 * 3,
-                "ERROR: not enough memory for ROM");
+                "ERROR: cannot configure video raster");
             return FALSE;
         }
     }
@@ -4355,6 +4520,13 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
         _MainLoopUnloadRom();
         return FALSE;
     }
+
+    /* AURORA_ROM_LIFETIME_RAMONLY_ZIP_V2_20260913: release frontend staging as soon as the copying core
+     * has absorbed it. Sega/PCE are zero-copy AttachBuffer users and must
+     * retain _RomData for the cartridge lifetime. Special SWC/SMD/FDS
+     * media paths bypass this generic block entirely. */
+    if (pRom == _pSnesRom || pRom == _pNesRom)
+        _MainLoopFreeRomBuffer();
 
     if (pBios)
     {
