@@ -1,4 +1,6 @@
 #include "types.h"
+/* AURORA_TFA_RESYNC_R2_TURBO_OR_V1_20260913 */
+/* AURORA_GB_GBA_R2_TURBO_SPEED_V2_20260914 */
 #include <stdio.h>
 #include <string.h>
 #include <libpad.h>
@@ -383,16 +385,28 @@ Uint16 _MainLoopInput(Uint32 pad)
      * Cross=A, Square=B, Circle=Turbo A, Triangle=Turbo B. */
     if (_pSystem == _pFds)
     {
+        /* AURORA_R2_DEDICATED_TURBO_OR_V1
+         * Circle=Turbo A, Triangle=Turbo B;
+         * R2+Cross=Turbo A, R2+Square=Turbo B. */
+        const Bool bR2 = (pad & PAD_R2) ? TRUE : FALSE;
+        const Bool bTurboA =
+            ((pad & PAD_CIRCLE) || (bR2 && (pad & PAD_CROSS))) ? TRUE : FALSE;
+        const Bool bTurboB =
+            ((pad & PAD_TRIANGLE) || (bR2 && (pad & PAD_SQUARE))) ? TRUE : FALSE;
         Uint32 uFds = pad &
             ~(PAD_CROSS | PAD_SQUARE | PAD_CIRCLE | PAD_TRIANGLE | PAD_R2);
 
-        if (pad & PAD_CROSS)  uFds |= PAD_CROSS;
-        if (pad & PAD_SQUARE) uFds |= PAD_SQUARE;
+        /* R2 é modificador: não vaze Cross/Square normal junto do turbo. */
+        if (!bR2)
+        {
+            if (pad & PAD_CROSS)  uFds |= PAD_CROSS;
+            if (pad & PAD_SQUARE) uFds |= PAD_SQUARE;
+        }
 
         if (_MainLoopTurboHostIsOn())
         {
-            if (pad & PAD_CIRCLE)   uFds |= PAD_CROSS;
-            if (pad & PAD_TRIANGLE) uFds |= PAD_SQUARE;
+            if (bTurboA) uFds |= PAD_CROSS;
+            if (bTurboB) uFds |= PAD_SQUARE;
         }
         return _MainLoopSnesInput(uFds);
     }
@@ -401,6 +415,14 @@ Uint16 _MainLoopInput(Uint32 pad)
 	 * Cross=I, Square=II, Circle=Turbo I, Triangle=Turbo II. */
 	if (_pSystem == _pPce)
 	{
+		/* AURORA_R2_DEDICATED_TURBO_OR_V1
+		 * Circle=Turbo I, Triangle=Turbo II;
+		 * R2+Cross=Turbo I, R2+Square=Turbo II. */
+		const Bool bR2 = (pad & PAD_R2) ? TRUE : FALSE;
+		const Bool bTurboI =
+			((pad & PAD_CIRCLE) || (bR2 && (pad & PAD_CROSS))) ? TRUE : FALSE;
+		const Bool bTurboII =
+			((pad & PAD_TRIANGLE) || (bR2 && (pad & PAD_SQUARE))) ? TRUE : FALSE;
 		Uint32 uPce = pad & ~(PAD_SQUARE | PAD_CROSS | PAD_TRIANGLE | PAD_CIRCLE | PAD_R2);
 
 		/* AURORA_PCE_TURBO_CADENCE_V1
@@ -411,12 +433,16 @@ Uint16 _MainLoopInput(Uint32 pad)
 			uPceTurboShift = (Uint32)MAINLOOP_TURBO_SPEED_QUARTER;
 		const Uint32 uPceTurboElapsed = _MainLoop_TurboHostFrame - _MainLoop_TurboHostPhaseBase;
 		const Bool bTurboOn = (((uPceTurboElapsed >> uPceTurboShift) & 1U) == 0U) ? TRUE : FALSE;
-		if (pad & PAD_CROSS)  uPce |= PAD_SQUARE;
-		if (pad & PAD_SQUARE) uPce |= PAD_CROSS;
+
+		if (!bR2)
+		{
+			if (pad & PAD_CROSS)  uPce |= PAD_SQUARE;
+			if (pad & PAD_SQUARE) uPce |= PAD_CROSS;
+		}
 		if (bTurboOn)
 		{
-			if (pad & PAD_CIRCLE)   uPce |= PAD_SQUARE;
-			if (pad & PAD_TRIANGLE) uPce |= PAD_CROSS;
+			if (bTurboI)  uPce |= PAD_SQUARE;
+			if (bTurboII) uPce |= PAD_CROSS;
 		}
 		return _MainLoopSnesInput(uPce);
 	}
@@ -428,15 +454,26 @@ Uint16 _MainLoopInput(Uint32 pad)
 		if (PicoDriveBridge_Is8Bit())
 		{
 			/* AURORA_SMS_GG_FIXED_TURBO12_V1
-			 * Square=1, Cross=2, Triangle=Turbo1, Circle=Turbo2. */
+			 * Square=1, Cross=2, Triangle=Turbo1, Circle=Turbo2.
+			 * AURORA_R2_DEDICATED_TURBO_OR_V1:
+			 * R2+Square=Turbo1, R2+Cross=Turbo2. */
+			const Bool bR2 = (pad & PAD_R2) ? TRUE : FALSE;
+			const Bool bTurbo1 =
+				((pad & PAD_TRIANGLE) || (bR2 && (pad & PAD_SQUARE))) ? TRUE : FALSE;
+			const Bool bTurbo2 =
+				((pad & PAD_CIRCLE) || (bR2 && (pad & PAD_CROSS))) ? TRUE : FALSE;
 			Uint32 uSms = pad & ~(PAD_SQUARE | PAD_CROSS | PAD_CIRCLE | PAD_TRIANGLE | PAD_R2);
 			const Bool bTurboOn = _MainLoopTurboHostIsOn();
-			if (pad & PAD_SQUARE) uSms |= PAD_SQUARE;
-			if (pad & PAD_CROSS)  uSms |= PAD_CROSS;
+
+			if (!bR2)
+			{
+				if (pad & PAD_SQUARE) uSms |= PAD_SQUARE;
+				if (pad & PAD_CROSS)  uSms |= PAD_CROSS;
+			}
 			if (bTurboOn)
 			{
-				if (pad & PAD_TRIANGLE) uSms |= PAD_SQUARE;
-				if (pad & PAD_CIRCLE)   uSms |= PAD_CROSS;
+				if (bTurbo1) uSms |= PAD_SQUARE;
+				if (bTurbo2) uSms |= PAD_CROSS;
 			}
 			return _MainLoopSegaInput(uSms);
 		}
@@ -453,10 +490,86 @@ Uint16 _MainLoopInput(Uint32 pad)
 		return _MainLoopSegaInput(pad);
 	}
 
+	/* AURORA_GB_GBA_R2_TURBO_SPEED_V2_20260914
+	 *
+	 * GB/GBC and GBA used to pass Circle/Triangle as core-specific turbo
+	 * carrier bits. Gambatte pulsed them at a fixed cadence and gpSP used
+	 * its own fixed gpsp_turbo_period.
+	 *
+	 * Pulse once here with Aurora's shared host turbo clock:
+	 *
+	 *   Cross            = A normal
+	 *   Square           = B normal
+	 *   Circle           = Turbo A
+	 *   Triangle         = Turbo B
+	 *   R2 + Cross       = Turbo A  (alias / OR)
+	 *   R2 + Square      = Turbo B  (alias / OR)
+	 *
+	 * Turbo requests are converted back into NORMAL Cross/Square carriers
+	 * only during the ON phase. Thus Gambatte/gpSP never apply a second
+	 * fixed oscillator for these A/B turbo requests.
+	 *
+	 * While R2 is held, Cross/Square are removed before rebuilding the
+	 * result, so R2+Cross cannot become "A held + Turbo A", nor B likewise.
+	 * D-pad/Start/Select remain continuous.
+	 *
+	 * gpSP special case: its bridge separately reads raw PS2 input for
+	 * R2+L1 = Turbo L and R2+L2 = Turbo R. Suppress normal L while R2 is
+	 * down so Turbo L does not mix with a continuously-held L.
+	 */
+	if (_pSystem == _pGb || _pSystem == _pGba)
+	{
+		const Bool bR2 = (pad & PAD_R2) ? TRUE : FALSE;
+		const Bool bTurboA =
+			((pad & PAD_CIRCLE) || (bR2 && (pad & PAD_CROSS))) ? TRUE : FALSE;
+		const Bool bTurboB =
+			((pad & PAD_TRIANGLE) || (bR2 && (pad & PAD_SQUARE))) ? TRUE : FALSE;
+
+		Uint32 uHandheld =
+			pad & ~(PAD_CROSS | PAD_SQUARE | PAD_CIRCLE | PAD_TRIANGLE | PAD_R2);
+
+		if (!bR2)
+		{
+			if (pad & PAD_CROSS)  uHandheld |= PAD_CROSS;
+			if (pad & PAD_SQUARE) uHandheld |= PAD_SQUARE;
+		}
+		else if (_pSystem == _pGba)
+		{
+			/* Raw-input R2+L1 remains gpSP Turbo-L only. */
+			uHandheld &= ~PAD_L1;
+		}
+
+		if (_MainLoopTurboHostIsOn())
+		{
+			if (bTurboA) uHandheld |= PAD_CROSS;
+			if (bTurboB) uHandheld |= PAD_SQUARE;
+		}
+
+		return _MainLoopSnesInput(uHandheld);
+	}
+
+	/* AURORA_R2_DEDICATED_TURBO_OR_V1
+	 * QuickNES já possui o oscilador controlado por Turbo Speed. Converta
+	 * R2+Cross/R2+Square para os MESMOS carriers Circle/Triangle, sem aplicar
+	 * uma segunda fase aqui e sem deixar o botão normal vazar junto. */
+	if (_pSystem == _pNes && (pad & PAD_R2) &&
+	    (pad & (PAD_CROSS | PAD_SQUARE | PAD_CIRCLE | PAD_TRIANGLE)))
+	{
+		const Bool bTurboA =
+			((pad & PAD_CIRCLE) || (pad & PAD_CROSS)) ? TRUE : FALSE;
+		const Bool bTurboB =
+			((pad & PAD_TRIANGLE) || (pad & PAD_SQUARE)) ? TRUE : FALSE;
+		Uint32 uNesTurbo = 0;
+
+		if (bTurboA) uNesTurbo |= PAD_CIRCLE;   /* carrier Turbo A */
+		if (bTurboB) uNesTurbo |= PAD_TRIANGLE; /* carrier Turbo B */
+		return _MainLoopSnesInput(uNesTurbo);
+	}
+
 	if (pad & PAD_R2)
 	{
-		/* SNES only. NES keeps its existing QuickNES Circle/Triangle turbo
-		   and the historical R2-reserved behaviour. */
+		/* SNES mantém seu turbo-modifier completo. Os sistemas de turbo
+		   dedicado acima já consumiram R2. */
 		if (_pSystem == _pSnes)
 		{
 			Uint32 uDirections = pad & SNES_DIRECTION_HOST_BUTTONS;

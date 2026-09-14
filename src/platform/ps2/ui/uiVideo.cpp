@@ -1328,7 +1328,7 @@ void CVideoScreen::Draw()
 	else if (iPage == 1)
 	{
 		_VideoHeader(vy, "Audio"); vy += 10; /* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_AUDIO_UI */
-		_VideoRow(vy, 50, m_iSelect, "Menu Music",
+		_VideoRow(vy, 50, m_iSelect, "Menu music",
 		          BgmIsEnabled() ? "ON" : "OFF"); vy += 10;
 		snprintf(buf, sizeof(buf), "%d", BgmGetVolume() / 2);
 		_VideoRow(vy, 51, m_iSelect, "Menu volume", buf); vy += 10;
@@ -1338,6 +1338,10 @@ void CVideoScreen::Draw()
 		_VideoRow(vy, 53, m_iSelect, "SEGA volume", buf); vy += 10;
 		snprintf(buf, sizeof(buf), "%d", AudMixPceGetVolume() / 2);
 		_VideoRow(vy, 54, m_iSelect, "PCE volume", buf); vy += 10;
+		snprintf(buf, sizeof(buf), "%d", g_GbcVolume / 2);
+		_VideoRow(vy, 59, m_iSelect, "GBC volume", buf); vy += 10;
+		snprintf(buf, sizeof(buf), "%d", g_GbaVolume / 2);
+		_VideoRow(vy, 60, m_iSelect, "GBA volume", buf); vy += 10;
 		_VideoRow(vy, 55, m_iSelect, "SNES audio", "32 kHz native"); vy += 10;
 		snprintf(buf, sizeof(buf), "%d kHz", (PicoDriveBridge_GetAudioRate() + 500) / 1000);
 		_VideoRow(vy, 56, m_iSelect, "SEGA audio", buf); vy += 10;
@@ -1345,10 +1349,6 @@ void CVideoScreen::Draw()
 		          PicoDriveBridge_GetSmsFm() ? "Enable" : "Disable"); vy += 10;
 		_VideoRow(vy, 58, m_iSelect, "CD music",
 		          g_CdMusicEnabled ? "ON" : "OFF"); vy += 10; /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
-		snprintf(buf, sizeof(buf), "%d", g_GbcVolume / 2);
-		_VideoRow(vy, 59, m_iSelect, "GBC volume", buf); vy += 10;
-		snprintf(buf, sizeof(buf), "%d", g_GbaVolume / 2);
-		_VideoRow(vy, 60, m_iSelect, "GBA volume", buf); vy += 10;
 	}
 	else if (iPage == 5)
 	{
@@ -1469,13 +1469,27 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 	}
 
 	{
+		/* Audio keeps its historical indices/cases, but navigation follows
+		 * the visual row order: 50-54, 59-60, 55-58. */
+		if (m_iSelect >= 50 && (trigger & (PAD_UP | PAD_DOWN)))
+		{
+			static const Int32 order[] = { 50, 51, 52, 53, 54, 59, 60, 55, 56, 57, 58 };
+			const Int32 count = (Int32)(sizeof(order) / sizeof(order[0]));
+			Int32 pos = 0;
+			while (pos < count && order[pos] != m_iSelect) pos++;
+			if (pos >= count) pos = 0;
+			if (trigger & PAD_UP)   pos = (pos + count - 1) % count;
+			if (trigger & PAD_DOWN) pos = (pos + 1) % count;
+			m_iSelect = order[pos];
+		}
+		else
+		{
 		int lo, hi;
 		if (m_iSelect < 10)       { lo = 0;  hi = 8;  }
 		else if (m_iSelect < 20)  { lo = 10; hi = 19; }
 		else if (m_iSelect <= 30) { lo = 20; hi = 27; } /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910 */
 		else if (m_iSelect < 40)  { lo = 31; hi = 37; }
-		else if (m_iSelect < 50)  { lo = 40; hi = 45; }
-		else                      { lo = 50; hi = 60; } /* AURORA_VOLUME_TFA_N163_V4_20260913 */
+		else                      { lo = 40; hi = 45; }
 		if (trigger & PAD_UP)
 		{
 			m_iSelect--;
@@ -1494,6 +1508,7 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 			if (m_iSelect == 36) m_iSelect = 37;
 			if (m_iSelect == 15) m_iSelect = 16; /* AURORA_SWC_FLOPPY_V5_20260831 */
 			if (m_iSelect >= 28 && m_iSelect <= 30) m_iSelect = 20; /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910 */
+		}
 		}
 	}
 

@@ -12,7 +12,9 @@ import re
 import shutil
 from pathlib import Path
 
-VERSION = "AURORA_FDS_D88_TFA_SWC_V3_20260913_GPSP_STAGE"
+# AURORA_TFA_RESYNC_R2_TURBO_OR_V1_20260913
+
+VERSION = "AURORA_TFA_RESYNC_R2_TURBO_OR_V1_20260913_GPSP_STAGE"
 
 TFA_H = r'''#ifndef AURORA_TFA_H
 #define AURORA_TFA_H
@@ -24,6 +26,7 @@ TFA_H = r'''#ifndef AURORA_TFA_H
 
 void aurora_tfa_set_storage(u8 *data, u32 bytes);
 void aurora_tfa_reset_protocol(void);
+void aurora_tfa_transport_reset(void); /* AURORA_TFA_TRANSPORT_RESET_V1 */
 bool aurora_tfa_active(void);
 u8 aurora_tfa_transfer(u8 out);
 bool aurora_tfa_dirty(void);
@@ -67,6 +70,9 @@ static u32 tfa_out_pos = 0;
 
 void aurora_tfa_reset_protocol(void)
 {
+  /* AURORA_TFA_TRANSPORT_RESET_V1
+   * FSM e scheduler serial formam um único dispositivo lógico. */
+  aurora_tfa_transport_reset();
   tfa_state = TFA_WAIT_SYNC;
   tfa_counter = 0;
   tfa_command = 0;
@@ -224,11 +230,33 @@ static void tfa_process_command(void)
   }
 }
 
+static u8 tfa_begin_sync(void)
+{
+  /* AURORA_TFA_COMMAND_RESYNC_V1
+   * Reinicia somente a transação incompleta. Banco/status persistem. */
+  tfa_state = TFA_PACKET_BODY;
+  tfa_counter = 0;
+  tfa_command = 0;
+  tfa_sync1 = false;
+  tfa_sync2 = false;
+  tfa_out_length = 0;
+  tfa_out_pos = 0;
+  memset(tfa_packet, 0, sizeof(tfa_packet));
+  memset(tfa_out, 0, sizeof(tfa_out));
+  return 0xc6U;
+}
+
 u8 aurora_tfa_transfer(u8 out)
 {
   u8 in = 0x00;
   if (!aurora_tfa_active())
     return 0xffU;
+
+  /* AURORA_TFA_COMMAND_RESYNC_V1
+   * 0x6C pode reiniciar recepção/packet-end após retry do jogo.
+   * Não roube 0x6C enquanto uma resposta já construída é lida. */
+  if (out == 0x6cU && tfa_state != TFA_DATA_RESPONSE)
+    return tfa_begin_sync();
 
   switch (tfa_state) {
     case TFA_WAIT_SYNC:
@@ -317,7 +345,7 @@ def main():
         raise SystemExit(f"invalid gpSP source tree: {src}")
 
     digest = tree_hash(src, me)
-    stamp = stage / ".aurora-gpsp-stage-v15"
+    stamp = stage / ".aurora-gpsp-stage-v16"
     if stamp.is_file() and stamp.read_text().strip() == digest and \
        (stage / "aurora_tfa.c").is_file():
         print(f"[ gpSP stage ] up-to-date: {stage}")
@@ -350,7 +378,15 @@ def main():
         "static u32 serial_irq_cycles = 0;\n"
         "/* AURORA_FDS_BUBBLE_TFA_TRANSPORT_V5_20260913_TFA_EXTERNAL_CLOCK */\n"
         "static u8 aurora_tfa_pending_rx = 0xffU;\n"
-        "static bool aurora_tfa_pending_valid = false;\n",
+        "static bool aurora_tfa_pending_valid = false;\n"
+        "\n"
+        "void aurora_tfa_transport_reset(void)\n"
+        "{\n"
+        "  /* AURORA_TFA_TRANSPORT_RESET_V1 */\n"
+        "  serial_irq_cycles = 0;\n"
+        "  aurora_tfa_pending_rx = 0xffU;\n"
+        "  aurora_tfa_pending_valid = false;\n"
+        "}\n",
     )
 
     old = """  case SERIAL_MODE_NORMAL:\n    // For connected Wireless devices\n    if (serial_mode == SERIAL_MODE_RFU) {\n"""
