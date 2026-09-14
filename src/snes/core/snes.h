@@ -455,7 +455,11 @@ private:
 	void	SetFastRom();
 	void	SetSlowRom();
 
-	void	SyncSPC(Int32 uExtra = 0);
+	/* AURORA_BLIZZARD_APUIO_QUEUE_ORDER_V1_20260914
+	 * bFlushAll=FALSE is used only by CPU reads of APUIO: publish only
+	 * S-CPU->SPC writes whose timestamp the SPC has actually reached.
+	 * Full flush remains the default for frame rollover / overflow fallback. */
+	void	SyncSPC(Int32 uExtra = 0, Bool bFlushAll = TRUE);
 	void	SyncPPU();
 	void	CatchUpRasterEventsForCpuMMIO(SNCpuT *pCpu);
 #if SNES_HVIRQ_RESCHEDULE

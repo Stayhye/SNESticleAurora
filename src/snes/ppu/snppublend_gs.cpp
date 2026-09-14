@@ -782,6 +782,17 @@ static void _SNPPUBlendBuildList(SNPPUDmaListT *pList,
 	// tex0_1
 	GSGifRegAD(GS_REG_TEX0_1,GS_SET_TEX0(pList->uTempAddr, 256/64, GS_PSMCT32, 8, 3,    1, 0, 0, 0, 0, 0, 0));
 
+    /* AURORA_SNES_FINAL_COLCLAMP_V1_20260914
+     *
+     * SNES color math clamps every RGB component after add/subtract.
+     * The PS2 GS wraps/masks overflow and negative results when COLCLAMP=0.
+     * Own COLCLAMP here, immediately before the final main/sub combine,
+     * instead of relying on host GS state inherited from GSK_ResetFrame().
+     *
+     * General renderer accuracy fix: no CRC/title/game-specific path.
+     */
+    GSGifRegAD(GS_REG_COLCLAMP, 1);
+
     // alpha_1: A = Cs, B = Cd, C = As, D = Cd
     // (a - b) * c + d
     pList->pAddSub = (Uint64 *)GSListGetUncachedPtr();

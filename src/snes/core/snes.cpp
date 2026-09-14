@@ -1250,7 +1250,7 @@ private:
 };
 
 
-void SnesSystem::SyncSPC(Int32 uExtra)
+void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
 {
 	Int32 nCycles;
 
@@ -1286,7 +1286,20 @@ void SnesSystem::SyncSPC(Int32 uExtra)
         PROF_LEAVE("SNSpcExecute");
 
 #if SNSPCIO_WRITEQUEUE
-        m_SpcIO.SyncQueueAll();
+        /* AURORA_BLIZZARD_APUIO_QUEUE_ORDER_V1_20260914
+         * CPU APUIO reads are an observation point, not permission to make
+         * future CPU->SPC writes visible early.  The SPC executor may stop a
+         * few master clocks short of CpuTime at instruction granularity and
+         * carry that remainder in m_Spc.Cycles.  Respect its actually consumed
+         * FRAME timestamp on reads so an IPL/driver handshake cannot collapse
+         * several queued latch values into the newest one.
+         *
+         * Frame rollover and queue-full recovery deliberately retain the old
+         * full flush through bFlushAll=TRUE. */
+        if (bFlushAll)
+            m_SpcIO.SyncQueueAll();
+        else
+            m_SpcIO.SyncQueue(SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
 #endif
     }
 
@@ -1479,7 +1492,10 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 	// which never matches and leave the game in an infinite wait loop.
 	if (uAddr >= 0x2140 && uAddr <= 0x217F)
 	{
-		pSnes->SyncSPC();
+		/* AURORA_BLIZZARD_APUIO_QUEUE_ORDER_V1_20260914
+		 * Do not flush writes newer than the SPC's consumed timestamp merely
+		 * because the S-CPU is polling the response ports. */
+		pSnes->SyncSPC(0, FALSE);
 		return pSnes->m_SpcIO.m_Regs.apu_r[uAddr & 3];
 	}
 

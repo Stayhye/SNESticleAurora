@@ -19,6 +19,15 @@ typedef Uint8 (SNSPC_TRAPFUNC *SNSpcReadTrapFuncT)(struct SNSpc_t *pSpc, Uint32 
 typedef void (SNSPC_TRAPFUNC *SNSpcWriteTrapFuncT)(struct SNSpc_t *pSpc, Uint32 addr, Uint8 data);
 typedef Int32 (*SNSpcExecuteFuncT)(struct SNSpc_t *pCpu);
 
+/* AURORA_SPC700_ACCURACY_BATCH2_V1_20260914
+ * Reuse the legacy SNSpcRegsT::uPad byte as persistent halt state.
+ * Keeping the byte in place preserves SNSpcRegsT/SNStateSPCT layout. */
+#define SNSPC_HALT_NONE  0x00u
+#define SNSPC_HALT_SLEEP 0x01u
+#define SNSPC_HALT_STOP  0x02u
+#define SNSPC_HALT_MASK  (SNSPC_HALT_SLEEP | SNSPC_HALT_STOP)
+#define SNSPC_STATE_HALT_TAG 0xA2u
+
 typedef struct SNSpcRegs_t
 {
 	Uint16		rPC;
