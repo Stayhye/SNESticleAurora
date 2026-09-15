@@ -1094,6 +1094,89 @@ static size_t pdCompactSsf2HeaderSkip(const void *pData, size_t nBytes)
         ? skip : (size_t)-1;
 }
 
+
+/* AURORA_LARGE_MD_COMPACT_V2_20260914
+ * Generic PicoDrive rounds ROM backing to power-of-two for easy banking.
+ * For >4 MiB plain Mega Drive it then installs the standard/SSF2 mapper,
+ * whose banks are explicitly bounded by Pico.romsize. On PS2 this lets a
+ * validated 10 MiB hack keep ~10 MiB backing instead of reserving 16 MiB.
+ *
+ * This gate is intentionally stricter than filename alone and is repeated in
+ * cart.c before the core accepts Aurora's smaller borrowed buffer.
+ */
+static Bool pdCompactLargeMegaDriveAllowed(
+    const void *pData, size_t nBytes, const char *pName)
+{
+    const Uint8 *p = (const Uint8 *)pData;
+    const char *ext;
+    Uint32 sp, pc;
+
+    if (!p || !pName || nBytes <= 0x400000U || nBytes > 0x7FFFFFFCU)
+        return FALSE;
+
+    /* Conventional +0x200 copier-header shape keeps the historical path. */
+    if ((nBytes & 0x3FFFU) == 0x0200U)
+        return FALSE;
+
+    ext = strrchr(pName, '.');
+    if (!ext || !ext[1])
+        return FALSE;
+    ++ext;
+    if (strcasecmp(ext, "md") && strcasecmp(ext, "gen") &&
+        strcasecmp(ext, "bin"))
+        return FALSE;
+
+    if (nBytes >= 0x109U &&
+        (!memcmp(p + 0x100U, "SEGA 32X", 8) ||
+         !memcmp(p + 0x100U, "SEGA PICO", 9)))
+        return FALSE;
+
+    if (nBytes >= 0x7FF8U && !memcmp(p + 0x7FF0U, "TMR SEGA", 8))
+        return FALSE;
+    if (nBytes >= 0x3FF8U && !memcmp(p + 0x3FF0U, "TMR SEGA", 8))
+        return FALSE;
+    if (nBytes >= 0x1FF8U && !memcmp(p + 0x1FF0U, "TMR SEGA", 8))
+        return FALSE;
+
+    if (nBytes >= 0x104U &&
+        (!memcmp(p + 0x100U, "SEGA", 4) ||
+         !memcmp(p + 0x100U, " SEG", 4)))
+        return TRUE;
+
+    if (nBytes < 8U)
+        return FALSE;
+    sp = ((Uint32)p[0] << 24) | ((Uint32)p[1] << 16) |
+         ((Uint32)p[2] << 8) | (Uint32)p[3];
+    pc = ((Uint32)p[4] << 24) | ((Uint32)p[5] << 16) |
+         ((Uint32)p[6] << 8) | (Uint32)p[7];
+    return (sp & 0xFFFF0000U) == 0x00FF0000U &&
+           !(pc & 1U) && pc >= 0x100U && (size_t)pc < nBytes;
+}
+
+size_t PicoDriveBridge_CompactMegaDriveCapacity(size_t nBytes)
+{
+    size_t size, alloc;
+    if (nBytes <= 0x400000U || nBytes > 0x7FFFFFFCU)
+        return 0;
+
+    size = (nBytes + 3U) & ~(size_t)3U;
+    if (size < nBytes)
+        return 0;
+
+    alloc = (size + 0x7FFFFU) & ~(size_t)0x7FFFFU;
+    if (alloc < size)
+        return 0;
+
+    /* Same small writable/guard tail proven by the existing SSF2 path. */
+    if (alloc - size < 0x40U)
+    {
+        if (alloc > ((size_t)-1) - 0x40U)
+            return 0;
+        alloc += 0x40U;
+    }
+    return alloc;
+}
+
 size_t PicoDriveBridge_RequiredRomCapacity(size_t nBytes)
 {
     /* The frontend must reserve before it can inspect the title.  These are
@@ -1124,8 +1207,17 @@ bool PicoDriveBridge_LoadGame(const void *pData, size_t nBytes,
         loadCapacity -= ssf2Skip;
     }
 
-    requiredCapacity = compactSsf2
-        ? (size_t)0x500040U : pdGenericRequiredRomCapacity(loadBytes);
+    /* AURORA_LARGE_MD_COMPACT_V2_20260914: full-payload validation before borrowing compact RAM. */
+    {
+        const Bool compactLargeMd =
+            !compactSsf2 &&
+            pdCompactLargeMegaDriveAllowed(loadData, loadBytes, pName);
+        requiredCapacity = compactSsf2
+            ? (size_t)0x500040U
+            : (compactLargeMd
+                ? PicoDriveBridge_CompactMegaDriveCapacity(loadBytes)
+                : pdGenericRequiredRomCapacity(loadBytes));
+    }
 
     if (!pData || !nBytes || !requiredCapacity ||
         loadCapacity < requiredCapacity || loadCapacity > 0xFFFFFFFFU ||

@@ -762,6 +762,14 @@ void _MainLoopInputProcess(Uint32 buttons)
         _MenuTriggerTimeout[0] = _MenuTriggerTimeout[1] = 0;
         _MainLoopInputSuppressUntilRelease();
         _MainLoopUnloadRom();
+
+        /* AURORA_FRONT_COPIER_CLOSE_BROWSER_LIFECYCLE_FIX_V1_20260914
+         * Lifecycle teardown leaves _pSystem == NULL. The old shortcut
+         * returned while _bMenu stayed FALSE, leaving gameplay mode with
+         * no active system. Return through the persistent browser and the
+         * canonical menu-entry path instead. */
+        _MainLoopSetScreen((CScreen *)_MainLoop_pBrowserScreen);
+        _MenuEnable(TRUE);
         return;
     }
 

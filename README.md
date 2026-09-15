@@ -104,6 +104,7 @@ User interface:
 * SMB (ethernet crossover cable) connection
 * Krazy Creatures (NES) minor graphical glitches
 * Super Mario World 2 (SNES) performance (Super FX2)
+* Magical Pop'n (SNES) black screen
 * The Lost Vikings 1 and 2 (SNES) black screen
 * Sunset Riders (SNES) graphical glitches
 * Sonic Blast Man (SNES) wrong colors

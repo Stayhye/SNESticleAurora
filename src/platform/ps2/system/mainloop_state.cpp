@@ -843,6 +843,50 @@ static Bool _MainLoopSwcCartSramBuildPath(
     return n >= 0 && n < nPathBytes ? TRUE : FALSE;
 }
 
+/* AURORA_SWC_CART_SRAM_DIRECTREAD_V1_20260914
+ * SNSuperWildCard acabou de alocar/limpar com FF o backing da SRAM física.
+ * Leia diretamente nele para não pedir ao reader genérico um segundo buffer
+ * temporário de até 256 KiB. Falha/short read restaura FF antes do fallback.
+ */
+static Bool _MainLoopSwcCartSramReadFile(
+    const Char *pPath, Uint8 *pData, Uint32 nBytes)
+{
+    struct stat Status;
+    FILE *pFile;
+    Uint32 done = 0;
+    Bool ok = TRUE;
+
+    if (!pPath || !*pPath || !pData || !nBytes)
+        return FALSE;
+    if (stat(pPath, &Status) != 0 || S_ISDIR(Status.st_mode) ||
+        (Uint32)Status.st_size != nBytes)
+        return FALSE;
+
+    pFile = fopen(pPath, "rb");
+    if (!pFile)
+        return FALSE;
+
+    while (done < nBytes)
+    {
+        size_t got = fread(pData + done, 1, (size_t)(nBytes - done), pFile);
+        if (!got)
+        {
+            ok = FALSE;
+            break;
+        }
+        done += (Uint32)got;
+    }
+    if (fclose(pFile) != 0)
+        ok = FALSE;
+
+    if (!ok || done != nBytes)
+    {
+        memset(pData, 0xFF, nBytes);
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static Bool _MainLoopLoadSwcCartSRAMFrom(
     MainLoopSramDeviceE eDevice, Bool *pbLegacy)
 {
@@ -869,7 +913,7 @@ static Bool _MainLoopLoadSwcCartSRAMFrom(
 
     if (_MainLoopSwcCartSramBuildPath(
             Path, sizeof(Path), pRoot, FALSE, FALSE) &&
-        _MainLoopSramReadFile(Path, pData, (Uint32)nBytes))
+        _MainLoopSwcCartSramReadFile(Path, pData, (Uint32)nBytes))
     {
         ConPrint("SWC cartridge SRAM loaded: %s\n", Path);
         return TRUE;
@@ -879,7 +923,7 @@ static Bool _MainLoopLoadSwcCartSRAMFrom(
         _MainLoopSwcCartSramBuildPath(
             Alias, sizeof(Alias), pRoot, FALSE, TRUE) &&
         (!Path[0] || strcmp(Alias, Path) != 0) &&
-        _MainLoopSramReadFile(Alias, pData, (Uint32)nBytes))
+        _MainLoopSwcCartSramReadFile(Alias, pData, (Uint32)nBytes))
     {
         if (pbLegacy) *pbLegacy = TRUE;
         ConPrint("SWC cartridge SRAM loaded (MC-copy alias): %s\n", Alias);
@@ -889,7 +933,7 @@ static Bool _MainLoopLoadSwcCartSRAMFrom(
     Path[0] = 0;
     if (_MainLoopSwcCartSramBuildPath(
             Path, sizeof(Path), pRoot, TRUE, FALSE) &&
-        _MainLoopSramReadFile(Path, pData, (Uint32)nBytes))
+        _MainLoopSwcCartSramReadFile(Path, pData, (Uint32)nBytes))
     {
         if (pbLegacy) *pbLegacy = TRUE;
         ConPrint("SWC cartridge SRAM loaded (legacy): %s\n", Path);
@@ -901,7 +945,7 @@ static Bool _MainLoopLoadSwcCartSRAMFrom(
         _MainLoopSwcCartSramBuildPath(
             Alias, sizeof(Alias), pRoot, TRUE, TRUE) &&
         (!Path[0] || strcmp(Alias, Path) != 0) &&
-        _MainLoopSramReadFile(Alias, pData, (Uint32)nBytes))
+        _MainLoopSwcCartSramReadFile(Alias, pData, (Uint32)nBytes))
     {
         if (pbLegacy) *pbLegacy = TRUE;
         ConPrint(
@@ -2502,14 +2546,11 @@ Bool _MainLoopCheckSRAM()
 #define MAINLOOP_STATE_SYSTEM_SGB       9 /* AURORA_SGB_RUNTIME_V0_4_20260904 */
 #define MAINLOOP_STATE_SYSTEM_GB       10 /* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
 #define MAINLOOP_STATE_SYSTEM_GBA      11 /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911 */
-#define MAINLOOP_STATE_RAW_BYTES \
-    (sizeof(SnesStateT) > sizeof(NesStateT) \
-        ? sizeof(SnesStateT) \
-        : sizeof(NesStateT))
-/* mz_compressBound() currently uses a conservative 110% + 128 bound.
-   Keeping the buffer static avoids heap fragmentation on the 32 MB PS2. */
-#define MAINLOOP_STATE_COMPRESS_BYTES \
-    ((MAINLOOP_STATE_RAW_BYTES * 110) / 100 + 128)
+/* AURORA_STATE_COMPRESS_HEAP_V1_20260914
+ * O buffer de compressão é scratch transitório, não estado da máquina.
+ * Não reserve em BSS ~110% do maior envelope SNES/NES durante toda a vida
+ * do ELF. Save mantém o fallback RAW existente se o malloc temporário falhar.
+ */
 
 struct MainLoopStateFileHeaderT
 {
@@ -2579,8 +2620,10 @@ static Char _MainLoop_StateAvailability[192];
 static Bool _MainLoop_StateRomCRCValid = FALSE;
 static Uint32 _MainLoop_StateRomCRC = 0;
 static MainLoopStateCandidateT _MainLoop_StateCandidates[MAINLOOP_STATE_MAX_CANDIDATES];
-static Uint8 _MainLoop_StateCompressed[MAINLOOP_STATE_COMPRESS_BYTES]
-    __attribute__((aligned(64)));
+
+/* AURORA_STATE_COMPRESS_HEAP_V1_20260914
+ * _MainLoop_SegaCompressed abaixo passa a ser o scratch de compressão comum
+ * a todos os sistemas. O nome histórico é preservado para reduzir churn. */
 
 /* AURORA_PICODRIVE_STAGE2_DYNAMIC_STATE
  * Never tax SNES/NES BSS for PicoDrive's variable-size state. These buffers
@@ -2624,11 +2667,9 @@ class MainLoopSegaStateScratchGuard
 {
 public:
     MainLoopSegaStateScratchGuard()
-        : m_bActive((_pSystem == _pSega || _pSystem == _pPce ||
-                     _pSystem == _pFds || /* AURORA_FCEUMM_FDS_V0_6_STATE */
-                     _MainLoopStateIsSwc() || _MainLoopStateIsSgb() ||
-                     _pSystem == _pGb || _pSystem == _pGba) ? TRUE : FALSE) /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911 */
+        : m_bActive(TRUE)
     {
+        /* AURORA_STATE_COMPRESS_HEAP_V1_20260914: SNES/NES também podem criar scratch de compressão. */
     }
 
     ~MainLoopSegaStateScratchGuard()
@@ -2663,11 +2704,7 @@ static Uint8 *_MainLoopStateEnsureSegaStateData(Uint32 nBytes)
 
 static Uint32 _MainLoopStateCompressedLimit(Uint32 nRawBytes)
 {
-    if (_pSystem != _pSega && _pSystem != _pPce &&
-        _pSystem != _pFds && _pSystem != _pGb && _pSystem != _pGba && /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911 */
-        !_MainLoopStateIsSwc() && !_MainLoopStateIsSgb())
-        return (Uint32)sizeof(_MainLoop_StateCompressed);
-
+    /* AURORA_STATE_COMPRESS_HEAP_V1_20260914 */
     unsigned long long n =
         ((unsigned long long)nRawBytes * 110ULL) / 100ULL + 128ULL;
     return n <= 0xffffffffULL ? (Uint32)n : 0;
@@ -2675,14 +2712,9 @@ static Uint32 _MainLoopStateCompressedLimit(Uint32 nRawBytes)
 
 static Uint8 *_MainLoopStateGetCompressedBuffer(Uint32 nNeed, Uint32 *pCapacity)
 {
-    if (_pSystem != _pSega && _pSystem != _pPce &&
-        _pSystem != _pFds && _pSystem != _pGb && _pSystem != _pGba && /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911 */
-        !_MainLoopStateIsSwc() && !_MainLoopStateIsSgb())
-    {
-        if (pCapacity) *pCapacity = (Uint32)sizeof(_MainLoop_StateCompressed);
-        return _MainLoop_StateCompressed;
-    }
-
+    /* AURORA_STATE_COMPRESS_HEAP_V1_20260914
+     * Save já cai para RAW quando isto retorna NULL. Load falha limpo se um
+     * banco comprimido não puder obter seu scratch. */
     if (!nNeed)
         return NULL;
     if (_MainLoop_SegaCompressedCapacity < nNeed)

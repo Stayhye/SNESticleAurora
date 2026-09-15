@@ -251,6 +251,18 @@ void MainLoopCdUiResume(void)
 
 void _MenuEnable(Bool bEnable)
 {
+	/* AURORA_EMPTY_FRONTEND_INVARIANT_V1_20260914
+	 * A lazy-core frontend has a real 'no game loaded' state.
+	 * Closing UI in that state would create !_bMenu && !_pSystem,
+	 * i.e. gameplay mode with nothing to execute/render. Keep the
+	 * current UI screen/menu session instead. This protects L2+R2,
+	 * netplay STARTGAME-without-load and every future caller. */
+	if (!bEnable && !_pSystem)
+	{
+		_bMenu = TRUE;
+		return;
+	}
+
 	if (bEnable!=_bMenu)
 	{
 		if (bEnable)
