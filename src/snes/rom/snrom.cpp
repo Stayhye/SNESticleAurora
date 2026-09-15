@@ -64,15 +64,32 @@ void SnesRomResetRuntimeCompatForExternalDevice(void)
 
 /* AURORA_SNES_SINGLE_IO_IDENTITY_V1_20260915
  * Incremental standard CRC32 lets the loader include a 512-byte copier
- * header without rereading the host file. */
+ * header without rereading the host file.
+ *
+ * AURORA_LOADER_REVIEW_V2_3_FINAL_OVER_V2_20260915: mesma CRC32 refletida, agora table-driven. */
+static Uint32 s_SNRomCRC32Table[256];
+static Bool s_SNRomCRC32TableReady = FALSE;
+
+static void _SNRomCRC32EnsureTable()
+{
+    if (s_SNRomCRC32TableReady)
+        return;
+
+    for (Uint32 i = 0; i < 256u; ++i)
+    {
+        Uint32 c = i;
+        for (Uint32 bit = 0; bit < 8u; ++bit)
+            c = (c >> 1) ^ ((c & 1u) ? 0xEDB88320u : 0u);
+        s_SNRomCRC32Table[i] = c;
+    }
+    s_SNRomCRC32TableReady = TRUE;
+}
+
 static Uint32 _SNRomCRC32Update(Uint32 crc, const Uint8 *pData, Uint32 nBytes)
 {
+    _SNRomCRC32EnsureTable();
     while (nBytes--)
-    {
-        crc ^= *pData++;
-        for (Uint32 bit = 0; bit < 8; ++bit)
-            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320u : 0u);
-    }
+        crc = s_SNRomCRC32Table[(crc ^ *pData++) & 0xffu] ^ (crc >> 8);
     return crc;
 }
 
@@ -745,6 +762,64 @@ static Bool _SNRomDeinterleaveType1(Uint8 *pRom, Uint32 uRomBytes)
 //
 
 
+
+/* AURORA_EXLOROM_INPLACE_ROTATE_V1_20260915
+ * SMALLFIRST ExLoROM normalization used to malloc (ROM_size - 4 MiB) merely
+ * to rotate two contiguous regions. Under SWC that temp competes directly
+ * with copier DRAM and cartridge backing. Fixed 1 KiB scratch preserves the
+ * exact byte permutation with no multi-megabyte heap allocation. */
+static void _SNRomSwapEqualBlocks(Uint8 *pA, Uint8 *pB, Uint32 nBytes)
+{
+    Uint8 scratch[1024];
+
+    while (nBytes)
+    {
+        Uint32 chunk = nBytes > (Uint32)sizeof(scratch)
+            ? (Uint32)sizeof(scratch) : nBytes;
+        memcpy(scratch, pA, chunk);
+        memcpy(pA, pB, chunk);
+        memcpy(pB, scratch, chunk);
+        pA += chunk;
+        pB += chunk;
+        nBytes -= chunk;
+    }
+}
+
+static void _SNRomRotateLeft(Uint8 *pData, Uint32 nBytes, Uint32 nLeftBytes)
+{
+    Uint32 a, b;
+
+    if (!pData || !nLeftBytes || nLeftBytes >= nBytes)
+        return;
+
+    a = nLeftBytes;
+    b = nBytes - nLeftBytes;
+
+    while (a != b)
+    {
+        if (a < b)
+        {
+            _SNRomSwapEqualBlocks(
+                pData + nLeftBytes - a,
+                pData + nLeftBytes + b - a,
+                a);
+            b -= a;
+        }
+        else
+        {
+            _SNRomSwapEqualBlocks(
+                pData + nLeftBytes - a,
+                pData + nLeftBytes,
+                b);
+            a -= b;
+        }
+    }
+
+    _SNRomSwapEqualBlocks(
+        pData + nLeftBytes - a,
+        pData + nLeftBytes,
+        a);
+}
 SnesRom::SnesRom()
 {
 	m_bLoaded	= false;
@@ -1608,14 +1683,8 @@ if (m_pRomData && m_uRomBytes)
 		if (score0 > score4M)
 		{
 			Uint32 smallBytes = m_uRomBytes - 0x400000;
-			Uint8 *pTmp = (Uint8 *)malloc(smallBytes);
-			if (pTmp)
-			{
-				memcpy (pTmp, m_pRomData, smallBytes);                     // metade da frente (com header)
-				memmove(m_pRomData, m_pRomData + smallBytes, 0x400000);    // 4MB de tras -> frente
-				memcpy (m_pRomData + 0x400000, pTmp, smallBytes);          // header -> 0x400000
-				free(pTmp);
-			}
+			/* AURORA_EXLOROM_INPLACE_ROTATE_V1_20260915 */
+			_SNRomRotateLeft(m_pRomData, m_uRomBytes, smallBytes);
 		}
 
 		m_eMapping = SNROM_MAPPING_EXLOROM;

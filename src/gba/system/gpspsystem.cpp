@@ -689,7 +689,8 @@ static Bool AuroraGpSPCRC32File(const Char *pPath, Uint32 *pCRC,
     return TRUE;
 }
 
-Bool GpSPSystem::LoadGame(const Char *pPath, const Char *pSystemDirectory)
+Bool GpSPSystem::LoadGame(const Char *pPath, const Char *pSystemDirectory,
+                            Uint32 uKnownCRC, Uint32 nKnownBytes)
 {
     struct retro_game_info info;
     struct retro_system_av_info av;
@@ -712,17 +713,27 @@ Bool GpSPSystem::LoadGame(const Char *pPath, const Char *pSystemDirectory)
      * allocates the ROM LRU in 1 MiB chunks; allocating TFA later can
      * fail after the LRU has consumed the last contiguous 2 MiB.
      * Normal games still pay zero TFA RAM cost. */
+    /* AURORA_LOADER_REVIEW_V2_20260915
+     * A ZIP member reaches here only after miniz validated extraction against
+     * its central-directory CRC. Reuse it instead of rereading the complete
+     * temporary .gba. Plain .gba/.agb keeps the old exact CRC pass. */
+    if (nKnownBytes)
+    {
+        m_p->romCRC = uKnownCRC;
+        m_p->romBytes = nKnownBytes;
+    }
+    else
     {
         Uint32 crc = 0;
         Uint32 bytes = 0;
-        /* AURORA_GBA_STATE_TFA_CONNECTION_V1_20260913: piggyback size on the pre-existing CRC pass. */
         if (AuroraGpSPCRC32File(pPath, &crc, &bytes))
         {
             m_p->romCRC = crc;
             m_p->romBytes = bytes;
         }
-        /* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_GPSP_TFA_ORDER: TFA backing is attached after GPSP_retro_init(). */
     }
+    /* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_GPSP_TFA_ORDER:
+     * TFA backing is attached after GPSP_retro_init(). */
 
     GPSP_retro_set_environment(AuroraGpSPEnvironment);
     GPSP_retro_set_video_refresh(AuroraGpSPVideo);
