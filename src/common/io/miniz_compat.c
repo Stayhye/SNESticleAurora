@@ -347,13 +347,51 @@ int MinizReadGZPrefix(const char *path, void *out_buf, int out_max)
 }
 
 
-int MinizReadGZToBuffer(const char *path, void *out_buf, int out_max)
+/* AURORA_LOAD_BYTE_PROGRESS_V1_20260915
+ * GZ output sink: same raw-DEFLATE path as before, but copy through miniz's
+ * existing callback API so the frontend can observe uncompressed bytes. */
+typedef struct MinizGzBufferSink
+{
+        unsigned char *dst;
+        int capacity;
+        int written;
+        MinizProgressCallback progress;
+        void *progress_user;
+} MinizGzBufferSink;
+
+static int miniz_gz_buffer_sink(const void *buf, int len, void *user)
+{
+        MinizGzBufferSink *sink = (MinizGzBufferSink *)user;
+
+        if (!sink || !buf || len < 0 ||
+            len > sink->capacity - sink->written)
+                return 0;
+
+        if (len > 0)
+        {
+                memcpy(sink->dst + sink->written, buf, (size_t)len);
+                sink->written += len;
+                if (sink->progress)
+                        sink->progress(
+                            sink->written, sink->capacity,
+                            sink->progress_user);
+        }
+        return 1;
+}
+
+int MinizReadGZToBufferProgress(const char *path,
+                                void *out_buf,
+                                int out_max,
+                                MinizProgressCallback progress,
+                                void *progress_user)
 {
         void *gz_data = NULL;
         int gz_size = 0;
         int hdr;
         int deflate_len;
-        size_t produced;
+        int ok;
+        size_t in_size;
+        MinizGzBufferSink sink;
 
         if (!out_buf || out_max <= 0)
                 return -1;
@@ -368,22 +406,28 @@ int MinizReadGZToBuffer(const char *path, void *out_buf, int out_max)
                 return -1;
         }
 
-        /* The DEFLATE payload lives between [hdr .. gz_size-8); the
-           trailing 8 bytes are the gzip CRC32 + ISIZE which miniz
-           does not need. */
         deflate_len = gz_size - hdr - 8;
+        sink.dst = (unsigned char *)out_buf;
+        sink.capacity = out_max;
+        sink.written = 0;
+        sink.progress = progress;
+        sink.progress_user = progress_user;
+        in_size = (size_t)deflate_len;
 
-        produced = tinfl_decompress_mem_to_mem(
-                out_buf, (size_t)out_max,
-                (const unsigned char *)gz_data + hdr, (size_t)deflate_len,
-                0 /* raw deflate, not zlib-wrapped */);
+        ok = tinfl_decompress_mem_to_callback(
+                (const unsigned char *)gz_data + hdr,
+                &in_size, miniz_gz_buffer_sink, &sink, 0);
 
         free(gz_data);
-
-        if (produced == TINFL_DECOMPRESS_MEM_TO_MEM_FAILED)
+        if (!ok || sink.written <= 0)
                 return -1;
+        return sink.written;
+}
 
-        return (int)produced;
+int MinizReadGZToBuffer(const char *path, void *out_buf, int out_max)
+{
+        return MinizReadGZToBufferProgress(
+            path, out_buf, out_max, NULL, NULL);
 }
 
 int MinizReadZipFirstMatch(const char *path,
@@ -523,16 +567,61 @@ int MinizProbeZipFirstMatchInfo(const char *path,
         return result;
 }
 
-int MinizReadZipEntryToBuffer(const char *path,
+/* AURORA_LOAD_BYTE_PROGRESS_V1_20260915
+ * ZIP output sink: mz_zip_reader_extract_to_callback() already validates the
+ * entry and CRC. Copy into the caller's existing ROM backing while exposing
+ * only the decompressed byte count to the UI. */
+typedef struct MinizZipBufferSink
+{
+        unsigned char *dst;
+        int capacity;
+        int written;
+        int total;
+        MinizProgressCallback progress;
+        void *progress_user;
+} MinizZipBufferSink;
+
+static size_t miniz_zip_buffer_sink(void *opaque, mz_uint64 file_ofs,
+                                    const void *buf, size_t n)
+{
+        MinizZipBufferSink *sink = (MinizZipBufferSink *)opaque;
+        size_t off, end;
+
+        if (!sink || !buf || file_ofs > 0x7FFFFFFFULL)
+                return 0;
+
+        off = (size_t)file_ofs;
+        if (off > (size_t)sink->capacity ||
+            n > (size_t)sink->capacity - off)
+                return 0;
+
+        memcpy(sink->dst + off, buf, n);
+        end = off + n;
+        if (end > (size_t)sink->written)
+        {
+                sink->written = (int)end;
+                if (sink->progress)
+                        sink->progress(
+                            sink->written, sink->total,
+                            sink->progress_user);
+        }
+        return n;
+}
+
+int MinizReadZipEntryToBufferProgress(
+                              const char *path,
                               unsigned int file_index,
                               void *out_buf,
                               int out_max,
                               char *out_filename,
-                              int filename_max)
+                              int filename_max,
+                              MinizProgressCallback progress,
+                              void *progress_user)
 {
         MinizFileXioReader reader;
         mz_zip_archive zip;
         mz_zip_archive_file_stat st;
+        MinizZipBufferSink sink;
         int result = -1;
 
         if (!out_buf || out_max <= 0)
@@ -545,22 +634,44 @@ int MinizReadZipEntryToBuffer(const char *path,
             !st.m_is_directory && st.m_is_supported &&
             st.m_uncomp_size > 0 &&
             st.m_uncomp_size <= (mz_uint64)out_max &&
-            st.m_uncomp_size <= 0x7FFFFFFFULL &&
-            mz_zip_reader_extract_to_mem(
-                &zip, (mz_uint)file_index, out_buf,
-                (size_t)st.m_uncomp_size, 0))
+            st.m_uncomp_size <= 0x7FFFFFFFULL)
         {
-                result = (int)st.m_uncomp_size;
-                if (out_filename && filename_max > 0)
+                sink.dst = (unsigned char *)out_buf;
+                sink.capacity = out_max;
+                sink.written = 0;
+                sink.total = (int)st.m_uncomp_size;
+                sink.progress = progress;
+                sink.progress_user = progress_user;
+
+                if (mz_zip_reader_extract_to_callback(
+                        &zip, (mz_uint)file_index,
+                        miniz_zip_buffer_sink, &sink, 0) &&
+                    sink.written == (int)st.m_uncomp_size)
                 {
-                        strncpy(out_filename, st.m_filename,
-                                (size_t)(filename_max - 1));
-                        out_filename[filename_max - 1] = '\0';
+                        result = sink.written;
+                        if (out_filename && filename_max > 0)
+                        {
+                                strncpy(out_filename, st.m_filename,
+                                        (size_t)(filename_max - 1));
+                                out_filename[filename_max - 1] = '\0';
+                        }
                 }
         }
 
         miniz_zip_close_reader(&reader, &zip);
         return result;
+}
+
+int MinizReadZipEntryToBuffer(const char *path,
+                              unsigned int file_index,
+                              void *out_buf,
+                              int out_max,
+                              char *out_filename,
+                              int filename_max)
+{
+        return MinizReadZipEntryToBufferProgress(
+            path, file_index, out_buf, out_max,
+            out_filename, filename_max, NULL, NULL);
 }
 
 typedef struct MinizZipPrefixSink

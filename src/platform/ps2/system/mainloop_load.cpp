@@ -520,6 +520,144 @@ static Bool _MainLoopSegaWantsNative320(
 }
 
 
+/* AURORA_LOAD_BYTE_PROGRESS_V1_20260915
+ * Keep synchronous cartridge loading visible without turning rendering into
+ * the bottleneck. The UI is refreshed only at coarse output-byte intervals.
+ * The displayed count is always real bytes loaded/decompressed. */
+static Int32 s_MainLoopLoadProgressTotal = 0;
+static Int32 s_MainLoopLoadProgressShown = 0;
+static Int32 s_MainLoopLoadProgressStep = 0;
+
+static void _MainLoopLoadProgressBegin(Int32 total)
+{
+    if (total <= 0)
+        return;
+
+    s_MainLoopLoadProgressTotal = total;
+    s_MainLoopLoadProgressShown = 0;
+    s_MainLoopLoadProgressStep = total / 8;
+    if (s_MainLoopLoadProgressStep < 65536)
+        s_MainLoopLoadProgressStep = 65536;
+    if (s_MainLoopLoadProgressStep > 1048576)
+        s_MainLoopLoadProgressStep = 1048576;
+
+    MainLoopStatusPrintf(120, "Loading... 0/%d", (int)total);
+    MainLoopRender();
+}
+
+static void _MainLoopLoadProgressUpdate(Int32 done)
+{
+    if (s_MainLoopLoadProgressTotal <= 0)
+        return;
+
+    if (done < 0)
+        done = 0;
+    if (done > s_MainLoopLoadProgressTotal)
+        done = s_MainLoopLoadProgressTotal;
+
+    if (done != s_MainLoopLoadProgressTotal &&
+        done - s_MainLoopLoadProgressShown < s_MainLoopLoadProgressStep)
+        return;
+
+    MainLoopStatusPrintf(
+        120, "Loading... %d/%d",
+        (int)done, (int)s_MainLoopLoadProgressTotal);
+    MainLoopRender();
+    s_MainLoopLoadProgressShown = done;
+}
+
+static void _MainLoopLoadProgressMiniz(int done, int total, void *user)
+{
+    (void)user;
+    (void)total;
+    _MainLoopLoadProgressUpdate((Int32)done);
+}
+
+static void _MainLoopLoadProgressFinish(Bool complete)
+{
+    if (complete && s_MainLoopLoadProgressTotal > 0)
+        _MainLoopLoadProgressUpdate(s_MainLoopLoadProgressTotal);
+
+    s_MainLoopLoadProgressTotal = 0;
+    s_MainLoopLoadProgressShown = 0;
+    s_MainLoopLoadProgressStep = 0;
+
+    /* Do not render the clear: leave the last progress frame visible until
+       the next normal UI/game frame replaces it. */
+    _MainLoop_StatusCount = 0;
+    _MainLoop_StatusStr[0] = 0;
+}
+
+static Int32 _MainLoopReadBinaryDataProgress(
+    Uint8 *pBuffer, Int32 nExpectedBytes, const char *pRomFile)
+{
+    int fd;
+    Int32 total = 0;
+
+    if (!pBuffer || nExpectedBytes <= 0 || !pRomFile)
+        return -1;
+
+    fd = fileXioOpen(pRomFile, FIO_O_RDONLY, 0);
+    if (fd < 0)
+        return -1;
+
+    _MainLoopLoadProgressBegin(nExpectedBytes);
+
+    while (total < nExpectedBytes)
+    {
+        Int32 want = nExpectedBytes - total;
+        int n;
+
+        /* Keep fileXio RPCs large; <=1 MiB preserves the fast direct-IO path
+           while still giving visible progress for large cartridges. */
+        if (want > 1048576)
+            want = 1048576;
+
+        n = fileXioRead(fd, pBuffer + total, (int)want);
+        if (n <= 0)
+        {
+            fileXioClose(fd);
+            _MainLoopLoadProgressFinish(FALSE);
+            return n < 0 ? -1 : total;
+        }
+
+        total += (Int32)n;
+        _MainLoopLoadProgressUpdate(total);
+    }
+
+    fileXioClose(fd);
+    _MainLoopLoadProgressFinish(total == nExpectedBytes ? TRUE : FALSE);
+    return total;
+}
+
+typedef struct MainLoopZipFileProgressT
+{
+    FILE *fp;
+    Int32 expected;
+    Int32 written;
+} MainLoopZipFileProgressT;
+
+static size_t _MainLoopZipFileProgressWrite(
+    void *opaque, mz_uint64 file_ofs, const void *buf, size_t n)
+{
+    MainLoopZipFileProgressT *sink =
+        (MainLoopZipFileProgressT *)opaque;
+
+    if (!sink || !sink->fp || !buf ||
+        file_ofs != (mz_uint64)(Uint32)sink->written ||
+        sink->written > sink->expected ||
+        n > (size_t)(sink->expected - sink->written))
+        return 0;
+
+    if (fwrite(buf, 1, n, sink->fp) != n)
+        return 0;
+
+    sink->written += (Int32)n;
+    _MainLoopLoadProgressUpdate(sink->written);
+    return n;
+}
+
+
 int _MainLoopReadBinaryData(Uint8 *pBuffer, Int32 nBufferBytes, const char *pRomFile)
 {
         int fd;
@@ -673,7 +811,10 @@ static Bool _MainLoopExtractZipEntryToFile(
     mz_zip_archive zip;
     mz_zip_archive_file_stat zst;
     struct stat fst;
+    MainLoopZipFileProgressT sink;
+    FILE *out = NULL;
     Bool ok = FALSE;
+    Bool progressStarted = FALSE;
 
     if (!pZipPath || !*pZipPath ||
         !pMemberName || !*pMemberName ||
@@ -697,27 +838,46 @@ static Bool _MainLoopExtractZipEntryToFile(
         goto done;
 
     remove(pOutPath);
-
-#ifndef MINIZ_NO_STDIO
-    if (!mz_zip_reader_extract_to_file(
-            &zip, (mz_uint)uZipIndex, pOutPath, 0))
+    out = fopen(pOutPath, "wb");
+    if (!out)
         goto done;
-#else
-#error Aurora ZIP file-only path requires miniz stdio extraction
-#endif
 
-    if (stat(pOutPath, &fst) != 0 ||
-        S_ISDIR(fst.st_mode) ||
-        fst.st_size != nExpectedBytes)
+    sink.fp = out;
+    sink.expected = nExpectedBytes;
+    sink.written = 0;
+
+    _MainLoopLoadProgressBegin(nExpectedBytes);
+    progressStarted = TRUE;
+
+    if (!mz_zip_reader_extract_to_callback(
+            &zip, (mz_uint)uZipIndex,
+            _MainLoopZipFileProgressWrite, &sink, 0))
+        goto done;
+
+    if (sink.written != nExpectedBytes || fflush(out) != 0)
+        goto done;
+
+    if (fclose(out) != 0)
     {
-        remove(pOutPath);
+        out = NULL;
         goto done;
     }
+    out = NULL;
+
+    if (stat(pOutPath, &fst) != 0 ||
+        S_ISDIR(fst.st_mode) || fst.st_size != nExpectedBytes)
+        goto done;
 
     ok = TRUE;
 
 done:
+    if (out)
+        fclose(out);
     mz_zip_reader_end(&zip);
+
+    if (progressStarted)
+        _MainLoopLoadProgressFinish(ok);
+
     if (!ok)
         remove(pOutPath);
     return ok;
@@ -729,46 +889,61 @@ done:
  * loader antigo (antes de header removal/deinterleave), sem staging completo.
  */
 static Bool _MainLoopFileCRC32Exact(
-    const Char *pPath, Int32 nExpectedBytes, Uint32 *pCRC)
+    const Char *pPath, Int32 nExpectedBytes, Uint32 *pCRC,
+    Bool bShowProgress)
 {
     FILE *fp;
     Uint8 buf[8192];
     Uint32 crc = MZ_CRC32_INIT;
     Int32 total = 0;
+    Bool ok = FALSE;
 
     if (!pPath || !*pPath || nExpectedBytes <= 0 || !pCRC)
         return FALSE;
+
     fp = fopen(pPath, "rb");
     if (!fp)
         return FALSE;
+
+    if (bShowProgress)
+        _MainLoopLoadProgressBegin(nExpectedBytes);
 
     while (total < nExpectedBytes)
     {
         Int32 want = nExpectedBytes - total;
         size_t got;
+
         if (want > (Int32)sizeof(buf))
             want = (Int32)sizeof(buf);
+
         got = fread(buf, 1, (size_t)want, fp);
         if (got != (size_t)want)
-        {
-            fclose(fp);
-            return FALSE;
-        }
-        crc = (Uint32)mz_crc32(crc, (const unsigned char *)buf, got);
+            goto done;
+
+        crc = (Uint32)mz_crc32(
+            crc, (const unsigned char *)buf, got);
         total += (Int32)got;
+
+        if (bShowProgress)
+            _MainLoopLoadProgressUpdate(total);
     }
 
     {
         int extra = fgetc(fp);
-        Bool ok = (extra == EOF && !ferror(fp)) ? TRUE : FALSE;
-        fclose(fp);
-        if (!ok)
-            return FALSE;
+        if (extra != EOF || ferror(fp))
+            goto done;
     }
 
     *pCRC = crc;
-    return TRUE;
+    ok = TRUE;
+
+done:
+    fclose(fp);
+    if (bShowProgress)
+        _MainLoopLoadProgressFinish(ok);
+    return ok;
 }
+
 
 /* AURORA_PCE_SSF2_FINAL_R4_CLEANUP_20260913_NORMAL_ALLOCATOR
  * R4: no speculative cross-core SSF2 reservation.  Allocate only when the
@@ -4323,6 +4498,7 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
     Bool bSnesOwnedFileLoaded = FALSE; /* AURORA_SNES_OWNED_ZIP_V1_20260914 */
     Bool bSegaCompactLargeBacking = FALSE; /* AURORA_LARGE_MD_COMPACT_V2_20260914 */
     Int32 nExpectedRomBytes = 0, nRomBytes = 0;
+    Int32 rasterWidth = 256; /* AURORA_LOAD_BYTE_PROGRESS_V1_20260915 */
     Uint32 uRomIdentityCRC = 0;
 #if SNDBG_LOG
     Uint32 uRomCRC = 0;
@@ -4647,7 +4823,8 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
         }
 
         if (!_MainLoopFileCRC32Exact(
-                pOwnedPath, nExpectedRomBytes, &uRomIdentityCRC))
+                pOwnedPath, nExpectedRomBytes, &uRomIdentityCRC,
+                eSourceType == MAINLOOP_ENTRYTYPE_ZIP ? FALSE : TRUE))
         {
             if (bTemp) remove(tempPath);
             MainLoopModalPrintf(60 * 4,
@@ -4702,8 +4879,6 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
      * that succeeds may gsKit change raster. On raster failure the existing
      * abort helper frees the ROM before restoring 256. */
     {
-        Int32 rasterWidth = 256;
-
         /* AURORA_PCE_PRECORE512_V13_20260830
          * PCE Fast host surface has a 512-pixel pitch and may expose
          * 256/352/512 visible widths. Enter the core with the GS already on
@@ -4843,44 +5018,47 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
             }
         }
 
-        /* Commit video only after the large ROM backing is secured. */
-        if (!MainLoopEnsureGameplayRasterWidth(rasterWidth))
-        {
-            if (bSnesOwnedFileLoaded)
-                _pSnesRom->Unload();
-            _MainLoopAbortPreCoreLoad();
-            MainLoopModalPrintf(60 * 3,
-                "ERROR: cannot configure video raster");
-            return FALSE;
-        }
+        /* AURORA_LOAD_BYTE_PROGRESS_V1_20260915
+         * Keep the normal 256-wide browser raster through synchronous I/O.
+         * Gameplay raster is committed only after the payload is complete. */
     }
 
     if (!bSnesOwnedFileLoaded)
     {
         if (eSourceType == MAINLOOP_ENTRYTYPE_GZ)
         {
-            nRomBytes = _MainLoopReadGZData(
-            _RomData, (Int32)_RomDataCapacity, pFileName);
-    }
-    else if (eSourceType == MAINLOOP_ENTRYTYPE_ZIP)
-    {
-        char loadedName[512];
-        loadedName[0] = 0;
-        nRomBytes = bZipIndexValid
-            ? MinizReadZipEntryToBuffer(
-                pFileName, uZipIndex,
-                _RomData, (Int32)_RomDataCapacity,
-                loadedName, (int)sizeof(loadedName))
-            : -1;
-        if (nRomBytes > 0 &&
-            strcmp(loadedName, ZipMemberName) != 0)
-            nRomBytes = -1;
-    }
-    else
-    {
-        nRomBytes = _MainLoopReadBinaryData(
-            _RomData, (Int32)_RomDataCapacity, pFileName);
-    }
+            _MainLoopLoadProgressBegin(nExpectedRomBytes);
+            nRomBytes = MinizReadGZToBufferProgress(
+                pFileName, _RomData, nExpectedRomBytes,
+                _MainLoopLoadProgressMiniz, NULL);
+            _MainLoopLoadProgressFinish(
+                nRomBytes == nExpectedRomBytes ? TRUE : FALSE);
+        }
+        else if (eSourceType == MAINLOOP_ENTRYTYPE_ZIP)
+        {
+            char loadedName[512];
+            loadedName[0] = 0;
+
+            _MainLoopLoadProgressBegin(nExpectedRomBytes);
+            nRomBytes = bZipIndexValid
+                ? MinizReadZipEntryToBufferProgress(
+                    pFileName, uZipIndex,
+                    _RomData, nExpectedRomBytes,
+                    loadedName, (int)sizeof(loadedName),
+                    _MainLoopLoadProgressMiniz, NULL)
+                : -1;
+            _MainLoopLoadProgressFinish(
+                nRomBytes == nExpectedRomBytes ? TRUE : FALSE);
+
+            if (nRomBytes > 0 &&
+                strcmp(loadedName, ZipMemberName) != 0)
+                nRomBytes = -1;
+        }
+        else
+        {
+            nRomBytes = _MainLoopReadBinaryDataProgress(
+                _RomData, nExpectedRomBytes, pFileName);
+        }
 
     if (nRomBytes != nExpectedRomBytes)
     {
@@ -4913,6 +5091,19 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
                pFileName, nRomBytes, (unsigned)_RomDataCapacity);
     _MainLoopGetName(_RomName, FileName);
     printf("ROMName: '%s'\n", _RomName);
+
+    /* AURORA_LOAD_BYTE_PROGRESS_V1_20260915
+     * All blocking ROM I/O is complete while the browser raster is still
+     * intact. Switch to the target gameplay raster only now. */
+    if (!MainLoopEnsureGameplayRasterWidth(rasterWidth))
+    {
+        if (bSnesOwnedFileLoaded)
+            _pSnesRom->Unload();
+        _MainLoopAbortPreCoreLoad();
+        MainLoopModalPrintf(
+            60 * 3, "ERROR: cannot configure video raster");
+        return FALSE;
+    }
 
     /* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914
      * Deliberately late: secure/read the large ROM backing before
