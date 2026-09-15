@@ -1360,8 +1360,25 @@ inline void SnesSystem::SyncPPU()
 	Uint32 _tSync = ProfCtrGetCycle();
 	g_DbgPPUSyncCalls++;
 #endif
-	// sync ppu to current line
-	m_PPU.Sync(m_uLine);
+	/* AURORA_DOT_RASTER_V6_SNES_20260915
+	 * During an active scanline synchronize to the live H. Between lines,
+	 * m_uLine already names the NEXT physical line, so finish only the line
+	 * that actually ran; this also prevents V4's V=128 timing latch from
+	 * rendering line 128 before the CPU has executed it. */
+	Uint32 uTargetLine = m_uLine;
+	Uint32 uTargetH = 0;
+	if (m_bRasterLineActive)
+	{
+		Int32 nH = SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_LINE);
+		if (nH < 0) nH = 0;
+		uTargetH = (Uint32)nH;
+	}
+	else if (uTargetLine > 0)
+	{
+		--uTargetLine;
+		uTargetH = SNESPPU_RASTER_H_FALLBACK;
+	}
+	m_PPU.Sync(uTargetLine, uTargetH);
 #if SNDBG_LOG
 	g_TmgCycPPUSync += ProfCtrGetCycle() - _tSync;
 #endif
@@ -1538,7 +1555,12 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 			#if SNPPU_WRITEQUEUE
 			pSnes->SyncPPU();
 			#endif
+			pSnes->m_PPU.SetMemoryAccessFlags(
+				pSnes->m_PPU.BuildMemoryAccessFlags(
+					pSnes->m_uLine,
+					(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE)));
 			Uint8 uData = pSnes->m_PPU.ReadOAMDATA();
+			pSnes->m_PPU.SetMemoryAccessFlags(0);
 			pSnes->m_PPU.SetPPU1MDR(uData);
 			return uData;
 		}
@@ -1602,7 +1624,12 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 			#if SNPPU_WRITEQUEUE
 			pSnes->SyncPPU();
 			#endif
+			pSnes->m_PPU.SetMemoryAccessFlags(
+				pSnes->m_PPU.BuildMemoryAccessFlags(
+					pSnes->m_uLine,
+					(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE)));
 			Uint8 uData = pSnes->m_PPU.ReadVMDATAL();
+			pSnes->m_PPU.SetMemoryAccessFlags(0);
 			pSnes->m_PPU.SetPPU1MDR(uData);
 			return uData;
 		}
@@ -1612,7 +1639,12 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 			#if SNPPU_WRITEQUEUE
 			pSnes->SyncPPU();
 			#endif
+			pSnes->m_PPU.SetMemoryAccessFlags(
+				pSnes->m_PPU.BuildMemoryAccessFlags(
+					pSnes->m_uLine,
+					(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE)));
 			Uint8 uData = pSnes->m_PPU.ReadVMDATAH();
+			pSnes->m_PPU.SetMemoryAccessFlags(0);
 			pSnes->m_PPU.SetPPU1MDR(uData);
 			return uData;
 		}
@@ -1622,8 +1654,13 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 			#if SNPPU_WRITEQUEUE
 			pSnes->SyncPPU();
 			#endif
+			pSnes->m_PPU.SetMemoryAccessFlags(
+				pSnes->m_PPU.BuildMemoryAccessFlags(
+					pSnes->m_uLine,
+					(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE)));
 			Bool bHigh = (pPPURegs->cgadd.w & 1) ? TRUE : FALSE;
 			Uint8 uData = pSnes->m_PPU.ReadCGDATA();
+			pSnes->m_PPU.SetMemoryAccessFlags(0);
 			if (bHigh)
 				uData = (Uint8)((pSnes->m_PPU.GetPPU2MDR() & 0x80) | (uData & 0x7F));
 			pSnes->m_PPU.SetPPU2MDR(uData);
@@ -1654,7 +1691,7 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 	 * bus. Explicit PPU1/PPU2 MDR cases are handled above. */
 	/* AURORA_V9_GLOBAL_TRICKY_AUDIT_20260915
 	 * Final global SNESdev tricky-games pass. Existing hardware fixes are
-	 * preserved; dot-level VRAM/OAM contention, exact OBJ-fetch corruption,
+	 * preserved; exact dot-selected OAM/CGRAM contention addresses, exact OBJ-fetch corruption,
 	 * per-cycle SPC, CPU read-side-effect phase, and board-specific SRAM are
 	 * not approximated by this scanline scheduler. SuperFX RPIX already does
 	 * a real cache flush plus bitplane read and remains intact. */
@@ -1739,7 +1776,25 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 	{
 		// enqueue write to ppu, if it fails (full) then force a sync 
 		#if SNPPU_WRITEQUEUE
-		while (!pSnes->m_PPU.EnqueueWrite(pSnes->m_uLine, uAddr, uData))
+		/* AURORA_PPU_MEMORY_V3_SNES_20260915
+		 * Keep the existing line-tagged raster queue but preserve the memory
+		 * bus phase in its previously-unused metadata byte. */
+		/* AURORA_CUMULATIVE_V5_SNES_20260915
+		 * Only the four S-PPU memory data ports consume V3 bus metadata.
+		 * Keep ordinary register HDMA/CPU traffic on the zero-metadata path. */
+		Uint8 uMemoryAccessFlags = 0;
+		const Uint32 uPPUReg = uAddr & 0x3Fu;
+		const Uint32 uPPUHClock =
+			(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE);
+		if (uPPUReg == 0x04u || uPPUReg == 0x18u ||
+		    uPPUReg == 0x19u || uPPUReg == 0x22u)
+		{
+			uMemoryAccessFlags = pSnes->m_PPU.BuildMemoryAccessFlags(
+				pSnes->m_uLine, uPPUHClock);
+		}
+		while (!pSnes->m_PPU.EnqueueWrite(
+			pSnes->m_uLine, uAddr, uData, TRUE, uMemoryAccessFlags,
+			uPPUHClock))
 		{
 			// sync ppu
 			pSnes->SyncPPU();
@@ -1747,9 +1802,20 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 		#else
 		// sync ppu before writing to it
 		pSnes->SyncPPU();
+		Uint8 uMemoryAccessFlags = 0;
+		const Uint32 uPPUReg = uAddr & 0x3Fu;
+		if (uPPUReg == 0x04u || uPPUReg == 0x18u ||
+		    uPPUReg == 0x19u || uPPUReg == 0x22u)
+		{
+			uMemoryAccessFlags = pSnes->m_PPU.BuildMemoryAccessFlags(
+				pSnes->m_uLine,
+				(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE));
+		}
+		pSnes->m_PPU.SetMemoryAccessFlags(uMemoryAccessFlags);
 
 		// ppu write
 		pSnes->m_PPU.Write8(uAddr, uData);
+		pSnes->m_PPU.SetMemoryAccessFlags(0);
 		#endif
 	} else
 	{
@@ -1887,13 +1953,15 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read4000(SNCpuT *pCpu, Uint32 uAddr)
         }
     case 0x4212:	// HVBJOY
     {
-        /* AURORA_FCEUMM_FDS_V8_1_COMPAT_REVIEW_20260827
-         * Adapted from SNESticleRevive's general line-zero
-         * accuracy fix; no title-specific IRQ workaround.
-         * Aurora's current active-line loop is 0..224. */
-        Uint8 uData = pIO->m_Regs.hvbjoy & (Uint8)~0x80;
-        if (pSnes->m_uLine >= 225)
-            uData |= 0x80;
+        /* V3 review of V1 geometry: VBlank already lives in hvbjoy bit 7 and
+         * therefore follows 224/239 correctly. HBlank includes the 3-cycle
+         * line-wrap window, matching the S-CPU status port. Bits 1-5 are
+         * CPU MDR/open bus; bit 0 is auto-joy busy. */
+        Uint32 uHClock = (Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE);
+        Uint8 uData = (Uint8)(pCpu->uMDR & 0x3E);
+        uData |= (Uint8)(pIO->m_Regs.hvbjoy & 0x81);
+        if (uHClock <= 2 || uHClock >= SNES_HBLANK_START_CYCLE)
+            uData |= 0x40;
         return uData;
     }
     case 0x4213:	// RDIO
@@ -2011,6 +2079,8 @@ void SNCPU_TRAPFUNC SnesSystem::Write4000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
             Uint8 uOldNmitimen = pIO->m_Regs.nmitimen;
 #endif
             pIO->m_Regs.nmitimen = uData;
+            if (!(uData & 0x01))
+                pIO->m_Regs.hvbjoy &= (Uint8)~0x01;
 
             // unconfirmed:
             // should nmi be disabled if someone set 0 to nmitimen register?
@@ -2997,6 +3067,7 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
 #endif
                 // so, execute DMA for remainder of CPU time
                 // this function automatically subtracts from the CPU cycle count as it transfers each byte
+                m_DMAC.SetRasterLine(m_uLine);
 #if 1
                 m_DMAC.ProcessMDMA();
 #else
@@ -3317,6 +3388,67 @@ void SnesSystem::ExecuteWithIRQ(Int32 nCycles, Int32 &nIRQCycles)
 
 
 
+/* AURORA_SAFE_RASTER_V4_SNES_20260915
+ * Physical S-PPU/S-CPU field geometry. ares/SNES timing has one 1360-clock
+ * NTSC short line when non-interlaced (field 1, V=240), and one 1368-clock
+ * PAL long line when interlaced (field 1, V=311). Interlace field 0 carries
+ * one extra scanline. All other lines remain the familiar 1364 clocks. */
+static _INLINE Uint32 SnesRasterFieldLineCount(const SnesPPU &ppu, Bool bPAL)
+{
+    Uint32 uLines = bPAL ? SNES_PAL_BASE_LINES : SNES_NTSC_BASE_LINES;
+    if (ppu.IsTimingInterlace() && !ppu.GetField())
+        ++uLines;
+    return uLines;
+}
+
+static _INLINE Int32 SnesRasterLineClocks(const SnesPPU &ppu, Uint32 uLine, Bool bPAL)
+{
+    if (!bPAL && !ppu.IsTimingInterlace() && ppu.GetField() && uLine == 240u)
+        return SNES_CYCLESPERLINE_SHORT;
+    if (bPAL && ppu.IsTimingInterlace() && ppu.GetField() && uLine == 311u)
+        return SNES_CYCLESPERLINE_LONG;
+    return SNES_CYCLESPERLINE_NORMAL;
+}
+
+static _INLINE Int32 SnesAutoJoyStartCycle(Uint32 uLineStartTotal)
+{
+    Int32 nCycle = (Int32)((SNES_AUTOJOY_ALIGN_CYCLES -
+        (uLineStartTotal & (SNES_AUTOJOY_ALIGN_CYCLES - 1u))) &
+        (SNES_AUTOJOY_ALIGN_CYCLES - 1u));
+    while (nCycle < SNES_AUTOJOY_START_MIN_CYCLE)
+        nCycle += SNES_AUTOJOY_ALIGN_CYCLES;
+    return nCycle <= SNES_AUTOJOY_START_MAX_CYCLE ? nCycle : -1;
+}
+
+static _INLINE Int32 SnesAutoJoyEndCycle(const SnesPPU &ppu,
+                                         Uint32 uLine,
+                                         Bool bPAL,
+                                         Uint32 uLineStartTotal)
+{
+    const Uint32 uStartLine = ppu.GetFrameVisibleLineCount() + 1u;
+    Uint32 uStartTotal = uLineStartTotal;
+    Int32 nEnd;
+    Uint32 u;
+
+    if (uLine < uStartLine || uLine > uStartLine + 4u)
+        return -1;
+
+    for (u = uLine; u > uStartLine; --u)
+        uStartTotal -= (Uint32)SnesRasterLineClocks(ppu, u - 1u, bPAL);
+
+    nEnd = SnesAutoJoyStartCycle(uStartTotal);
+    if (nEnd < 0)
+        return -1;
+    nEnd += SNES_AUTOJOY_BUSY_CYCLES;
+
+    for (u = uStartLine; u < uLine; ++u)
+        nEnd -= SnesRasterLineClocks(ppu, u, bPAL);
+
+    if (nEnd < 0 || nEnd >= SnesRasterLineClocks(ppu, uLine, bPAL))
+        return -1;
+    return nEnd;
+}
+
 void SnesSystem::ExecuteLine()
 {
 	/* AURORA_V7_HORIZONTAL_SCHEDULER
@@ -3331,6 +3463,9 @@ void SnesSystem::ExecuteLine()
 	 * If HDMA overruns H=1364, the remaining negative budget naturally
 	 * carries into the next line instead of lengthening the video line. */
 	SNCPUResetCounter(&m_Cpu, SNCPU_COUNTER_LINE);
+	const Bool bPALRaster = (m_PPU.GetRegs()->stat78 & 0x10) ? TRUE : FALSE;
+	const Int32 nLineClocks = SnesRasterLineClocks(m_PPU, m_uLine, bPALRaster);
+	const Uint32 uLineStartTotal = (Uint32)m_Cpu.Counter[SNCPU_COUNTER_TOTAL];
 
 	/* AURORA_RASTER_MMIO_CATCHUP_V1_20260907
 	 * These guards describe only the live physical scanline. */
@@ -3347,6 +3482,11 @@ void SnesSystem::ExecuteLine()
 	Int32 nDMAPhase = m_Cpu.Counter[SNCPU_COUNTER_TOTAL] & 7;
 	Int32 nHDMASetupCycle = SNES_HDMA_SETUP_BASE_CYCLE + nDMAPhase;
 	Int32 nDRAMRefreshCycle = SNES_DRAM_REFRESH_BASE_CYCLE - nDMAPhase;
+	const Uint32 uAutoJoyVBlankLine = m_PPU.GetFrameVisibleLineCount() + 1u;
+	const Int32 nAutoJoyStartCycle = (m_uLine == uAutoJoyVBlankLine)
+		? SnesAutoJoyStartCycle(uLineStartTotal) : -1;
+	const Int32 nAutoJoyEndCycle = (m_IO.m_Regs.hvbjoy & 0x01)
+		? SnesAutoJoyEndCycle(m_PPU, m_uLine, bPALRaster, uLineStartTotal) : -1;
 
 	// vertical + horizontal IRQ selection
 	if (m_IO.m_Regs.nmitimen & 0x20)
@@ -3399,7 +3539,7 @@ void SnesSystem::ExecuteLine()
 
 #define AURORA_V7_ACCOUNT_STEAL(_clocks) do { \
 		Int32 _auroraSteal = (Int32)(_clocks); \
-		Int32 _auroraRoom = SNES_CYCLESPERLINE - nHClock; \
+		Int32 _auroraRoom = nLineClocks - nHClock; \
 		if (_auroraSteal > _auroraRoom) _auroraSteal = _auroraRoom; \
 		if (_auroraSteal > 0) { \
 			ExecuteWithIRQ(_auroraSteal, nHIRQCycles); \
@@ -3414,7 +3554,7 @@ void SnesSystem::ExecuteLine()
 	m_IO.m_Regs.hvbjoy &= ~0x40;
 
 	/* HDMA setup belongs near H=12 on line zero, not before BeginFrame(). */
-	if (m_uLine == 0 && nHClock < SNES_CYCLESPERLINE)
+	if (m_uLine == 0 && nHClock < nLineClocks)
 	{
 		Int32 nBefore;
 		Int32 nStolen;
@@ -3426,10 +3566,32 @@ void SnesSystem::ExecuteLine()
 		AURORA_V7_ACCOUNT_STEAL(nStolen);
 	}
 
+	/* Automatic joypad polling starts on a 256-clock global divider edge
+	 * at H=130..384 of the first VBlank line. Aurora still commits the serial
+	 * result atomically, but now does so at the hardware completion edge rather
+	 * than three coarse scanlines early. Both events are before the earliest
+	 * rev.2 DRAM refresh position (H=531) for all 1360/1364 line cases. */
+	if (nAutoJoyStartCycle >= 0)
+	{
+		AURORA_V7_RUN_TO(nAutoJoyStartCycle);
+		if (m_IO.m_Regs.nmitimen & 0x01)
+			m_IO.m_Regs.hvbjoy |= 0x01;
+	}
+	if (nAutoJoyEndCycle >= 0)
+	{
+		AURORA_V7_RUN_TO(nAutoJoyEndCycle);
+		if (m_IO.m_Regs.hvbjoy & 0x01)
+		{
+			if (m_IO.m_Regs.nmitimen & 0x01)
+				m_IO.UpdateJoyPads();
+			m_IO.m_Regs.hvbjoy &= (Uint8)~0x01;
+		}
+	}
+
 	/* Keep the 40-clock aggregate refresh cost, now at the revision-2
 	 * DMA-divider-aligned horizontal position instead of H=0. */
 	AURORA_V7_RUN_TO(nDRAMRefreshCycle);
-	if (nHClock < SNES_CYCLESPERLINE)
+	if (nHClock < nLineClocks)
 	{
 		SNCPUConsumeCycles(&m_Cpu, SNES_DRAM_REFRESH_CYCLES);
 		AURORA_V7_ACCOUNT_STEAL(SNES_DRAM_REFRESH_CYCLES);
@@ -3445,7 +3607,7 @@ void SnesSystem::ExecuteLine()
 	if (!m_bRasterHDMADone)
 	{
 		m_bRasterHDMADone = TRUE;
-		if (!(m_IO.m_Regs.hvbjoy & 0x80) && nHClock < SNES_CYCLESPERLINE)
+		if (!(m_IO.m_Regs.hvbjoy & 0x80) && nHClock < nLineClocks)
 		{
 			Int32 nBefore = m_Cpu.Cycles;
 #if SNDBG_LOG
@@ -3460,7 +3622,7 @@ void SnesSystem::ExecuteLine()
 		}
 	}
 
-	AURORA_V7_RUN_TO(SNES_CYCLESPERLINE);
+	AURORA_V7_RUN_TO(nLineClocks);
 
 	/* The PPU beam wraps regardless of whether a DMA debt carries into the
 	 * following line. */
@@ -3494,7 +3656,7 @@ void SnesSystem::ExecuteLine()
 	m_bLineIRQReschedule = FALSE;
 	m_bLineIRQInstant = FALSE;
 	m_nLineIRQCycle = -1;
-	m_nLineIRQClock = SNES_CYCLESPERLINE;
+	m_nLineIRQClock = nLineClocks;
 #endif
 
 	PROF_LEAVE("ExecLine");
@@ -3526,7 +3688,7 @@ if (m_pRom)
 m_PPU.SetRegionPAL(bPAL);
     m_uLine = 0;
     /* AURORA_FCEUMM_FDS_V8_1_COMPAT_REVIEW_20260827: line zero is never part of VBlank. */
-    m_IO.m_Regs.hvbjoy &= ~0x80;
+    m_IO.m_Regs.hvbjoy &= (Uint8)~0x81;
 
 #if SNDBG_LOG
 	#if SNDBG_DEEP
@@ -3594,15 +3756,29 @@ m_PPU.SetRegionPAL(bPAL);
 	/* AURORA_V7_HDMA_SETUP_MOVED: BeginHDMA() agora ocorre em H=12..19 (fase DMA) da linha 0. */
 	m_PPURender.BeginRender(pTarget);
 	m_PPU.BeginFrame();
-	
-	for (m_uLine=0; m_uLine < (224+1); m_uLine++)
+
+	/* AURORA_SETINI_DISPLAY_V1_SCHED_20260915
+	 * Overscan is sampled at V=0 by SnesPPU::BeginFrame(). Keep this local
+	 * copy fixed for the whole frame: a later $2133 write belongs to the next
+	 * frame's vertical geometry, matching the hardware latch. */
+	const Uint32 uVisibleLines = m_PPU.GetFrameVisibleLineCount();
+	for (m_uLine=0; m_uLine < (uVisibleLines + 1u); m_uLine++)
 	{
+		if (m_uLine == 128u)
+		{
+			SyncPPU();
+			m_PPU.LatchTimingInterlace();
+		}
 		#if SNES_SYNCPPUEVERYLINE
 		SyncPPU();
 		#endif
 
 		ExecuteLine();
 	}
+
+	/* VBlank begins after this frame's latched 224/239-line display.
+	 * Auto-joy derives that edge directly from PPU geometry in ExecuteLine(). */
+	const Uint32 uFrameLines = SnesRasterFieldLineCount(m_PPU, bPAL);
 
 	// sync ppu at end of frame (this ensures all rendering has been completed)
 	SyncPPU();
@@ -3624,26 +3800,17 @@ m_PPU.SetRegionPAL(bPAL);
     // set vbl flag at start of vblank
     m_IO.m_Regs.hvbjoy|= 0x80;
 
-	if (m_IO.m_Regs.nmitimen & 1)
-	{
-		// set joy enable flag at start of vblank
-		m_IO.m_Regs.hvbjoy|= 0x01;
-		m_IO.UpdateJoyPads();
-	}
+	/* Auto-joy begins later in this scanline; ExecuteLine() schedules
+	 * the phase-aligned start and 4224-clock completion. */
 
     // set 'BLANK NMI' flag at beginning of v-blank
     m_IO.m_Regs.rdnmi |= 0x80;
     SNCPUSignalNMI(&m_Cpu, m_IO.m_Regs.rdnmi & m_IO.m_Regs.nmitimen & 0x80);
 
-    for ( ; m_uLine < (bPAL ? 312 : 262); m_uLine++)
+    for ( ; m_uLine < uFrameLines; m_uLine++)
 	{
 		ExecuteLine();
 
-		if (m_uLine==225+2) // * 60 = 4410 cycles long (3.10 scanlines)
-		{
-			// done reading joypad
-			m_IO.m_Regs.hvbjoy&= ~0x01;
-		}
 	}
 
     // clear 'BLANK NMI' flag at end of v-blank
@@ -3658,6 +3825,8 @@ m_PPU.SetRegionPAL(bPAL);
 	//SNCPUExecute(&m_Cpu, SNES_CYCLESPERLINE);
 
 	SyncPPU();
+	/* Field changes at V-counter wrap, not when VBlank begins. */
+	m_PPU.AdvanceField();
 	SyncSPC();
 
 	// update spc timers

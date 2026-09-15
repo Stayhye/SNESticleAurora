@@ -14,6 +14,60 @@
 #define SNESPPU_CGRAM_NUM			256
 #define	SNESPPU_OBJ_NUM			128
 
+/* AURORA_SETINI_DISPLAY_V1_PPUH_20260915
+ * $2133 SETINI: bit 0 screen interlace, bit 1 OBJ interlace,
+ * bit 2 overscan (239 visible lines), bit 3 pseudo-hires, bit 6 EXTBG.
+ * Screen interlace and overscan are latched for a frame at V=0; the other
+ * mode bits remain the live register image used by the renderer. */
+#define SNESPPU_SETINI_INTERLACE       0x01u
+#define SNESPPU_SETINI_OBJ_INTERLACE   0x02u
+#define SNESPPU_SETINI_OVERSCAN        0x04u
+#define SNESPPU_SETINI_PSEUDOHIR       0x08u
+#define SNESPPU_SETINI_EXTBG           0x40u
+#define SNESPPU_VISIBLE_LINES_NORMAL   224u
+#define SNESPPU_VISIBLE_LINES_OVERSCAN 239u
+
+/* AURORA_OBJ_STAT77_V2_PPUH_20260915
+ * STAT77 $213e: bit 6 is Range Over (33rd OBJ candidate), bit 7 is
+ * Time Over (35th fetched 8-pixel OBJ sliver). The low nibble remains
+ * the real S-PPU1 version field. */
+#define SNESPPU_STAT77_RANGE_OVER      0x40u
+#define SNESPPU_STAT77_TIME_OVER       0x80u
+
+/* AURORA_PPU_MEMORY_V3_PPUH_20260915
+ * Queue-time bus phase. VRAM/OAM are owned by the PPU throughout the visible
+ * vertical field (including V=0); CGRAM is contended only during visible
+ * pixels, H=88..1095 and V=1..vdisp-1. Forced blank overrides both. */
+#define SNESPPU_MEMBUS_VRAM_OAM_BUSY  0x01u
+#define SNESPPU_MEMBUS_CGRAM_BUSY     0x02u
+#define SNESPPU_CGRAM_ACTIVE_H_BEGIN  88u
+#define SNESPPU_CGRAM_ACTIVE_H_END    1096u
+
+/* AURORA_DOT_RASTER_V6_PPUH_20260915
+ * PPU queue timestamps now carry both V and H without growing the 8-byte
+ * SNQueueElementT. Twelve H bits cover every 1360/1364/1368-clock scanline;
+ * the remaining bits identify the scanline. H=512 is the single low-cost
+ * visual snapshot used by ares' generic performance PPU. This is deliberately
+ * a dot-aware scanline renderer, not a per-dot renderer. */
+#define SNESPPU_RASTER_H_BITS        12u
+#define SNESPPU_RASTER_H_MASK        0x0fffu
+#define SNESPPU_RASTER_SNAPSHOT_H    512u
+#define SNESPPU_RASTER_H_FALLBACK    SNESPPU_RASTER_H_MASK
+
+_INLINE Uint32 SnesPPUPackRasterTime(Uint32 uLine, Uint32 uHClock)
+{
+    if (uHClock > SNESPPU_RASTER_H_MASK)
+        uHClock = SNESPPU_RASTER_H_MASK;
+    return (uLine << SNESPPU_RASTER_H_BITS) | uHClock;
+}
+
+_INLINE Uint32 SnesPPURasterAfter(Uint32 uLine, Uint32 uHClock)
+{
+    if (uHClock >= SNESPPU_RASTER_H_MASK)
+        return SnesPPUPackRasterTime(uLine + 1u, 0u);
+    return SnesPPUPackRasterTime(uLine, uHClock + 1u);
+}
+
 enum SnesPPULayerE
 {
 	SNESPPU_LAYER_BG1 = 0,
@@ -169,10 +223,34 @@ public:
 	void                    SoftReset();
 	void                    BeginFrame();
 	void                    EndFrame();
+	/* AURORA_SAFE_RASTER_V4_PPUH_20260915
+	 * EndFrame() is the VBlank edge; field changes only when V wraps. */
+	void                    AdvanceField();
 void SetRegionPAL(Bool bPAL);
 	void                    SetPPURender(ISnesPPURender *pPPURender)    {m_pRender=pPPURender;}
 
 	const SnesPPURegsT *    GetRegs() const                             {return &m_Regs;}
+	/* SETINI frame geometry.  Overscan/interlace are sampled by BeginFrame(),
+	 * matching the hardware frame latch rather than changing VBlank halfway
+	 * through an already-running frame. */
+	Uint32                  GetFrameVisibleLineCount() const             {return m_uFrameVisibleLines;}
+	Bool                    IsFrameInterlace() const                     {return m_bFrameInterlace;}
+	Bool                    IsTimingInterlace() const                    {return m_bTimingInterlace;}
+	void                    LatchTimingInterlace()                       {m_bTimingInterlace = (m_Regs.setini & SNESPPU_SETINI_INTERLACE) != 0;}
+	Bool                    IsObjInterlace() const                       {return (m_Regs.setini & SNESPPU_SETINI_OBJ_INTERLACE) != 0;}
+	Bool                    IsPseudoHires() const                        {return (m_Regs.setini & SNESPPU_SETINI_PSEUDOHIR) != 0;}
+	Bool                    IsExtBG() const                              {return (m_Regs.setini & SNESPPU_SETINI_EXTBG) != 0;}
+	Bool                    IsHires() const
+	{
+		const Uint8 uMode = (Uint8)(m_Regs.bgmode & 7);
+		return IsPseudoHires() || uMode == 5 || uMode == 6;
+	}
+	Bool                    GetField() const                             {return (m_Regs.stat78 & 0x80) != 0;}
+	void                    SetObjOverflow(Bool bRangeOver, Bool bTimeOver)
+	{
+		if (bRangeOver) m_Regs.stat77 |= SNESPPU_STAT77_RANGE_OVER;
+		if (bTimeOver)  m_Regs.stat77 |= SNESPPU_STAT77_TIME_OVER;
+	}
 	SnesOAMT *              GetOAM()                                    {return &m_OAM;}
 	Uint16 *                GetVramPtr(Uint32 uVramAddr)                {return &m_VRAM[uVramAddr & 0x7FFF];}
 	/* AURORA_SNES_FORCEBLANK_V1: INIDISP bit 7 means forced blank. */
@@ -180,13 +258,24 @@ void SetRegionPAL(Bool bPAL);
 	Bool                    InVBlank() const                            {return m_bVBlank;}
 	Uint32                  GetIntensity()  const                       {return m_Regs.inidisp & 0xF;}
 
+	/* CPU/HDMA enqueue-time phase survives until the queued write is applied.
+	 * This deliberately records only the two access windows V3 can model
+	 * exactly without converting the renderer into a dot scheduler. */
+	Uint8                   BuildMemoryAccessFlags(Uint32 uLine, Uint32 uHClock) const;
+	void                    SetMemoryAccessFlags(Uint8 uFlags)          {m_uMemoryAccessFlags = uFlags;}
+	Uint8                   GetMemoryAccessFlags() const                {return m_uMemoryAccessFlags;}
+
 	#if SNPPU_WRITEQUEUE
 	/* AURORA_REVIVE_005CEE_PPU_ENQUEUE_INLINE_20260829
 	 * Hot path compartilhado por CPU writes e HDMA direto. */
 	_INLINE Bool            EnqueueWrite(Uint32 uLine, Uint32 uAddr, Uint8 uData,
-	                                    Bool bCountFailure = TRUE)
+	                                    Bool bCountFailure = TRUE,
+	                                    Uint8 uMemoryAccessFlags = 0,
+	                                    Uint32 uHClock = SNESPPU_RASTER_H_FALLBACK)
 	{
-		Bool bQueued = m_Queue.Enqueue(uLine, uAddr, uData);
+		Bool bQueued = m_Queue.Enqueue(
+			SnesPPUPackRasterTime(uLine, uHClock),
+			uAddr, uData, uMemoryAccessFlags);
 #if SNDBG_LOG
 		if (bQueued)
 			g_DbgPPUQueuedWrites++;
@@ -198,7 +287,7 @@ void SetRegionPAL(Bool bPAL);
 		return bQueued;
 	}
 	#endif
-	void                    Sync(Uint32 uLine);
+	void                    Sync(Uint32 uLine, Uint32 uHClock = SNESPPU_RASTER_H_FALLBACK);
 
 	void                    WriteCGDATA(Uint8 uData);
 	void                    WriteOAMDATA(Uint8 uData);
@@ -242,6 +331,11 @@ private:
 
     Uint32			        m_uLine;
     Bool                    m_bVBlank;
+    Bool                    m_bRasterLineRendered;
+    Uint32                  m_uFrameVisibleLines;
+    Bool                    m_bFrameInterlace;
+    Bool                    m_bTimingInterlace;
+    Bool                    m_bInactiveTailClearPending;
 
     SnesPPURegsT	        m_Regs;
     SnesColor16T	        m_CGRAM[SNESPPU_CGRAM_NUM] _ALIGN(16);			// 16-bit palette
@@ -252,6 +346,7 @@ private:
 	Uint8                   m_CGRAMLatch;
 	Uint8                   m_PPU1MDR;
 	Uint8                   m_PPU2MDR;
+	Uint8                   m_uMemoryAccessFlags;
 
 	/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
 	Uint16                  m_Mode7LineHofs;
@@ -267,6 +362,10 @@ private:
     void                    UpdateMatMul();
 	void                    UpdateVRAMReadBuffer();
 	void                    UpdateOAMPriority();
+	Bool                    IsVRAMAccessAllowed() const;
+	Bool                    IsOAMAccessAllowed() const;
+	Bool                    IsCGRAMAccessAllowed() const;
+	void                    ApplyQueuedWritesBefore(Uint32 uRasterTime);
 };
 
 

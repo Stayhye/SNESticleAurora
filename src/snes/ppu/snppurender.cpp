@@ -247,19 +247,53 @@ void _DrawMask2(Uint32 *pDest, SNMaskT *pMask1, SNMaskT *pMask2, Int32 nPixels)
 
 void SnesPPURender::RenderLine(Int32 iLine)
 {
-	if (m_pTarget)
+	/* AURORA_OBJ_STAT77_V2_RENDERCPP_20260915
+	 * Safe Frameskip may remove the host target, but Range/Time Over are
+	 * emulated PPU state and can be read by game code. Keep only the cheap
+	 * OBJ evaluation/status path alive; skip BG decode, color math and GS. */
+	if (!m_pTarget)
 	{
-		switch (m_pTarget->GetFormat()->uBitDepth)
+		const SnesPPURegsT *pRegs = m_pPPU->GetRegs();
+		if (m_pRenderInfo && !(pRegs->inidisp & 0x80))
 		{
-		case 16:
-			RenderLine16(iLine);
-			break;
-		case 32:
-	   		RenderLine32(iLine, 0);
-			break;
-
+			if ((m_UpdateFlags & SNESPPURENDER_UPDATE_OBJ) ||
+			    g_SnesObjLimitVisibilityDirty)
+			{
+				UpdateOBJ(m_pRenderInfo->uObjY, m_pRenderInfo->uObjSize);
+				UpdateOBJVisibility(m_pRenderInfo->uObjY,
+					m_pRenderInfo->uObjSize, m_pPPU->GetRegs()->oampri.w,
+					SNESPPU_OBJ_NUM);
+				m_UpdateFlags &= ~SNESPPURENDER_UPDATE_OBJ;
+				g_SnesObjLimitVisibilityDirty = FALSE;
+			}
+			if ((Uint32)iLine < SNPPU_MAXLINE)
+				m_pPPU->SetObjOverflow(
+					m_ObjRangeOver[iLine] != 0,
+					m_ObjTimeOver[iLine] != 0);
 		}
+		return;
 	}
+
+	switch (m_pTarget->GetFormat()->uBitDepth)
+	{
+	case 16:
+		RenderLine16(iLine);
+		break;
+	case 32:
+		RenderLine32(iLine, 0);
+		break;
+	}
+}
+
+/* AURORA_SETINI_DISPLAY_V1_RENDERCPP_20260915
+ * The GS output texture persists across frames. Clear only on a real render
+ * target; callers retain a pending request when presentation was skipped. */
+Bool SnesPPURender::ClearLine(Int32 iLine)
+{
+	if (!m_pTarget || !m_pBlend || !m_pRenderInfo)
+		return FALSE;
+	m_pBlend->Clear(&m_pRenderInfo->BlendInfo, iLine);
+	return TRUE;
 }
 
 void SnesPPURender::RenderLine16(Int32 iLine)

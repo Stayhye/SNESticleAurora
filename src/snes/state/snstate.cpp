@@ -805,6 +805,7 @@ void SnesDMAC::RestoreState(struct SNStateDMACT *pState)
 	memset(m_MDMAPhase, 0, sizeof(m_MDMAPhase));
 	m_MDMAChannelStartup = 0;
 	m_MDMAStartupPending = 0;
+	m_uRasterLine = 0;
 }
 
 void SnesPPU::SaveState(struct SNStatePPUT *pState)
@@ -818,10 +819,38 @@ void SnesPPU::SaveState(struct SNStatePPUT *pState)
 void SnesPPU::RestoreState(struct SNStatePPUT *pState)
 {
 	m_Regs = pState->Regs;
+	/* AURORA_OBJ_STAT77_V2_STATE_20260915
+	 * V1 geometry is transient/derived and intentionally absent from the
+	 * legacy save-state payload. Reconstruct it from restored SETINI and make
+	 * the inactive 239-line tail retire on the next presented normal frame. */
+	m_uFrameVisibleLines = (m_Regs.setini & SNESPPU_SETINI_OVERSCAN)
+		? SNESPPU_VISIBLE_LINES_OVERSCAN
+		: SNESPPU_VISIBLE_LINES_NORMAL;
+	m_bFrameInterlace = (m_Regs.setini & SNESPPU_SETINI_INTERLACE) != 0;
+	/* AURORA_SAFE_RASTER_V4_STATE_20260915
+	 * Timing interlace is transient counter state. Save states are restored at
+	 * Aurora's scheduler boundary, so seed it from the restored SETINI image;
+	 * the normal V=128 capture will refresh it during the next field. */
+	m_bTimingInterlace = m_bFrameInterlace;
+	m_bInactiveTailClearPending =
+		(m_uFrameVisibleLines == SNESPPU_VISIBLE_LINES_NORMAL);
 	memcpy(m_CGRAM,   pState->m_CGRAM, sizeof(m_CGRAM));
 	memcpy(m_VRAM,    pState->m_VRAM,  sizeof(m_VRAM));
 	m_OAM = pState->m_OAM;
+	/* AURORA_PPU_MEMORY_V3_STATE_20260915
+	 * These are transient bus/latch states and are deliberately not appended
+	 * to the legacy opaque state payload. Never inherit them from the timeline
+	 * that is being replaced. Re-seed Mode 7's derived scanline latches too. */
 	m_OAMLatch = 0;
+	m_CGRAMLatch = 0;
+	m_PPU1MDR = 0;
+	m_PPU2MDR = 0;
+	m_uMemoryAccessFlags = 0;
+	/* AURORA_DOT_RASTER_V6_STATE_20260915 */
+	m_bRasterLineRendered = FALSE;
+	m_Mode7LineHofs = m_Regs.m7hofs.w;
+	m_Mode7LineVofs = m_Regs.m7vofs.w;
+	m_uMosaicStartLine = 1;
 #if SNPPU_WRITEQUEUE
 	/* AURORA_PPU_STATE_QUEUE_RESET_V6_2_20260829
 	 * m_Queue is transient scheduler state and is intentionally absent from
@@ -831,6 +860,10 @@ void SnesPPU::RestoreState(struct SNStatePPUT *pState)
 	m_Queue.Reset();
 #endif
 	m_pRender->UpdateVRAMRange(0, SNESPPU_VRAM_NUMWORDS);
+	/* OAM bytes, SETINI.1 and priority rotation all came from the state.
+	 * Force one complete derived rebuild instead of relying on whether the
+	 * restored first-sprite index happens to differ from the old one. */
+	m_pRender->SetUpdateFlags(SNESPPURENDER_UPDATE_ALL);
 	UpdateOAMPriority();
 }
 

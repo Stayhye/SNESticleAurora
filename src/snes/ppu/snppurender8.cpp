@@ -1737,7 +1737,11 @@ static _INLINE void _DecodeOBJRow4(SnesChrLookupT *pLookup, Uint8 *pHFlip,
 }
 
 
-static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList, SnesRenderObj8T *pObjLine, Int32 MaxObj8Line, Int32 iLine, Uint32 uBaseAddr, Uint32 uNameSelect, Uint16 *pVram)
+/* AURORA_OBJ_STAT77_V2_RENDER8_20260915 */
+static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList,
+	SnesRenderObj8T *pObjLine, Int32 MaxObj8Line, Int32 iLine,
+	Uint32 uBaseAddr, Uint32 uNameSelect, Uint16 *pVram,
+	Bool bObjInterlace, Bool bField)
 {
 	Int32 nObjLine = 0;
 #if SNDBG_LOG && SNPPU_OBJ_CACHE
@@ -1772,9 +1776,25 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 		ObjX = pObj->uPosX;
 		ObjX<<=32-9;
 		ObjX>>=32-9;
-		ObjY = iLine - pObj->uPosY;
-		ObjY^= pObj->uVXOR;
-		ObjY&= pObj->uHeight - 1;
+		ObjY = (iLine - pObj->uPosY) & 0xFF;
+		if (bObjInterlace)
+		{
+			/* One display line addresses two source rows. Vertical flip is
+			 * resolved before field parity; on the flipped field hardware
+			 * subtracts the field bit instead of adding it. */
+			ObjY <<= 1;
+			ObjY ^= pObj->uVXOR;
+			if (pObj->uVXOR)
+				ObjY -= bField ? 1 : 0;
+			else
+				ObjY += bField ? 1 : 0;
+			ObjY &= 0xFF;
+		}
+		else
+		{
+			ObjY ^= pObj->uVXOR;
+			ObjY &= pObj->uHeight - 1;
+		}
 
 		Uint32 uTileAddr;
 		Uint32 uTile0, uTile1, uOpaque;
@@ -2009,6 +2029,15 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 	const Bool bMode7ExtBG =
 		(uBGMode == 7) && ((pRegs->setini & 0x40) != 0);
 	const Uint8 uOBSEL = pRegs->obsel;
+
+	/* Physical OBJ evaluation is independent of Aurora's software layer
+	 * mask. RenderLine8 is reached only while not force-blanked, so publish
+	 * the sticky STAT77 state for this scanline before host policy can elide
+	 * sprite drawing. */
+	m_pPPU->SetObjOverflow(
+		m_ObjRangeOver[iLine] != 0,
+		m_ObjTimeOver[iLine] != 0);
+
 	/* AURORA_V85_SOFTWARE_LAYER_MASK
 	 * Mask before fetch/decode so disabled layers really save EE work. */
 	const Uint8 uSoftwareLayers = SNPPURenderGetSoftwareLayerMask();
@@ -2130,7 +2159,8 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 			list=rotated;
 		}
 		nObjLine=_FetchOBJ(m_Objs,list,count,ObjLine,budget,iLine,(uOBSEL&7)<<13,
-			_SnesPPUOBJNameSelect(uOBSEL),m_pPPU->GetVramPtr(0));
+			_SnesPPUOBJNameSelect(uOBSEL),m_pPPU->GetVramPtr(0),
+			m_pPPU->IsObjInterlace(), m_pPPU->GetField());
 	}
 	else
 		nObjLine = 0;
@@ -2156,8 +2186,8 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		g_DbgObjOpaqueTiles += _opaque;
 		if (_objEnabled && nObjLine > 0 && _opaque == 0) g_DbgObjEmptyLines++;
 		#endif
-		if (m_nObjLine[iLine] >= SNPPU_MAXOBJ) g_DbgObjRangeLimitLines++;
-		if (nObjLine >= SNPPU_MAXOBJCHR) g_DbgObjLimitLines++;
+		if (m_ObjRangeOver[iLine]) g_DbgObjRangeLimitLines++;
+		if (m_ObjTimeOver[iLine]) g_DbgObjLimitLines++;
 		g_DbgObjOBSEL = uOBSEL;
 		g_DbgObjTM = pRegs->tm;
 		g_DbgObjTS = pRegs->ts;
