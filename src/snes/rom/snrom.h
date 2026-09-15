@@ -129,6 +129,10 @@ class SnesRom  : public Emu::Rom
 {
 private:
 	Uint32	m_uRomBytes;		// size of rom in bytes
+	/* AURORA_SNES_SINGLE_IO_IDENTITY_V1_20260915
+	 * Pristine file identity captured during the authoritative ROM read. */
+	Uint32	m_uRawFileCRC32;
+	Uint32	m_uRawFileBytes;
 	Uint8	*m_pRomMem;
 	Uint8	*m_pRomData;	// pointer to rom data
 	SNRomInfoT *m_pCartInfo;
@@ -152,6 +156,8 @@ public:
 
 	Uint8	*GetData() {return m_pRomData;}
 	Uint32	GetBytes() {return m_uRomBytes;}
+	Uint32	GetRawFileCRC32() const {return m_uRawFileCRC32;}
+	Uint32	GetRawFileBytes() const {return m_uRawFileBytes;}
 	Uint32	GetSRAMBytes() {return m_uSRAMSize * 1024 / 8;}
 
 	SNRomInfoT *GetCartInfo(Uint32 uOffset);

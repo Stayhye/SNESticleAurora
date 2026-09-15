@@ -62,16 +62,23 @@ void SnesRomResetRuntimeCompatForExternalDevice(void)
     g_SnesCompatSunsetRidersObj128 = FALSE;
 }
 
-static Uint32 _SNRomRuntimeCRC32(const Uint8 *pData, Uint32 nBytes)
+/* AURORA_SNES_SINGLE_IO_IDENTITY_V1_20260915
+ * Incremental standard CRC32 lets the loader include a 512-byte copier
+ * header without rereading the host file. */
+static Uint32 _SNRomCRC32Update(Uint32 crc, const Uint8 *pData, Uint32 nBytes)
 {
-    Uint32 crc = 0xFFFFFFFFu;
     while (nBytes--)
     {
         crc ^= *pData++;
         for (Uint32 bit = 0; bit < 8; ++bit)
             crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320u : 0u);
     }
-    return crc ^ 0xFFFFFFFFu;
+    return crc;
+}
+
+static Uint32 _SNRomRuntimeCRC32(const Uint8 *pData, Uint32 nBytes)
+{
+    return _SNRomCRC32Update(0xFFFFFFFFu, pData, nBytes) ^ 0xFFFFFFFFu;
 }
 
 #ifndef SNES_HK97_SPC_BOOT
@@ -745,6 +752,8 @@ SnesRom::SnesRom()
 	m_pRomData	= NULL;
 	m_pCartInfo = NULL;
 	m_uRomBytes	= 0;
+	m_uRawFileCRC32 = 0; /* AURORA_SNES_SINGLE_IO_IDENTITY_V1_20260915 */
+	m_uRawFileBytes = 0;
 	m_Flags      = SNROM_FLAG_ROM;
 	m_eMapping   = SNROM_MAPPING_LOROM;
 	m_eVideoType = SNROM_VIDEO_NTSC;
@@ -1153,6 +1162,10 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 	Uint32 nHeaderBytes;
 	Uint32 nRomBytes;
 
+	/* Never expose stale identity after a failed reload. */
+	m_uRawFileCRC32 = 0;
+	m_uRawFileBytes = 0;
+
 	// determine file size
 	pFileIO->Seek(0, SEEK_END);
 	nFileBytes= (Uint32)pFileIO->GetPos();
@@ -1263,6 +1276,26 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 			Unload();
 			return LOADERROR_READFILE;
 		}
+	}
+
+	/* AURORA_SNES_SINGLE_IO_IDENTITY_V1_20260915
+	 * Capture the exact raw-file identity now, before Type-1 deinterleave or
+	 * compatibility patching can mutate the payload. A valid 512-byte copier
+	 * header was already read into RomHdr, so no host-storage pass is needed.
+	 * For malformed odd-remainder files raw byte count intentionally differs
+	 * from nFileBytes; the frontend detects that and uses its legacy fallback. */
+	{
+		Uint32 crc = 0xFFFFFFFFu;
+		Uint32 rawBytes = m_uRomBytes;
+		if (nHeaderBytes == sizeof(SNRomHdrU))
+		{
+			crc = _SNRomCRC32Update(
+				crc, RomHdr.uData, (Uint32)sizeof(RomHdr.uData));
+			rawBytes += (Uint32)sizeof(RomHdr.uData);
+		}
+		crc = _SNRomCRC32Update(crc, m_pRomData, m_uRomBytes);
+		m_uRawFileCRC32 = crc ^ 0xFFFFFFFFu;
+		m_uRawFileBytes = rawBytes;
 	}
 
 	SNRomInfoT *pCartInfo;
@@ -1608,6 +1641,8 @@ void SnesRom::Unload()
 	m_pCartInfo = NULL;
 	m_pRomData = NULL;
 	m_uRomBytes = 0;
+	m_uRawFileCRC32 = 0;
+	m_uRawFileBytes = 0;
 	m_bLoaded   = false;
 	memset(m_Name, 0, sizeof(m_Name));
 }

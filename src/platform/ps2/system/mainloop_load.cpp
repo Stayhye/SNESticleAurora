@@ -2705,9 +2705,13 @@ static Bool _MainLoopExecuteSwcFirmware(const char *pFirmwarePath,
     if (!MainLoopEnsureGameplayRasterWidth(256))
         return FALSE;
 
-    /* AURORA_SWC_LAZY_CART_BACKING_V3_20260915
-     * Empty copier boot needs SWC DRAM only. */
-    _MainLoopSwcReleaseCartReserve();
+    /* AURORA_SWC_32MBIT_HEADROOM_V1_20260915
+     * Reserve the distinct external Game Pak backing before the copier itself
+     * allocates DRAM/FDC state.  A full 32-Mbit SWC genuinely needs both
+     * memories at once.  Reservation is opportunistic so disk-only boot keeps
+     * the old behavior on a genuinely tight heap; hot insert still retries an
+     * exact-size allocation if this early reservation was unavailable. */
+    (void)_MainLoopSwcEnsureCartReserve(MAINLOOP_SWC_CART_RESERVE_BYTES);
 
     if (!_pSnes->LoadSuperWildCard(pFirmwarePath, NULL))
     {
@@ -3482,8 +3486,11 @@ static Bool _MainLoopExecuteSwcDisk(const char *pMappedPath,
 
     if (!bMagicom)
     {
-        /* AURORA_SWC_LAZY_CART_BACKING_V3_20260915 */
-        _MainLoopSwcReleaseCartReserve();
+        /* AURORA_SWC_32MBIT_HEADROOM_DISK_V1_20260915
+         * Same policy as empty-firmware boot: secure cartridge headroom before
+         * LoadSuperWildCard mounts/allocates copier media. */
+        (void)_MainLoopSwcEnsureCartReserve(
+            MAINLOOP_SWC_CART_RESERVE_BYTES);
     }
 
     if (!(bMagicom ? _pSnes->LoadSuperMagicom(FirmwarePath, pMappedPath)
@@ -4337,10 +4344,13 @@ static Bool _MainLoopExecuteGbaZipMemory(const char *pZipPath,
 {
     Char tempPath[1024];
 
+    /* AURORA_GBA_ZIP_LAZY_CORE_FIX_V1_20260915
+     * _MainLoopUnloadRom() deliberately destroys inactive core wrappers.
+     * A ZIP-backed GBA must therefore not require _pGba before extraction:
+     * _MainLoopExecuteGbaPath() recreates gpSP after the file exists. */
     if (!pZipPath || !*pZipPath ||
         !pOriginalPath || !*pOriginalPath ||
         !pMemberName || !*pMemberName ||
-        !_pGba ||
         nExpectedBytes <= 0 ||
         (Uint32)nExpectedBytes > MAINLOOP_GBA_ZIP_MAX_BYTES)
     {
@@ -4715,6 +4725,7 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
         Bool bTemp = FALSE;
         CFileIO romfile;
         Emu::Rom::LoadErrorE eError;
+        Bool bIdentityReady = FALSE; /* AURORA_SNES_SINGLE_IO_IDENTITY_V1_20260915 */
 
         tempPath[0] = 0;
         if (eSourceType == MAINLOOP_ENTRYTYPE_ZIP)
@@ -4739,18 +4750,9 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
             bTemp = TRUE;
         }
 
-        if (!_MainLoopFileCRC32Exact(
-                pOwnedPath, nExpectedRomBytes, &uRomIdentityCRC,
-                eSourceType == MAINLOOP_ENTRYTYPE_ZIP ? FALSE : TRUE))
-        {
-            if (bTemp) remove(tempPath);
-            MainLoopModalPrintf(60 * 4,
-                "ERROR: cannot verify complete SNES ROM");
-            return FALSE;
-        }
-#if SNDBG_LOG
-        uRomCRC = uRomIdentityCRC;
-#endif
+        /* AURORA_SNES_SINGLE_IO_IDENTITY_V1_20260915
+         * Do not scan the whole file here. SnesRom computes the pristine/raw
+         * file CRC from the same bytes it must read for emulation. */
 
         if (!romfile.Open(pOwnedPath, "rb"))
         {
@@ -4762,6 +4764,25 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
         _pSnesRom->Unload();
         eError = _pSnesRom->LoadRom(&romfile);
         romfile.Close();
+
+        if (eError == Emu::Rom::LOADERROR_NONE)
+        {
+            /* Fast path for every normal/headered SNES image: no second host
+             * read.  Preserve the historical raw-file identity exactly. */
+            if (_pSnesRom->GetRawFileBytes() == (Uint32)nExpectedRomBytes)
+            {
+                uRomIdentityCRC = _pSnesRom->GetRawFileCRC32();
+                bIdentityReady = TRUE;
+            }
+            else
+            {
+                /* Conservative compatibility fallback for malformed/legacy
+                 * shapes whose parser intentionally ignores an odd remainder. */
+                bIdentityReady = _MainLoopFileCRC32Exact(
+                    pOwnedPath, nExpectedRomBytes, &uRomIdentityCRC, FALSE);
+            }
+        }
+
         if (bTemp) remove(tempPath);
 
         if (eError != Emu::Rom::LOADERROR_NONE)
@@ -4777,6 +4798,17 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
                     "ERROR: cannot load SNES ROM (%d)", (int)eError);
             return FALSE;
         }
+
+        if (!bIdentityReady)
+        {
+            _pSnesRom->Unload();
+            MainLoopModalPrintf(60 * 4,
+                "ERROR: cannot verify complete SNES ROM");
+            return FALSE;
+        }
+#if SNDBG_LOG
+        uRomCRC = uRomIdentityCRC;
+#endif
 
         nRomBytes = nExpectedRomBytes;
         bSnesOwnedFileLoaded = TRUE;
