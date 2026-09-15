@@ -533,18 +533,6 @@ static void _MainLoopLoadProgressBegin(Int32 total)
     MainLoopRender();
 }
 
-static void _MainLoopLoadProgressUpdate(Int32 done)
-{
-    (void)done;
-}
-
-static void _MainLoopLoadProgressMiniz(int done, int total, void *user)
-{
-    (void)done;
-    (void)total;
-    (void)user;
-}
-
 static void _MainLoopLoadProgressFinish(Bool complete)
 {
     (void)complete;
@@ -552,6 +540,10 @@ static void _MainLoopLoadProgressFinish(Bool complete)
     _MainLoop_StatusStr[0] = 0;
 }
 
+/* AURORA_LOADING_FAST_CLEANUP_20260915
+ * Keep the one static loading frame, but do not split fileXio reads merely
+ * for progress reporting.  Request the complete remaining payload and still
+ * handle legal short reads exactly like _MainLoopReadBinaryData(). */
 static Int32 _MainLoopReadBinaryDataProgress(
     Uint8 *pBuffer, Int32 nExpectedBytes, const char *pRomFile)
 {
@@ -570,14 +562,8 @@ static Int32 _MainLoopReadBinaryDataProgress(
     while (total < nExpectedBytes)
     {
         Int32 want = nExpectedBytes - total;
-        int n;
+        int n = fileXioRead(fd, pBuffer + total, (int)want);
 
-        /* Keep fileXio RPCs large; <=1 MiB preserves the fast direct-IO path
-           while still giving visible progress for large cartridges. */
-        if (want > 1048576)
-            want = 1048576;
-
-        n = fileXioRead(fd, pBuffer + total, (int)want);
         if (n <= 0)
         {
             fileXioClose(fd);
@@ -586,41 +572,12 @@ static Int32 _MainLoopReadBinaryDataProgress(
         }
 
         total += (Int32)n;
-        _MainLoopLoadProgressUpdate(total);
     }
 
     fileXioClose(fd);
     _MainLoopLoadProgressFinish(total == nExpectedBytes ? TRUE : FALSE);
     return total;
 }
-
-typedef struct MainLoopZipFileProgressT
-{
-    FILE *fp;
-    Int32 expected;
-    Int32 written;
-} MainLoopZipFileProgressT;
-
-static size_t _MainLoopZipFileProgressWrite(
-    void *opaque, mz_uint64 file_ofs, const void *buf, size_t n)
-{
-    MainLoopZipFileProgressT *sink =
-        (MainLoopZipFileProgressT *)opaque;
-
-    if (!sink || !sink->fp || !buf ||
-        file_ofs != (mz_uint64)(Uint32)sink->written ||
-        sink->written > sink->expected ||
-        n > (size_t)(sink->expected - sink->written))
-        return 0;
-
-    if (fwrite(buf, 1, n, sink->fp) != n)
-        return 0;
-
-    sink->written += (Int32)n;
-    _MainLoopLoadProgressUpdate(sink->written);
-    return n;
-}
-
 
 int _MainLoopReadBinaryData(Uint8 *pBuffer, Int32 nBufferBytes, const char *pRomFile)
 {
@@ -775,10 +732,8 @@ static Bool _MainLoopExtractZipEntryToFile(
     mz_zip_archive zip;
     mz_zip_archive_file_stat zst;
     struct stat fst;
-    MainLoopZipFileProgressT sink;
-    FILE *out = NULL;
     Bool ok = FALSE;
-    Bool progressStarted = FALSE;
+    Bool loadingShown = FALSE;
 
     if (!pZipPath || !*pZipPath ||
         !pMemberName || !*pMemberName ||
@@ -802,46 +757,29 @@ static Bool _MainLoopExtractZipEntryToFile(
         goto done;
 
     remove(pOutPath);
-    out = fopen(pOutPath, "wb");
-    if (!out)
-        goto done;
-
-    sink.fp = out;
-    sink.expected = nExpectedBytes;
-    sink.written = 0;
 
     _MainLoopLoadProgressBegin(nExpectedBytes);
-    progressStarted = TRUE;
+    loadingShown = TRUE;
 
-    if (!mz_zip_reader_extract_to_callback(
-            &zip, (mz_uint)uZipIndex,
-            _MainLoopZipFileProgressWrite, &sink, 0))
+#ifndef MINIZ_NO_STDIO
+    if (!mz_zip_reader_extract_to_file(
+            &zip, (mz_uint)uZipIndex, pOutPath, 0))
         goto done;
-
-    if (sink.written != nExpectedBytes || fflush(out) != 0)
-        goto done;
-
-    if (fclose(out) != 0)
-    {
-        out = NULL;
-        goto done;
-    }
-    out = NULL;
+#else
+#error Aurora ZIP file-only path requires miniz stdio extraction
+#endif
 
     if (stat(pOutPath, &fst) != 0 ||
-        S_ISDIR(fst.st_mode) || fst.st_size != nExpectedBytes)
+        S_ISDIR(fst.st_mode) ||
+        fst.st_size != nExpectedBytes)
         goto done;
 
     ok = TRUE;
 
 done:
-    if (out)
-        fclose(out);
     mz_zip_reader_end(&zip);
-
-    if (progressStarted)
+    if (loadingShown)
         _MainLoopLoadProgressFinish(ok);
-
     if (!ok)
         remove(pOutPath);
     return ok;
@@ -887,9 +825,6 @@ static Bool _MainLoopFileCRC32Exact(
         crc = (Uint32)mz_crc32(
             crc, (const unsigned char *)buf, got);
         total += (Int32)got;
-
-        if (bShowProgress)
-            _MainLoopLoadProgressUpdate(total);
     }
 
     {
@@ -5010,9 +4945,8 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
         if (eSourceType == MAINLOOP_ENTRYTYPE_GZ)
         {
             _MainLoopLoadProgressBegin(nExpectedRomBytes);
-            nRomBytes = MinizReadGZToBufferProgress(
-                pFileName, _RomData, nExpectedRomBytes,
-                _MainLoopLoadProgressMiniz, NULL);
+            nRomBytes = MinizReadGZToBuffer(
+                pFileName, _RomData, nExpectedRomBytes);
             _MainLoopLoadProgressFinish(
                 nRomBytes == nExpectedRomBytes ? TRUE : FALSE);
         }
@@ -5023,11 +4957,10 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
 
             _MainLoopLoadProgressBegin(nExpectedRomBytes);
             nRomBytes = bZipIndexValid
-                ? MinizReadZipEntryToBufferProgress(
+                ? MinizReadZipEntryToBuffer(
                     pFileName, uZipIndex,
                     _RomData, nExpectedRomBytes,
-                    loadedName, (int)sizeof(loadedName),
-                    _MainLoopLoadProgressMiniz, NULL)
+                    loadedName, (int)sizeof(loadedName))
                 : -1;
             _MainLoopLoadProgressFinish(
                 nRomBytes == nExpectedRomBytes ? TRUE : FALSE);

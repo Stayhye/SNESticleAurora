@@ -424,10 +424,43 @@ int MinizReadGZToBufferProgress(const char *path,
         return sink.written;
 }
 
+/* AURORA_LOADING_FAST_CLEANUP_20260915
+ * Static loading UI no longer needs output callbacks.  Restore miniz's
+ * direct memory path: one inflate directly into the final ROM backing. */
 int MinizReadGZToBuffer(const char *path, void *out_buf, int out_max)
 {
-        return MinizReadGZToBufferProgress(
-            path, out_buf, out_max, NULL, NULL);
+        void *gz_data = NULL;
+        int gz_size = 0;
+        int hdr;
+        int deflate_len;
+        size_t produced;
+
+        if (!out_buf || out_max <= 0)
+                return -1;
+
+        if (read_file_to_alloc(path, &gz_data, &gz_size) <= 0)
+                return -1;
+
+        hdr = parse_gzip_header((const unsigned char *)gz_data, gz_size);
+        if (hdr < 0 || gz_size <= hdr + 8)
+        {
+                free(gz_data);
+                return -1;
+        }
+
+        deflate_len = gz_size - hdr - 8;
+
+        produced = tinfl_decompress_mem_to_mem(
+                out_buf, (size_t)out_max,
+                (const unsigned char *)gz_data + hdr, (size_t)deflate_len,
+                0 /* raw deflate, not zlib-wrapped */);
+
+        free(gz_data);
+
+        if (produced == TINFL_DECOMPRESS_MEM_TO_MEM_FAILED)
+                return -1;
+
+        return (int)produced;
 }
 
 int MinizReadZipFirstMatch(const char *path,
@@ -669,9 +702,37 @@ int MinizReadZipEntryToBuffer(const char *path,
                               char *out_filename,
                               int filename_max)
 {
-        return MinizReadZipEntryToBufferProgress(
-            path, file_index, out_buf, out_max,
-            out_filename, filename_max, NULL, NULL);
+        MinizFileXioReader reader;
+        mz_zip_archive zip;
+        mz_zip_archive_file_stat st;
+        int result = -1;
+
+        if (!out_buf || out_max <= 0)
+                return -1;
+        if (!miniz_zip_open_reader(path, &reader, &zip))
+                return -1;
+
+        if (file_index < mz_zip_reader_get_num_files(&zip) &&
+            mz_zip_reader_file_stat(&zip, (mz_uint)file_index, &st) &&
+            !st.m_is_directory && st.m_is_supported &&
+            st.m_uncomp_size > 0 &&
+            st.m_uncomp_size <= (mz_uint64)out_max &&
+            st.m_uncomp_size <= 0x7FFFFFFFULL &&
+            mz_zip_reader_extract_to_mem(
+                &zip, (mz_uint)file_index, out_buf,
+                (size_t)st.m_uncomp_size, 0))
+        {
+                result = (int)st.m_uncomp_size;
+                if (out_filename && filename_max > 0)
+                {
+                        strncpy(out_filename, st.m_filename,
+                                (size_t)(filename_max - 1));
+                        out_filename[filename_max - 1] = '\0';
+                }
+        }
+
+        miniz_zip_close_reader(&reader, &zip);
+        return result;
 }
 
 typedef struct MinizZipPrefixSink
