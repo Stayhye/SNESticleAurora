@@ -122,8 +122,9 @@ CWavFile _WavFile;
 Uint8 *_RomData = NULL;
 Uint32 _RomDataCapacity = 0;
 
-SnesStateT		_SnesState;
-NesStateT		_NesState;
+/* AURORA_STATE_PAYLOAD_HEAP_V1_20260914
+ * SNES/NES state payloads now use mainloop_state.cpp's transient
+ * heap scratch and are not pinned in EE .bss. */
 
 Emu::MovieClip *s_pMovieClip;
 

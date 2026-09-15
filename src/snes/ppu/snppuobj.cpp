@@ -58,7 +58,8 @@ static Uint32 _ObjCountBits8(Uint32 v)
 void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 	const SnesRenderObj8T *pObjLine, Int32 nObjLine,
 	const SNMaskT *pWindow, const SNMaskT *pMask,
-	SNMaskT *pAddSubMask, Bool bAddSubMask)
+	SNMaskT *pAddSubMask, Bool bAddSubMask,
+	Uint8 *pDirectAttrib, Uint8 uDirectShift)
 {
 	SNMaskT ObjMask;
 	SNMaskT PriorityMask[4];
@@ -173,6 +174,19 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 			 * avoids eight branches in sprite-heavy scenes (Top Gear). */
 			if (!uVisible)
 				continue;
+
+			/* AURORA_V4_MODE34_DIRECT_COLOR_20260915
+			 * OBJ is composited after BG1. Clear Direct Color ownership only
+			 * for OBJ pixels that survived window and priority masking. */
+			if (pDirectAttrib)
+			{
+				const Uint8 uKeep = uDirectShift ? 0x0F : 0xF0;
+				Int32 iDirect;
+				for (iDirect = 0; iDirect < 8; iDirect++)
+					if (uVisible & (1u << iDirect))
+						pDirectAttrib[iPosX + iDirect] &= uKeep;
+			}
+
 			if (uVisible == 0xFF)
 			{
 				memcpy(pDest8, pObjData, 8);
@@ -226,6 +240,8 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 				}
 
 				pLine8[iX] = pObjData[iPixel];
+				if (pDirectAttrib)
+					pDirectAttrib[iX] &= uDirectShift ? 0x0F : 0xF0;
 #if SNDBG_DEEP
 				g_DbgObjDrawnPixels++;
 #endif
@@ -526,13 +542,18 @@ void SnesPPURender::UpdateOBJVisibility(Uint8 *pObjY, Uint8 *pObjSize, Int32 iOb
 		}
 	}
 
+	/* AURORA_V3_OBJ_Y_WRAP_FIX
+	 * OBJ Y is 8-bit hardware state.  The canonical CheckOBJ path already
+	 * tests ((line - Y) & 0xff), but the cached visibility builder used y++
+	 * without wrapping.  Sprites spanning $ff->$00 therefore lost their
+	 * wrapped scanlines.  Keep every cached path modulo 256 too. */
 	if (!screenLimited && !trackTiles)
 	{
 		while (nObjs>0)
 		{
 			Uint32 y,h; iObj&=0x7F; h=pObjSize[iObj]; y=pObjY[iObj];
 			if (_SnesPPUOBJVisibleX(m_Objs[iObj].uPosX,m_Objs[iObj].uWidth))
-				while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; y++; h--; }
+				while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; y=(y+1)&0xFF; h--; }
 			iObj++; nObjs--;
 		}
 		return;
@@ -546,7 +567,7 @@ void SnesPPURender::UpdateOBJVisibility(Uint8 *pObjY, Uint8 *pObjSize, Int32 iOb
 			{
 				Int32 x=(m_Objs[iObj].uPosX&0x100)?((Int32)(m_Objs[iObj].uPosX&0x1FF)-512):(Int32)(m_Objs[iObj].uPosX&0x1FF);
 				for (Int32 t=0;t<(m_Objs[iObj].uWidth>>3);t++) if (_SnesPPUOBJTileCountedX(m_Objs[iObj].uPosX,x+(t<<3))) counted++;
-				while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) { m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; m_nObjTilePotential[y]+=(Uint16)counted; } y++; h--; }
+				while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) { m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; m_nObjTilePotential[y]+=(Uint16)counted; } y=(y+1)&0xFF; h--; }
 			}
 			iObj++; nObjs--;
 		}
@@ -574,7 +595,7 @@ void SnesPPURender::UpdateOBJVisibility(Uint8 *pObjY, Uint8 *pObjSize, Int32 iOb
 		while (nObjs>0)
 		{
 			Uint32 y,h; iObj&=0x7F; h=pObjSize[iObj]; y=pObjY[iObj];
-			if (selected[iObj]) while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; y++; h--; }
+			if (selected[iObj]) while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; y=(y+1)&0xFF; h--; }
 			iObj++; nObjs--;
 		}
 	}

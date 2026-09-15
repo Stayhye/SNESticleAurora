@@ -223,6 +223,11 @@ void SetRegionPAL(Bool bPAL);
 	void                    SetPPU1MDR(Uint8 uData) { m_PPU1MDR = uData; }
 	void                    SetPPU2MDR(Uint8 uData) { m_PPU2MDR = uData; }
 
+	/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+	Uint16                  GetMode7LineHofs() const { return m_Mode7LineHofs; }
+	Uint16                  GetMode7LineVofs() const { return m_Mode7LineVofs; }
+	Int32                   GetMode7MosaicSourceLine(Int32 iLine) const;
+
 
 	SnesColor16T            GetCG(Uint32 uEntry)  const                       {return m_CGRAM[uEntry];}
 	SnesColor16T *          GetCGData()                                       {return m_CGRAM;}
@@ -247,6 +252,11 @@ private:
 	Uint8                   m_CGRAMLatch;
 	Uint8                   m_PPU1MDR;
 	Uint8                   m_PPU2MDR;
+
+	/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+	Uint16                  m_Mode7LineHofs;
+	Uint16                  m_Mode7LineVofs;
+	Uint32                  m_uMosaicStartLine;
 
     ISnesPPURender *        m_pRender;
 

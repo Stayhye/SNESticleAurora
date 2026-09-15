@@ -1250,7 +1250,7 @@ private:
 };
 
 
-void SnesSystem::SyncSPC(Int32 uExtra)
+void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
 {
 	Int32 nCycles;
 
@@ -1286,7 +1286,20 @@ void SnesSystem::SyncSPC(Int32 uExtra)
         PROF_LEAVE("SNSpcExecute");
 
 #if SNSPCIO_WRITEQUEUE
-        m_SpcIO.SyncQueueAll();
+        /* AURORA_BLIZZARD_APUIO_QUEUE_ORDER_V1_20260914
+         * CPU APUIO reads are an observation point, not permission to make
+         * future CPU->SPC writes visible early.  The SPC executor may stop a
+         * few master clocks short of CpuTime at instruction granularity and
+         * carry that remainder in m_Spc.Cycles.  Respect its actually consumed
+         * FRAME timestamp on reads so an IPL/driver handshake cannot collapse
+         * several queued latch values into the newest one.
+         *
+         * Frame rollover and queue-full recovery deliberately retain the old
+         * full flush through bFlushAll=TRUE. */
+        if (bFlushAll)
+            m_SpcIO.SyncQueueAll();
+        else
+            m_SpcIO.SyncQueue(SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
 #endif
     }
 
@@ -1479,7 +1492,10 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 	// which never matches and leave the game in an infinite wait loop.
 	if (uAddr >= 0x2140 && uAddr <= 0x217F)
 	{
-		pSnes->SyncSPC();
+		/* AURORA_BLIZZARD_APUIO_QUEUE_ORDER_V1_20260914
+		 * Do not flush writes newer than the SPC's consumed timestamp merely
+		 * because the S-CPU is polling the response ports. */
+		pSnes->SyncSPC(0, FALSE);
 		return pSnes->m_SpcIO.m_Regs.apu_r[uAddr & 3];
 	}
 
@@ -1633,7 +1649,16 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 		break;
 	}
 
-	return uAddr >> 8;
+	/* AURORA_V2_TRICKY_ACCURACY_20260915
+	 * Unhandled/write-only reads in this $2000-$3FFF trap expose CPU open
+	 * bus. Explicit PPU1/PPU2 MDR cases are handled above. */
+	/* AURORA_V9_GLOBAL_TRICKY_AUDIT_20260915
+	 * Final global SNESdev tricky-games pass. Existing hardware fixes are
+	 * preserved; dot-level VRAM/OAM contention, exact OBJ-fetch corruption,
+	 * per-cycle SPC, CPU read-side-effect phase, and board-specific SRAM are
+	 * not approximated by this scanline scheduler. SuperFX RPIX already does
+	 * a real cache flush plus bitplane read and remains intact. */
+	return pCpu->uMDR;
 }
 
 //#define SNES_SPCWRITE_LATENCY (21)
@@ -3079,20 +3104,28 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
 
         assert(m_DMAC.GetMDMAEnable() == 0);
 
-        /* AURORA_SA1_INTERLEAVED_CHUNK_SCHEDULER_V7_2_20260903
-         * AURORA_SA1_SCHEDULER_V8_3_20260903
-         * WAI stops instruction issue, not physical time or the SA-1.
-         * V8.3 uses the conservative 128-master-clock public SA-1 quantum. */
-        if (m_SA1.IsActive() && (m_Cpu.uSignal & SNCPU_SIGNAL_WAI))
+        /* AURORA_V3_WAI_SCHEDULER_FIX
+         * 65C816 WAI stops instruction issue until IRQ/NMI releases it.
+         * Physical scheduler time still advances on every cartridge.
+         * If an SA-1 is active, it continues running in the existing bounded
+         * interleave quantum while the main S-CPU sleeps. */
+        if (m_Cpu.uSignal & SNCPU_SIGNAL_WAI)
         {
             Int32 nWait = m_Cpu.Cycles;
-            if (nWait > SNSA1::MAIN_INTERLEAVE_QUANTUM)
+
+            if (m_SA1.IsActive() &&
+                nWait > SNSA1::MAIN_INTERLEAVE_QUANTUM)
                 nWait = SNSA1::MAIN_INTERLEAVE_QUANTUM;
+
             if (nWait > 0)
             {
                 SNCPUConsumeCycles(&m_Cpu, nWait);
-                m_SA1.Run(nWait);
-                nSA1Synced += nWait;
+
+                if (m_SA1.IsActive())
+                {
+                    m_SA1.Run(nWait);
+                    nSA1Synced += nWait;
+                }
             }
             continue;
         }

@@ -97,6 +97,8 @@ void SNSPCResetRegs(SNSpcT *pCpu)
 	pCpu->Regs.rSP  = 0;
 	pCpu->Regs.rPC  = 0;
 	pCpu->Regs.rPSW = 0;
+	/* AURORA_SPC700_ACCURACY_BATCH2_V1_20260914: reset is the wake source for SLEEP/STOP. */
+	pCpu->Regs.uPad = SNSPC_HALT_NONE;
 }
 
 void SNSPCSetRomEnable(SNSpcT *pCpu, Bool bEnable)
@@ -161,9 +163,12 @@ void SNSPCSoftReset(SNSpcT *pCpu)
 }
 
 
+/* AURORA_SPC700_ACCURACY_BATCH1_V1_20260914
+ * The S-SMP/SPC700 has a 16-bit address bus. Public helpers must wrap
+ * instead of indexing past the 64 KiB APURAM array. */
 Uint8 SNSPCPeek8(SNSpcT *pCpu, Uint32 uAddr)
 {
-	return pCpu->Mem[uAddr];
+	return pCpu->Mem[uAddr & 0xFFFFu];
 }
 
 
@@ -183,6 +188,8 @@ void SNSPCPeekMem(SNSpcT *pCpu, Uint32 Addr, Uint8 *pBuffer, Uint32 nBytes)
 
 Uint8 SNSPCRead8(SNSpcT *pCpu, Uint32 uAddr)
 {
+	uAddr &= 0xFFFFu;
+
 	if (uAddr >= 0xF0 && uAddr < 0x100)
 	{
 		return pCpu->pReadTrapFunc(pCpu, uAddr);
@@ -222,6 +229,8 @@ void SNSPCSetTrapFunc(SNSpcT *pSpc, SNSpcReadTrapFuncT pReadTrap, SNSpcWriteTrap
 
 void SNSPCWrite8(SNSpcT *pCpu, Uint32 uAddr, Uint8 uData)
 {
+	uAddr &= 0xFFFFu;
+
 	// don't write to rom area
 	if (uAddr < SNSPC_ROM_ADDR || !pCpu->bRomEnable)
 	{

@@ -1233,7 +1233,9 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 	{
 		if (pBuffer)
 		{
-			if (m_uRomBytes < nBufferBytes)
+			/* AURORA_SWC_32MBIT_CART_BACKING_V1_20260914
+			 * A caller-provided backing of exactly ROM size is sufficient. */
+			if (m_uRomBytes <= nBufferBytes)
 			{	// use provided buffer space
 				m_pRomMem = NULL;
 				m_pRomData = pBuffer;

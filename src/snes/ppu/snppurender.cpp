@@ -280,6 +280,120 @@ void SnesPPURender::UpdateCGRAM(Uint32 uAddr, Uint16 uData)
 	}
 }
 
+#if CODE_PLATFORM == CODE_PS2
+/* AURORA_V4_MODE34_DIRECT_COLOR_20260915 */
+static _INLINE Bool _SnesPPUMaskPixel(const SNMaskT *pMask, Uint32 iPixel)
+{
+	return (pMask->uMask8[iPixel >> 3] & (1u << (iPixel & 7))) != 0;
+}
+
+static _INLINE Uint16 _SnesPPUMode34Direct15(Uint8 uPixel, Uint8 uMeta)
+{
+	Uint32 uPal = uMeta & 7;
+	Uint32 uR = ((uPixel & 0x07) << 2) | ((uPal & 0x01) << 1);
+	Uint32 uG = (((uPixel >> 3) & 0x07) << 2) | (((uPal >> 1) & 1) << 1);
+	Uint32 uB = (((uPixel >> 6) & 0x03) << 3) | (((uPal >> 2) & 1) << 2);
+	return (Uint16)(uR | (uG << 5) | (uB << 10));
+}
+
+static _INLINE Uint16 _SnesPPUResolveMode34Color15(Uint8 uPixel, Uint8 uMeta,
+	const Uint16 *pCGRAM)
+{
+	if (uMeta & 0x08)
+		return _SnesPPUMode34Direct15(uPixel, uMeta);
+	return (Uint16)(pCGRAM[uPixel] & 0x7FFF);
+}
+
+static Bool _SnesPPUHasMode34DirectPixels(const SNPPUBlendInfoT *pInfo)
+{
+	Uint32 i;
+	for (i = 0; i < 256; i++)
+		if (pInfo->uAttrib8[i] & 0x88)
+			return TRUE;
+	return FALSE;
+}
+
+static _INLINE Uint32 _SnesPPUClamp5(Int32 n)
+{
+	if (n < 0) return 0;
+	if (n > 31) return 31;
+	return (Uint32)n;
+}
+
+static void _SnesPPUBuildMode34DirectLine(Uint16 *pOut,
+	const SNPPUBlendInfoT *pInfo, const Uint16 *pCGRAM, Uint16 uFixedColor,
+	const SNMaskT *pColorMask, Bool bUseSubscreen, Bool bSubtract)
+{
+	Uint32 i;
+	for (i = 0; i < 256; i++)
+	{
+		Uint8 uMeta = pInfo->uAttrib8[i];
+		Uint16 uMain = _SnesPPUResolveMode34Color15(
+			pInfo->uMain8[i], (Uint8)(uMeta & 0x0F), pCGRAM);
+		Uint16 uResult;
+
+		if (!_SnesPPUMaskPixel(&pColorMask[0], i))
+			uMain = 0;
+
+		if (_SnesPPUMaskPixel(&pColorMask[1], i))
+		{
+			Uint16 uSub;
+			Int32 r, g, b;
+			Int32 sr, sg, sb;
+			Bool bHalf = _SnesPPUMaskPixel(&pColorMask[2], i);
+
+			if (bUseSubscreen)
+			{
+				Uint8 uSubMeta = (Uint8)(uMeta >> 4);
+				if ((uSubMeta & 0x08) || pInfo->uSub8[i] != 0)
+					uSub = _SnesPPUResolveMode34Color15(
+						pInfo->uSub8[i], uSubMeta, pCGRAM);
+				else
+					uSub = (Uint16)(uFixedColor & 0x7FFF);
+			}
+			else
+			{
+				uSub = (Uint16)(uFixedColor & 0x7FFF);
+			}
+
+			r  = (Int32)(uMain & 31);
+			g  = (Int32)((uMain >> 5) & 31);
+			b  = (Int32)((uMain >> 10) & 31);
+			sr = (Int32)(uSub & 31);
+			sg = (Int32)((uSub >> 5) & 31);
+			sb = (Int32)((uSub >> 10) & 31);
+
+			if (bSubtract)
+			{
+				r -= sr; g -= sg; b -= sb;
+			}
+			else
+			{
+				r += sr; g += sg; b += sb;
+			}
+
+			/* SNES order: add/subtract, optional /2, then clamp. */
+			if (bHalf)
+			{
+				r /= 2; g /= 2; b /= 2;
+			}
+
+			uResult = (Uint16)(_SnesPPUClamp5(r) |
+				(_SnesPPUClamp5(g) << 5) |
+				(_SnesPPUClamp5(b) << 10));
+		}
+		else
+		{
+			uResult = uMain;
+		}
+
+		/* Master brightness is deliberately left to the existing GS stage.
+		 * Reimplementing it here would change the current rounding/fade path. */
+		pOut[i] = uResult;
+	}
+}
+#endif
+
 void SnesPPURender::RenderLine32(Int32 iLine, Bool bPlanar)
 {
 	SnesRender8pInfoT *pRenderInfo;
@@ -383,6 +497,20 @@ static Bool bPrint = TRUE;
 		// render line
 		RenderLine8(iLine, pRenderInfo);
 
+#if CODE_PLATFORM == CODE_PS2
+		/* AURORA_V8_MODE7_RELEASE_AUDIT_20260915
+		 * The V4 final-color carrier also handles Mode 7. Mode 7 has
+		 * no tile palette attributes, therefore its metadata is YYY=000. */
+		Bool bBG1DirectPixels = FALSE;
+		if ((uEffectiveCGWSEL & 0x01) &&
+		    (((pRegs->bgmode & 7) == 3) ||
+		     ((pRegs->bgmode & 7) == 4) ||
+		     ((pRegs->bgmode & 7) == 7)))
+		{
+			bBG1DirectPixels = _SnesPPUHasMode34DirectPixels(pBlendInfo);
+		}
+#endif
+
 #if SNDBG_LOG
 		Uint32 _tColorMath = ProfCtrGetCycle();
 #endif
@@ -392,7 +520,8 @@ static Bool bPrint = TRUE;
 		   all add/sub masks are mathematically unable to change the result.
 		   With main clipping disabled and brightness at 15, the GS can expand
 		   the indexed main line directly into the output texture. */
-		bDirectMain = (uEffectiveCGADSUB & 0x3F) == 0 &&
+		bDirectMain = !bBG1DirectPixels &&
+		              (uEffectiveCGADSUB & 0x3F) == 0 &&
 		              (uEffectiveCGWSEL & 0xC0) == 0 &&
 		              m_pPPU->GetIntensity() == 15;
 #endif
@@ -463,6 +592,45 @@ static Bool bPrint = TRUE;
 		g_TmgCycColorMath += ProfCtrGetCycle() - _tColorMath;
 		Uint32 _tBlend = ProfCtrGetCycle();
 #endif
+#if CODE_PLATFORM == CODE_PS2
+		if (bBG1DirectPixels)
+		{
+			Uint16 DirectLine[256] _ALIGN(16);
+			Int32 iPixel;
+
+			_SnesPPUBuildMode34DirectLine(DirectLine, pBlendInfo,
+				m_pPPU->GetCGData(), pRegs->coldata, ColorMask,
+				(uEffectiveCGWSEL & 0x02) != 0,
+				(uEffectiveCGADSUB & 0x80) != 0);
+
+			/* Reuse the existing GS indexed path as a 256-color final-line
+			 * carrier. Keep a non-NULL mask so the normal GS brightness stage
+			 * remains active with exactly the same rounding as ordinary lines. */
+			m_pBlend->UpdatePalette(pBlendInfo, DirectLine, 15);
+			/* Logical index 0 is normally transparent in the GS CLUT. This
+			 * line is already fully composed, so all 256 carriers are opaque. */
+			pBlendInfo->Pal[0].Color32[0] |= 0x80000000u;
+			for (iPixel = 0; iPixel < 256; iPixel++)
+				pBlendInfo->uMain8[iPixel] = (Uint8)iPixel;
+
+			{
+				SNMaskT DirectOutputMask[3];
+				SNMaskSet(&DirectOutputMask[0]);
+				SNMaskClear(&DirectOutputMask[1]);
+				SNMaskClear(&DirectOutputMask[2]);
+				m_pBlend->Exec(pBlendInfo, iLine, 0, DirectOutputMask, FALSE,
+					m_pPPU->GetIntensity());
+			}
+
+			/* Exec stages its source before returning. Restore the real CGRAM
+			 * master palette immediately and mark it dirty for the next normal
+			 * scanline; the in-flight GIF chain owns its scratchpad copy. */
+			m_pBlend->UpdatePalette(pBlendInfo, m_pPPU->GetCGData(),
+				m_pPPU->GetIntensity());
+		}
+		else
+#endif
+		{
         m_pBlend->Exec(
             pBlendInfo,
             iLine,
@@ -471,6 +639,7 @@ static Bool bPrint = TRUE;
             (uEffectiveCGADSUB & 0x80),
             m_pPPU->GetIntensity()
             );
+		}
 #if SNDBG_LOG
 		g_TmgCycBlend += ProfCtrGetCycle() - _tBlend;
 #endif

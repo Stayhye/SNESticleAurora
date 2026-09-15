@@ -368,7 +368,10 @@ void SnesSystem::SaveState(SnesStateT *pState)
 	pState->SPC.Cycles = m_Spc.Cycles;
 	pState->SPC.Counter[0] = m_Spc.Counter[0];
 	pState->SPC.Counter[1] = m_Spc.Counter[1];
-	pState->SPC.uCycleShift = 0;
+	/* AURORA_SPC700_HALT_STATE_TAG_V1 / AURORA_SPC700_ACCURACY_BATCH2_V1_20260914
+	 * Old states always stored zero here; the nonzero tag says Regs.uPad
+	 * contains a defined SLEEP/STOP state rather than legacy padding. */
+	pState->SPC.uCycleShift = SNSPC_STATE_HALT_TAG;
 
 	m_PPU.SaveState(&pState->PPU);
 	m_DMAC.SaveState(&pState->DMAC);
@@ -617,6 +620,10 @@ Bool SnesSystem::RestoreState(SnesStateT *pState)
 	m_Cpu.uNmiDmaDelay = 0;
 
 	m_Spc.Regs = pState->SPC.Regs;
+	if (pState->SPC.uCycleShift == SNSPC_STATE_HALT_TAG)
+		m_Spc.Regs.uPad &= SNSPC_HALT_MASK;
+	else
+		m_Spc.Regs.uPad = SNSPC_HALT_NONE;
 	m_Spc.Cycles = pState->SPC.Cycles;
 	m_Spc.Counter[0] = pState->SPC.Counter[0];
 	m_Spc.Counter[1] = pState->SPC.Counter[1];

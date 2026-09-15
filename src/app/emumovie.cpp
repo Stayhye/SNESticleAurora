@@ -109,8 +109,22 @@ void MovieClip::RecordBegin(System *pSystem)
         return;
 
     nStateSize = pSystem->GetStateSize();
-    if (nStateSize <= 0 || (Uint32)nStateSize > m_uMaxStateSize ||
-        !EnsureStorage())
+    if (nStateSize <= 0)
+    {
+        printf("Movie: capture unavailable for this core/state size\n");
+        return;
+    }
+
+    /* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914
+     * Learn capacity from the active core. A new recording replaces the
+     * previous recording state, so growing capacity may discard the old
+     * retained buffers before reallocating. */
+    if ((Uint32)nStateSize > m_uMaxStateSize)
+    {
+        Discard();
+        m_uMaxStateSize = (Uint32)nStateSize;
+    }
+    if (!EnsureStorage())
     {
         printf("Movie: capture unavailable for this core/state size\n");
         return;

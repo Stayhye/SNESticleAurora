@@ -44,6 +44,101 @@ static char s_SmdExternalCartPath[1024] = {0}; /* AURORA_SUPER_MAGIC_DRIVE_V1_20
 #include "embedded_irx.h"   /* HddMapPath (hdd0:/PART -> pfs0:) */
 #include "sndbglog.h"
 
+/* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914
+ *
+ * Keep only the active emulator System resident. Rom objects remain frontend
+ * descriptors/backings because browser routing already owns them separately.
+ * Reset() after construction preserves the old boot-time contract.
+ */
+static Bool _MainLoopEnsureSnesSystem()
+{
+    if (_pSnes) return TRUE;
+    _pSnes = new SnesSystem();
+    if (!_pSnes) return FALSE;
+    _pSnes->Reset();
+    return TRUE;
+}
+
+static Bool _MainLoopEnsureNesSystem()
+{
+    if (_pNes) return TRUE;
+    _pNes = new NesSystem();
+    if (!_pNes) return FALSE;
+    _pNes->Reset();
+    return TRUE;
+}
+
+static Bool _MainLoopEnsureFdsSystem()
+{
+    if (_pFds) return TRUE;
+    _pFds = new FdsSystem();
+    if (!_pFds) return FALSE;
+    _pFds->Reset();
+    return TRUE;
+}
+
+static Bool _MainLoopEnsureSegaSystem()
+{
+    if (_pSega) return TRUE;
+    _pSega = new SegaSystem();
+    if (!_pSega) return FALSE;
+    _pSega->Reset();
+    return TRUE;
+}
+
+static Bool _MainLoopEnsurePceSystem()
+{
+    if (_pPce) return TRUE;
+    _pPce = new PceSystem();
+    if (!_pPce) return FALSE;
+    _pPce->Reset();
+    return TRUE;
+}
+
+static Bool _MainLoopEnsureGbSystem()
+{
+    if (_pGb) return TRUE;
+    _pGb = new GambatteSystem();
+    if (!_pGb) return FALSE;
+    _pGb->Reset();
+    return TRUE;
+}
+
+static Bool _MainLoopEnsureGbaSystem()
+{
+    if (_pGba) return TRUE;
+    _pGba = new GpSPSystem();
+    if (!_pGba) return FALSE;
+    _pGba->Reset();
+    return TRUE;
+}
+
+static Bool _MainLoopEnsureSystemForType(PathExtTypeE eType)
+{
+    switch (eType)
+    {
+        case MAINLOOP_ENTRYTYPE_SNESROM:
+        case MAINLOOP_ENTRYTYPE_SNESWCBIOS:
+        case MAINLOOP_ENTRYTYPE_SNESWCDISK:
+            return _MainLoopEnsureSnesSystem();
+        case MAINLOOP_ENTRYTYPE_NESROM:
+            return _MainLoopEnsureNesSystem();
+        case MAINLOOP_ENTRYTYPE_NESFDSDISK:
+        case MAINLOOP_ENTRYTYPE_NESFDSBIOS:
+            return _MainLoopEnsureFdsSystem();
+        case MAINLOOP_ENTRYTYPE_SEGAROM:
+            return _MainLoopEnsureSegaSystem();
+        case MAINLOOP_ENTRYTYPE_PCEROM:
+            return _MainLoopEnsurePceSystem();
+        case MAINLOOP_ENTRYTYPE_GBROM:
+            return _MainLoopEnsureGbSystem();
+        case MAINLOOP_ENTRYTYPE_GBAROM:
+            return _MainLoopEnsureGbaSystem();
+        default:
+            return TRUE;
+    }
+}
+
 extern "C" {
 #include "miniz.h"
 #include "miniz_compat.h"
@@ -283,6 +378,51 @@ static Bool _MainLoopLooksLikeCdrdaoToc(const char *pPath)
     return FALSE;
 }
 
+/* AURORA_LARGE_MD_COMPACT_V2_20260914
+ * Pre-allocation gate only. Full payload is revalidated by the bridge/core.
+ */
+static Bool _MainLoopSegaCanUseCompactLargeBacking(
+    const Uint8 *pData, Int32 nBytes, const char *pName)
+{
+    static const Uint32 smsHeaderOffsets[] = { 0x7ff0U, 0x3ff0U, 0x1ff0U };
+    const char *ext;
+
+    if (!pData || !pName || nBytes <= 0x400000)
+        return FALSE;
+    if (((Uint32)nBytes & 0x3FFFU) == 0x0200U)
+        return FALSE;
+
+    ext = strrchr(pName, '.');
+    if (!ext || !ext[1])
+        return FALSE;
+    ++ext;
+    if (strcasecmp(ext, "md") && strcasecmp(ext, "gen") &&
+        strcasecmp(ext, "bin"))
+        return FALSE;
+
+    if (nBytes >= 0x109 &&
+        (!memcmp(pData + 0x100, "SEGA 32X", 8) ||
+         !memcmp(pData + 0x100, "SEGA PICO", 9)))
+        return FALSE;
+
+    for (unsigned i = 0;
+         i < sizeof(smsHeaderOffsets) / sizeof(smsHeaderOffsets[0]); ++i)
+    {
+        Uint32 off = smsHeaderOffsets[i];
+        if ((Uint32)nBytes >= off + 8U &&
+            !memcmp(pData + off, "TMR SEGA", 8))
+            return FALSE;
+    }
+
+    if (nBytes >= 0x104 &&
+        (!memcmp(pData + 0x100, "SEGA", 4) ||
+         !memcmp(pData + 0x100, " SEG", 4)))
+        return TRUE;
+
+    return _MainLoopLooksLikeMegaDriveVectors(pData, nBytes, 0);
+}
+
+
 static Bool _MainLoopSegaWantsNative320(
     const Uint8 *pData, Int32 nBytes, const char *pName)
 {
@@ -379,6 +519,65 @@ static Bool _MainLoopSegaWantsNative320(
     return FALSE;
 }
 
+
+/* AURORA_V9_FINAL_TRICKY_TIMING_20260915
+ * AURORA_V9_LOADING_STATIC_20260915
+ * Cartridge loading stays synchronous and uses the same I/O/decompression
+ * paths, but the UI is rendered exactly once. Repeated progress formatting
+ * and MainLoopRender() calls were host overhead and did not affect emulation. */
+static void _MainLoopLoadProgressBegin(Int32 total)
+{
+    if (total <= 0)
+        return;
+    MainLoopStatusPrintf(120, "Loading game...");
+    MainLoopRender();
+}
+
+static void _MainLoopLoadProgressFinish(Bool complete)
+{
+    (void)complete;
+    _MainLoop_StatusCount = 0;
+    _MainLoop_StatusStr[0] = 0;
+}
+
+/* AURORA_LOADING_FAST_CLEANUP_20260915
+ * Keep the one static loading frame, but do not split fileXio reads merely
+ * for progress reporting.  Request the complete remaining payload and still
+ * handle legal short reads exactly like _MainLoopReadBinaryData(). */
+static Int32 _MainLoopReadBinaryDataProgress(
+    Uint8 *pBuffer, Int32 nExpectedBytes, const char *pRomFile)
+{
+    int fd;
+    Int32 total = 0;
+
+    if (!pBuffer || nExpectedBytes <= 0 || !pRomFile)
+        return -1;
+
+    fd = fileXioOpen(pRomFile, FIO_O_RDONLY, 0);
+    if (fd < 0)
+        return -1;
+
+    _MainLoopLoadProgressBegin(nExpectedBytes);
+
+    while (total < nExpectedBytes)
+    {
+        Int32 want = nExpectedBytes - total;
+        int n = fileXioRead(fd, pBuffer + total, (int)want);
+
+        if (n <= 0)
+        {
+            fileXioClose(fd);
+            _MainLoopLoadProgressFinish(FALSE);
+            return n < 0 ? -1 : total;
+        }
+
+        total += (Int32)n;
+    }
+
+    fileXioClose(fd);
+    _MainLoopLoadProgressFinish(total == nExpectedBytes ? TRUE : FALSE);
+    return total;
+}
 
 int _MainLoopReadBinaryData(Uint8 *pBuffer, Int32 nBufferBytes, const char *pRomFile)
 {
@@ -534,6 +733,7 @@ static Bool _MainLoopExtractZipEntryToFile(
     mz_zip_archive_file_stat zst;
     struct stat fst;
     Bool ok = FALSE;
+    Bool loadingShown = FALSE;
 
     if (!pZipPath || !*pZipPath ||
         !pMemberName || !*pMemberName ||
@@ -558,6 +758,9 @@ static Bool _MainLoopExtractZipEntryToFile(
 
     remove(pOutPath);
 
+    _MainLoopLoadProgressBegin(nExpectedBytes);
+    loadingShown = TRUE;
+
 #ifndef MINIZ_NO_STDIO
     if (!mz_zip_reader_extract_to_file(
             &zip, (mz_uint)uZipIndex, pOutPath, 0))
@@ -569,17 +772,74 @@ static Bool _MainLoopExtractZipEntryToFile(
     if (stat(pOutPath, &fst) != 0 ||
         S_ISDIR(fst.st_mode) ||
         fst.st_size != nExpectedBytes)
-    {
-        remove(pOutPath);
         goto done;
-    }
 
     ok = TRUE;
 
 done:
     mz_zip_reader_end(&zip);
+    if (loadingShown)
+        _MainLoopLoadProgressFinish(ok);
     if (!ok)
         remove(pOutPath);
+    return ok;
+}
+
+
+/* AURORA_SNES_OWNED_ZIP_V1_20260914
+ * CRC do arquivo bruto em streaming. Mantém a mesma identidade usada pelo
+ * loader antigo (antes de header removal/deinterleave), sem staging completo.
+ */
+static Bool _MainLoopFileCRC32Exact(
+    const Char *pPath, Int32 nExpectedBytes, Uint32 *pCRC,
+    Bool bShowProgress)
+{
+    FILE *fp;
+    Uint8 buf[8192];
+    Uint32 crc = MZ_CRC32_INIT;
+    Int32 total = 0;
+    Bool ok = FALSE;
+
+    if (!pPath || !*pPath || nExpectedBytes <= 0 || !pCRC)
+        return FALSE;
+
+    fp = fopen(pPath, "rb");
+    if (!fp)
+        return FALSE;
+
+    if (bShowProgress)
+        _MainLoopLoadProgressBegin(nExpectedBytes);
+
+    while (total < nExpectedBytes)
+    {
+        Int32 want = nExpectedBytes - total;
+        size_t got;
+
+        if (want > (Int32)sizeof(buf))
+            want = (Int32)sizeof(buf);
+
+        got = fread(buf, 1, (size_t)want, fp);
+        if (got != (size_t)want)
+            goto done;
+
+        crc = (Uint32)mz_crc32(
+            crc, (const unsigned char *)buf, got);
+        total += (Int32)got;
+    }
+
+    {
+        int extra = fgetc(fp);
+        if (extra != EOF || ferror(fp))
+            goto done;
+    }
+
+    *pCRC = crc;
+    ok = TRUE;
+
+done:
+    fclose(fp);
+    if (bShowProgress)
+        _MainLoopLoadProgressFinish(ok);
     return ok;
 }
 
@@ -808,6 +1068,82 @@ Bool _MainLoopLoadSnesPalette(const char *pFileName)
 /* AURORA_V4_12_PRIVATE_FILEXIO_CDDA_PCE_TOC2CUE_20260830 */
 static char s_PceCdrdaoTempCue[1024];
 
+/* AURORA_SWC_32MBIT_CART_BACKING_V1_20260914
+ * AURORA_SWC_LAZY_CART_BACKING_V3_20260915
+ * AURORA_V2_TRICKY_ACCURACY_20260915
+ *
+ * A classic 32-Mbit SWC needs two DISTINCT memories when a full-size
+ * external cartridge is inserted: 4 MiB copier DRAM + up to 4 MiB Game Pak
+ * ROM. They cannot be aliased because SWC Mode 0 can expose both at once.
+ *
+ * Game Pak backing stays lazy: empty firmware and disk-only boot allocate
+ * only real copier DRAM. On insertion V2 reserves exactly the physical
+ * cartridge payload size, up to 4 MiB.
+ *
+ * This backing is never used as copier DRAM, B-RAM, FDC media, or SRAM.
+ */
+enum
+{
+    MAINLOOP_SWC_CART_RESERVE_BYTES = 4 * 1024 * 1024
+};
+
+static Uint8 *s_pSwcCartReserve = NULL;
+static Uint32 s_uSwcCartReserveBytes = 0;
+
+static void _MainLoopSwcReleaseCartReserve()
+{
+    if (s_pSwcCartReserve)
+    {
+        free(s_pSwcCartReserve);
+        s_pSwcCartReserve = NULL;
+    }
+    s_uSwcCartReserveBytes = 0;
+}
+
+static Bool _MainLoopSwcEnsureCartReserve(Uint32 nBytes)
+{
+    if (!nBytes || nBytes > MAINLOOP_SWC_CART_RESERVE_BYTES)
+        return FALSE;
+
+    if (s_pSwcCartReserve && s_uSwcCartReserveBytes >= nBytes)
+        return TRUE;
+
+    _MainLoopSwcReleaseCartReserve();
+
+    s_pSwcCartReserve = (Uint8 *)malloc((size_t)nBytes);
+    if (!s_pSwcCartReserve)
+    {
+        printf("[SWC] %u-byte cart backing unavailable; "
+               "using normal allocation fallback\n",
+               (unsigned)nBytes);
+        return FALSE;
+    }
+
+    s_uSwcCartReserveBytes = nBytes;
+    printf("[SWC] reserved %u bytes contiguous backing for external cartridge\n",
+           (unsigned)s_uSwcCartReserveBytes);
+    return TRUE;
+}
+
+static Uint32 _MainLoopSwcCartPayloadBytes(const char *pPath)
+{
+    struct stat st;
+    Uint32 nFileBytes;
+    Uint32 nHeaderBytes;
+
+    if (!pPath || !*pPath || stat(pPath, &st) != 0 ||
+        S_ISDIR(st.st_mode) || st.st_size <= 0 ||
+        (unsigned long long)st.st_size > 0xffffffffULL)
+        return 0;
+
+    nFileBytes = (Uint32)st.st_size;
+
+    /* Match the normal 512-byte copier-header case at the 32-Mbit boundary. */
+    nHeaderBytes = ((nFileBytes & 0x1FFFu) == 512u) ? 512u : 0u;
+    return nFileBytes - nHeaderBytes;
+}
+
+
 void _MainLoopUnloadRom()
 {
     /* AURORA_AUDIO_HARDCUT_ROM_UNLOAD_V1 */
@@ -972,14 +1308,15 @@ _MainLoopSwcCartSRAMDetach();
     s_pMovieClip->Discard();
 
 	// unload old rom
-	_pSnes->SetRom(NULL);
+	if (_pSnes) _pSnes->SetRom(NULL);
     s_SwcExternalCartPath[0] = 0; /* AURORA_SWC_MEGA_V9_20260831 */
 	_pSnesRom->Unload();
+    _MainLoopSwcReleaseCartReserve(); /* AURORA_SWC_32MBIT_CART_BACKING_V1_20260914 */
 
 	/* Phase 2: NES unload mirrors the SNES path. NesDisk is unloaded
 	   even though disk-swap input is still gated for Phase 5 - the
 	   wrapper itself exists and owns memory. */
-	_pNes->SetRom(NULL);
+	if (_pNes) _pNes->SetRom(NULL);
 	if (_pFds) _pFds->SetRom(NULL); /* AURORA_FCEUMM_FDS_V0_5_UNLOAD */
     /* AURORA_FDS_ZIP_FULLPATH_TMP_V2_20260828: FCEUmm has closed the
      * disk now, so the extracted full-path backing file is no longer needed. */
@@ -995,6 +1332,19 @@ _MainLoopSwcCartSRAMDetach();
 	if (_pGba) _pGba->UnloadGame(); /* AURORA_GPSP_GBA_V1_20260911 */
     /* AURORA_ZIP_FILEONLY_MARIO_BIOS_TSUKURU8M_V3_20260913_ZIP_FILEONLY: gpSP paging file is closed now. */
     _MainLoopRemoveGbaZipTemp();
+
+    /* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914
+     * Established SetRom/UnloadGame calls above save/detach media first.
+     * Now destruct wrappers so bridge/JIT/core heap cannot remain resident. */
+    _pSystem = NULL;
+    if (_pSnes) { delete _pSnes; _pSnes = NULL; }
+    if (_pNes)  { delete _pNes;  _pNes  = NULL; }
+    if (_pFds)  { delete _pFds;  _pFds  = NULL; }
+    if (_pSega) { delete _pSega; _pSega = NULL; }
+    if (_pPce)  { delete _pPce;  _pPce  = NULL; }
+    if (_pGb)   { delete _pGb;   _pGb   = NULL; }
+    if (_pGba)  { delete _pGba;  _pGba  = NULL; }
+
 
     if (s_PceCdrdaoTempCue[0])
     {
@@ -1616,6 +1966,12 @@ static Bool _MainLoopExecuteDisc(const char *pMappedPath,
 
     if (eDisc > 0)
     {
+        if (!_MainLoopEnsureSegaSystem())
+        {
+            MainLoopModalPrintf(60 * 3,
+                "ERROR: not enough memory for Sega CD core");
+            return FALSE;
+        }
         pSystem = _pSega;
         PicoDriveBridge_SetRegion((int)g_SnesForceRegion);
         bLoaded = _pSega && _pSega->LoadDisc(
@@ -1623,6 +1979,12 @@ static Bool _MainLoopExecuteDisc(const char *pMappedPath,
     }
     else
     {
+        if (!_MainLoopEnsurePceSystem())
+        {
+            MainLoopModalPrintf(60 * 3,
+                "ERROR: not enough memory for PCE CD core");
+            return FALSE;
+        }
         pSystem = _pPce;
         bLoaded = _pPce && _pPce->LoadDisc(
             pPceLoadPath, FirmwareSystemDirectory);
@@ -1673,6 +2035,13 @@ static Bool _MainLoopExecuteFdsPath(const char *pMappedPath,
                                     const char *pOriginalPath,
                                     Bool bLoadSRAM)
 {
+    /* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914:_MainLoopExecuteFdsPath */
+    if (!_MainLoopEnsureFdsSystem())
+    {
+        MainLoopModalPrintf(60 * 3, "ERROR: not enough memory for FDS core");
+        return FALSE;
+    }
+
     Char SystemDirectory[512];
     Char BiosPath[1024];
     FILE *pBios;
@@ -1775,6 +2144,13 @@ static Bool _MainLoopExecuteFdsZip(const char *pZipPath,
                                    Int32 nExpectedBytes,
                                    Bool bLoadSRAM)
 {
+    /* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914:_MainLoopExecuteFdsZip */
+    if (!_MainLoopEnsureFdsSystem())
+    {
+        MainLoopModalPrintf(60 * 3, "ERROR: not enough memory for FDS core");
+        return FALSE;
+    }
+
     Char tempPath[1024];
 
     if (!pZipPath || !*pZipPath ||
@@ -2056,7 +2432,14 @@ static Bool _MainLoopSwcFirmwareFileLooksValid(const char *pPath)
 static const char *_MainLoopSmdBaseName(const char*p){const char*a,*b;if(!p)return"";a=strrchr(p,'/');b=strrchr(p,'\\');if(!a||(b&&b>a))a=b;return a?a+1:p;}
 static Bool _MainLoopIsSmdBiosPath(const char*p){const char*n=_MainLoopSmdBaseName(p);return n&&strcasecmp(n,"mdpbios.bin")==0?TRUE:FALSE;}
 static Bool _MainLoopSmdBiosLooksValid(const char*p){struct stat st;if(!p||stat(p,&st)!=0||S_ISDIR(st.st_mode)||st.st_size!=0x2000)return FALSE;return TRUE;}
-static Bool _MainLoopExecuteSmdFirmware(const char*p,const char*orig,Bool loadSram){if(!_pSega||!_MainLoopIsSmdBiosPath(p)||!_MainLoopSmdBiosLooksValid(p))return FALSE;if(!MainLoopEnsureGameplayRasterWidth(256))return FALSE; /* AURORA_SMD_V1_7_RECOVERY_BOOT_20260903 */if(!_pSega->LoadSuperMagicDrive(p,NULL)){MainLoopModalPrintf(60*5,"SMD boot failed: %s",_pSega->GetSuperMagicDriveError());return FALSE;}_pSystem=_pSega;s_SmdExternalCartPath[0]=0;snprintf(_RomName,sizeof(_RomName),"%s","Super Magic Drive");snprintf(_RomPath,sizeof(_RomPath),"%s",orig&&*orig?orig:p);MainLoopStateOnRomChanged();_MainLoopSetSampleRate(_pSega->GetSampleRate());if(loadSram)_MainLoopLoadSRAM();MainLoopStatusPrintf(180,"Super Magic Drive V3: no disk / no cart");return TRUE;}
+static Bool _MainLoopExecuteSmdFirmware(const char*p,const char*orig,Bool loadSram){
+    /* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914:_MainLoopExecuteSmdFirmware */
+    if (!_MainLoopEnsureSegaSystem())
+    {
+        MainLoopModalPrintf(60 * 3, "ERROR: not enough memory for Sega core");
+        return FALSE;
+    }
+if(!_pSega||!_MainLoopIsSmdBiosPath(p)||!_MainLoopSmdBiosLooksValid(p))return FALSE;if(!MainLoopEnsureGameplayRasterWidth(256))return FALSE; /* AURORA_SMD_V1_7_RECOVERY_BOOT_20260903 */if(!_pSega->LoadSuperMagicDrive(p,NULL)){MainLoopModalPrintf(60*5,"SMD boot failed: %s",_pSega->GetSuperMagicDriveError());return FALSE;}_pSystem=_pSega;s_SmdExternalCartPath[0]=0;snprintf(_RomName,sizeof(_RomName),"%s","Super Magic Drive");snprintf(_RomPath,sizeof(_RomPath),"%s",orig&&*orig?orig:p);MainLoopStateOnRomChanged();_MainLoopSetSampleRate(_pSega->GetSampleRate());if(loadSram)_MainLoopLoadSRAM();MainLoopStatusPrintf(180,"Super Magic Drive V3: no disk / no cart");return TRUE;}
 static void _MainLoopSmdPut16(Uint8*p,Uint16 v){p[0]=(Uint8)v;p[1]=(Uint8)(v>>8);}static void _MainLoopSmdPut32(Uint8*p,Uint32 v){p[0]=(Uint8)v;p[1]=(Uint8)(v>>8);p[2]=(Uint8)(v>>16);p[3]=(Uint8)(v>>24);}
 static Bool _MainLoopSmdCreateD88(const char*p){
  enum{HB=0x2b0,TRACKS=80,HEADS=2,SPT=18,SLOTS=20,SEC=512,SH=16,SLOT=SLOTS*(SH+SEC)};Uint8 header[HB],*track=NULL,logical[SEC];FILE*fp=NULL;Uint32 total=HB+(Uint32)(TRACKS*HEADS)*SLOT,lba=0;Bool ok=FALSE;if(!p||!*p)return FALSE;fp=fopen(p,"wb");if(!fp)return FALSE;track=(Uint8*)malloc(SLOT);if(!track)goto done;memset(header,0,sizeof(header));memcpy(header,"AURORA SMD",10);header[0x1b]=0x20;_MainLoopSmdPut32(header+0x1c,total);for(Uint32 t=0;t<TRACKS*HEADS;t++)_MainLoopSmdPut32(header+0x20+t*4,HB+t*SLOT);if(fwrite(header,1,sizeof(header),fp)!=sizeof(header))goto done;
@@ -2307,6 +2690,13 @@ static Bool _MainLoopExecuteSwcFirmware(const char *pFirmwarePath,
                                         const char *pOriginalPath,
                                         Bool bLoadSRAM)
 {
+    /* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914:_MainLoopExecuteSwcFirmware */
+    if (!_MainLoopEnsureSnesSystem())
+    {
+        MainLoopModalPrintf(60 * 3, "ERROR: not enough memory for SNES core");
+        return FALSE;
+    }
+
     if (!pFirmwarePath || !*pFirmwarePath ||
         !_MainLoopSwcPathIsFirmware(pFirmwarePath) ||
         !_pSnes)
@@ -2315,8 +2705,13 @@ static Bool _MainLoopExecuteSwcFirmware(const char *pFirmwarePath,
     if (!MainLoopEnsureGameplayRasterWidth(256))
         return FALSE;
 
+    /* AURORA_SWC_LAZY_CART_BACKING_V3_20260915
+     * Empty copier boot needs SWC DRAM only. */
+    _MainLoopSwcReleaseCartReserve();
+
     if (!_pSnes->LoadSuperWildCard(pFirmwarePath, NULL))
     {
+        _MainLoopSwcReleaseCartReserve();
         MainLoopModalPrintf(
             60 * 5, "SWC boot failed: %s",
             _pSnes->GetSuperWildCardError());
@@ -2342,6 +2737,13 @@ static Bool _MainLoopExecuteSwcFirmware(const char *pFirmwarePath,
 static Bool _MainLoopExecuteMagicomFirmware(
     const char *pFirmwarePath, const char *pOriginalPath, Bool bLoadSRAM)
 {
+    /* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914:_MainLoopExecuteMagicomFirmware */
+    if (!_MainLoopEnsureSnesSystem())
+    {
+        MainLoopModalPrintf(60 * 3, "ERROR: not enough memory for SNES core");
+        return FALSE;
+    }
+
     if (!pFirmwarePath || !*pFirmwarePath ||
         !_MainLoopMagicomPathIsFirmware(pFirmwarePath) ||
         !_MainLoopMagicomFirmwareFileLooksValid(pFirmwarePath) || !_pSnes)
@@ -2378,6 +2780,7 @@ static Bool _MainLoopSwcInsertCartridge(const char *pPath)
 {
     CFileIO romfile;
     Emu::Rom::LoadErrorE eError;
+    Uint32 nPayloadBytes;
     if (!_pSnes || !_pSnes->IsSuperWildCard() ||
         !pPath || !*pPath || !_pSnesRom)
         return FALSE;
@@ -2404,13 +2807,46 @@ static Bool _MainLoopSwcInsertCartridge(const char *pPath)
     MainLoopRender();
     MainLoopRender();
 
+    /* AURORA_SWC_HOTCART_HEADROOM_V1_20260914
+     * Hot cart insert bypasses _MainLoopUnloadRom(), então o decoder de BGM
+     * opcional poderia continuar ocupando heap antes do malloc contíguo da
+     * ROM externa. Libere só esse scratch do frontend. DRAM/B-RAM/FDC/D88,
+     * cart SRAM e latches de Memory Mode permanecem vivos e intocados.
+     */
+    BgmReleaseDecoderForGameSwitch();
+
     if (!romfile.Open(pPath, "rb"))
     {
         MainLoopStatusPrintf(180, "Cannot open cartridge");
         return FALSE;
     }
 
-    eError = _pSnesRom->LoadRom(&romfile);
+    nPayloadBytes = _MainLoopSwcCartPayloadBytes(pPath);
+
+    if (nPayloadBytes && nPayloadBytes <= MAINLOOP_SWC_CART_RESERVE_BYTES)
+    {
+        /* AURORA_V2_TRICKY_ACCURACY_20260915 */
+        (void)_MainLoopSwcEnsureCartReserve(nPayloadBytes);
+    }
+    else if (nPayloadBytes > MAINLOOP_SWC_CART_RESERVE_BYTES)
+    {
+        _MainLoopSwcReleaseCartReserve();
+    }
+
+    if (s_pSwcCartReserve &&
+        nPayloadBytes &&
+        s_uSwcCartReserveBytes >= nPayloadBytes)
+    {
+        eError = _pSnesRom->LoadRom(
+            &romfile,
+            s_pSwcCartReserve,
+            s_uSwcCartReserveBytes);
+    }
+    else
+    {
+        eError = _pSnesRom->LoadRom(&romfile);
+    }
+
     romfile.Close();
     SnesRomResetRuntimeCompatForExternalDevice();
 
@@ -2421,6 +2857,8 @@ static Bool _MainLoopSwcInsertCartridge(const char *pPath)
          * V3 also removes the resident D88 mirror, so the usual cause of this
          * false error releases ~1.69 MiB before the cartridge is parsed. */
         _pSnesRom->Unload();
+        /* AURORA_SWC_LAZY_CART_BACKING_V3_20260915 */
+        _MainLoopSwcReleaseCartReserve();
         if (eError == Emu::Rom::LOADERROR_OUTOFSPACE)
             MainLoopStatusPrintf(240,
                 "Not enough EE memory for Wild Card cartridge");
@@ -2433,6 +2871,8 @@ static Bool _MainLoopSwcInsertCartridge(const char *pPath)
     if (!_pSnes->InsertSuperWildCardCartridge(_pSnesRom))
     {
         _pSnesRom->Unload();
+        /* AURORA_SWC_LAZY_CART_BACKING_V3_20260915 */
+        _MainLoopSwcReleaseCartReserve();
         MainLoopStatusPrintf(180, "Cartridge insertion failed");
         return FALSE;
     }
@@ -2972,6 +3412,13 @@ static Bool _MainLoopExecuteSwcDisk(const char *pMappedPath,
                                     const char *pOriginalPath,
                                     Bool bLoadSRAM)
 {
+    /* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914:_MainLoopExecuteSwcDisk */
+    if (!_MainLoopEnsureSnesSystem())
+    {
+        MainLoopModalPrintf(60 * 3, "ERROR: not enough memory for SNES core");
+        return FALSE;
+    }
+
     Char FirmwarePath[1024];
 
     if (!pMappedPath || !*pMappedPath || !pOriginalPath || !*pOriginalPath ||
@@ -3033,8 +3480,17 @@ static Bool _MainLoopExecuteSwcDisk(const char *pMappedPath,
         return FALSE;
     }
 
-    if (!(bMagicom ? _pSnes->LoadSuperMagicom(FirmwarePath, pMappedPath) : _pSnes->LoadSuperWildCard(FirmwarePath, pMappedPath)))
+    if (!bMagicom)
     {
+        /* AURORA_SWC_LAZY_CART_BACKING_V3_20260915 */
+        _MainLoopSwcReleaseCartReserve();
+    }
+
+    if (!(bMagicom ? _pSnes->LoadSuperMagicom(FirmwarePath, pMappedPath)
+                   : _pSnes->LoadSuperWildCard(FirmwarePath, pMappedPath)))
+    {
+        if (!bMagicom)
+            _MainLoopSwcReleaseCartReserve();
         MainLoopModalPrintf(
             60 * 5,
             "SWC boot failed: %s",
@@ -3730,6 +4186,13 @@ static Bool _MainLoopBootSuperGameBoy(const Uint8 *pGbData, Uint32 nGbBytes,
                                       const Char *pOriginalPath,
                                       Uint32 uGbCRC, Bool bLoadSRAM)
 {
+    /* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914:_MainLoopBootSuperGameBoy */
+    if (!_MainLoopEnsureSnesSystem())
+    {
+        MainLoopModalPrintf(60 * 3, "ERROR: not enough memory for SGB/SNES core");
+        return FALSE;
+    }
+
     Bool bSgb2 = FALSE;
     Char firmware[1024];
     Uint8 gbBios[0x100];
@@ -3805,6 +4268,13 @@ static Bool _MainLoopExecuteGbaPath(const char *pMappedPath,
                                     const char *pOriginalPath,
                                     Bool bLoadSRAM)
 {
+    /* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914:_MainLoopExecuteGbaPath */
+    if (!_MainLoopEnsureGbaSystem())
+    {
+        MainLoopModalPrintf(60 * 3, "ERROR: not enough memory for GBA core");
+        return FALSE;
+    }
+
     Char SystemDirectory[512];
 
     if (!pMappedPath || !*pMappedPath || !pOriginalPath || !*pOriginalPath || !_pGba)
@@ -3942,7 +4412,10 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
     char hddPath[1024], ZipMemberName[512];
     unsigned int uZipIndex = 0;
     Bool bZipIndexValid = FALSE;
+    Bool bSnesOwnedFileLoaded = FALSE; /* AURORA_SNES_OWNED_ZIP_V1_20260914 */
+    Bool bSegaCompactLargeBacking = FALSE; /* AURORA_LARGE_MD_COMPACT_V2_20260914 */
     Int32 nExpectedRomBytes = 0, nRomBytes = 0;
+    Int32 rasterWidth = 256; /* AURORA_LOAD_BYTE_PROGRESS_V1_20260915 */
     Uint32 uRomIdentityCRC = 0;
 #if SNDBG_LOG
     Uint32 uRomCRC = 0;
@@ -4228,6 +4701,87 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
             return FALSE;
     }
 
+    /* AURORA_SNES_OWNED_ZIP_V1_20260914
+     * Plain SNES and ZIP SNES avoid the generic full-ROM staging allocation.
+     * ZIP is extracted directly to SYSTEM/UNZIP; CFileIO then forces SnesRom
+     * to malloc/read its single resident copy. GZ stays memory-backed below.
+     */
+    if (eType == MAINLOOP_ENTRYTYPE_SNESROM &&
+        (eSourceType == MAINLOOP_ENTRYTYPE_SNESROM ||
+         (eSourceType == MAINLOOP_ENTRYTYPE_ZIP && bZipIndexValid)))
+    {
+        Char tempPath[1024];
+        const Char *pOwnedPath = pFileName;
+        Bool bTemp = FALSE;
+        CFileIO romfile;
+        Emu::Rom::LoadErrorE eError;
+
+        tempPath[0] = 0;
+        if (eSourceType == MAINLOOP_ENTRYTYPE_ZIP)
+        {
+            if (!_MainLoopPrepareZipTempPath(
+                    tempPath, (Int32)sizeof(tempPath),
+                    "aurora_snes_zip.sfc"))
+            {
+                MainLoopModalPrintf(60 * 4,
+                    "ERROR: cannot create SYSTEM/UNZIP");
+                return FALSE;
+            }
+            if (!_MainLoopExtractZipEntryToFile(
+                    pFileName, ZipMemberName, uZipIndex,
+                    nExpectedRomBytes, tempPath))
+            {
+                MainLoopModalPrintf(60 * 4,
+                    "ERROR: cannot extract complete SNES ZIP");
+                return FALSE;
+            }
+            pOwnedPath = tempPath;
+            bTemp = TRUE;
+        }
+
+        if (!_MainLoopFileCRC32Exact(
+                pOwnedPath, nExpectedRomBytes, &uRomIdentityCRC,
+                eSourceType == MAINLOOP_ENTRYTYPE_ZIP ? FALSE : TRUE))
+        {
+            if (bTemp) remove(tempPath);
+            MainLoopModalPrintf(60 * 4,
+                "ERROR: cannot verify complete SNES ROM");
+            return FALSE;
+        }
+#if SNDBG_LOG
+        uRomCRC = uRomIdentityCRC;
+#endif
+
+        if (!romfile.Open(pOwnedPath, "rb"))
+        {
+            if (bTemp) remove(tempPath);
+            MainLoopModalPrintf(60 * 3, "ERROR: cannot open SNES ROM");
+            return FALSE;
+        }
+
+        _pSnesRom->Unload();
+        eError = _pSnesRom->LoadRom(&romfile);
+        romfile.Close();
+        if (bTemp) remove(tempPath);
+
+        if (eError != Emu::Rom::LOADERROR_NONE)
+        {
+            _pSnesRom->Unload();
+            if (eError == Emu::Rom::LOADERROR_OUTOFSPACE)
+                MainLoopModalPrintf(60 * 4,
+                    eSourceType == MAINLOOP_ENTRYTYPE_ZIP
+                        ? "ERROR: not enough EE memory for SNES ZIP ROM"
+                        : "ERROR: not enough EE memory for SNES ROM");
+            else
+                MainLoopModalPrintf(60 * 4,
+                    "ERROR: cannot load SNES ROM (%d)", (int)eError);
+            return FALSE;
+        }
+
+        nRomBytes = nExpectedRomBytes;
+        bSnesOwnedFileLoaded = TRUE;
+    }
+
     /* AURORA_MEMORY_RASTER_REGRESSION_FIX_V3_20260913_ROM_BEFORE_RASTER
      * Memory-regression fix: decide the target raster first, but do NOT
      * rebuild gsKit before the largest EE allocation of this load.
@@ -4242,8 +4796,6 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
      * that succeeds may gsKit change raster. On raster failure the existing
      * abort helper frees the ROM before restoring 256. */
     {
-        Int32 rasterWidth = 256;
-
         /* AURORA_PCE_PRECORE512_V13_20260830
          * PCE Fast host surface has a 512-pixel pitch and may expose
          * 256/352/512 visible widths. Enter the core with the GS already on
@@ -4307,62 +4859,121 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
                 rasterWidth = 320;
         }
 
+        /* AURORA_LARGE_MD_COMPACT_V2_20260914
+         * Decide compact backing before reserving the large ROM. The bridge
+         * will validate the full payload again before PicoDrive can borrow it.
+         */
+        if (eType == MAINLOOP_ENTRYTYPE_SEGAROM &&
+            nExpectedRomBytes > 0x400000)
+        {
+            Uint32 nProbe = (Uint32)nExpectedRomBytes;
+            Uint8 *pProbe;
+            Int32 got;
+
+            if (nProbe > MAINLOOP_SEGA_PROBE_BYTES)
+                nProbe = MAINLOOP_SEGA_PROBE_BYTES;
+            pProbe = (Uint8 *)malloc((size_t)nProbe);
+            if (!pProbe)
+            {
+                MainLoopModalPrintf(60 * 3,
+                    "ERROR: not enough memory for ROM probe");
+                return FALSE;
+            }
+
+            if (eSourceType == MAINLOOP_ENTRYTYPE_GZ)
+                got = MinizReadGZPrefix(
+                    pFileName, pProbe, (Int32)nProbe);
+            else if (eSourceType == MAINLOOP_ENTRYTYPE_ZIP)
+                got = bZipIndexValid
+                    ? MinizReadZipEntryPrefix(
+                        pFileName, uZipIndex, pProbe, (Int32)nProbe)
+                    : -1;
+            else
+                got = _MainLoopReadBinaryPrefix(
+                    pProbe, (Int32)nProbe, pFileName);
+
+            if (got != (Int32)nProbe)
+            {
+                free(pProbe);
+                MainLoopModalPrintf(60 * 3,
+                    "ERROR: cannot probe large Mega Drive ROM");
+                return FALSE;
+            }
+
+            bSegaCompactLargeBacking =
+                _MainLoopSegaCanUseCompactLargeBacking(
+                    pProbe, nExpectedRomBytes, SegaContentName);
+            free(pProbe);
+        }
+
         /* Allocate exact frontend backing policy for this cartridge. */
         {
-            size_t required;
-            if (eType == MAINLOOP_ENTRYTYPE_SEGAROM)
-                required = PicoDriveBridge_RequiredRomCapacity(
-                    (size_t)nExpectedRomBytes);
-            else
-                required = (size_t)nExpectedRomBytes + 1024U;
-
-            if (required < (size_t)nExpectedRomBytes ||
-                required > 0xFFFFFFFFU ||
-                !_MainLoopAllocRomBuffer((Uint32)required))
+            /* AURORA_SNES_OWNED_ZIP_V1_20260914: SnesRom already owns direct/ZIP data. */
+            if (!bSnesOwnedFileLoaded)
             {
-                _MainLoopAbortPreCoreLoad();
-                MainLoopModalPrintf(60 * 3,
-                    eSourceType == MAINLOOP_ENTRYTYPE_ZIP
-                        ? "ZIP file too large for decompress"
-                        : "ERROR: not enough memory for ROM");
-                return FALSE;
+                size_t required;
+                if (eType == MAINLOOP_ENTRYTYPE_SEGAROM)
+                    required = bSegaCompactLargeBacking
+                        ? PicoDriveBridge_CompactMegaDriveCapacity(
+                            (size_t)nExpectedRomBytes)
+                        : PicoDriveBridge_RequiredRomCapacity(
+                            (size_t)nExpectedRomBytes);
+                else
+                    required = (size_t)nExpectedRomBytes + 1024U;
+
+                if (required < (size_t)nExpectedRomBytes ||
+                    required > 0xFFFFFFFFU ||
+                    !_MainLoopAllocRomBuffer((Uint32)required))
+                {
+                    _MainLoopAbortPreCoreLoad();
+                    MainLoopModalPrintf(60 * 3,
+                        eSourceType == MAINLOOP_ENTRYTYPE_ZIP
+                            ? "ERROR: not enough EE memory for ZIP ROM"
+                            : "ERROR: not enough memory for ROM");
+                    return FALSE;
+                }
             }
         }
 
-        /* Commit video only after the large ROM backing is secured. */
-        if (!MainLoopEnsureGameplayRasterWidth(rasterWidth))
-        {
-            _MainLoopAbortPreCoreLoad();
-            MainLoopModalPrintf(60 * 3,
-                "ERROR: cannot configure video raster");
-            return FALSE;
-        }
+        /* AURORA_LOAD_BYTE_PROGRESS_V1_20260915
+         * Keep the normal 256-wide browser raster through synchronous I/O.
+         * Gameplay raster is committed only after the payload is complete. */
     }
 
-    if (eSourceType == MAINLOOP_ENTRYTYPE_GZ)
+    if (!bSnesOwnedFileLoaded)
     {
-        nRomBytes = _MainLoopReadGZData(
-            _RomData, (Int32)_RomDataCapacity, pFileName);
-    }
-    else if (eSourceType == MAINLOOP_ENTRYTYPE_ZIP)
-    {
-        char loadedName[512];
-        loadedName[0] = 0;
-        nRomBytes = bZipIndexValid
-            ? MinizReadZipEntryToBuffer(
-                pFileName, uZipIndex,
-                _RomData, (Int32)_RomDataCapacity,
-                loadedName, (int)sizeof(loadedName))
-            : -1;
-        if (nRomBytes > 0 &&
-            strcmp(loadedName, ZipMemberName) != 0)
-            nRomBytes = -1;
-    }
-    else
-    {
-        nRomBytes = _MainLoopReadBinaryData(
-            _RomData, (Int32)_RomDataCapacity, pFileName);
-    }
+        if (eSourceType == MAINLOOP_ENTRYTYPE_GZ)
+        {
+            _MainLoopLoadProgressBegin(nExpectedRomBytes);
+            nRomBytes = MinizReadGZToBuffer(
+                pFileName, _RomData, nExpectedRomBytes);
+            _MainLoopLoadProgressFinish(
+                nRomBytes == nExpectedRomBytes ? TRUE : FALSE);
+        }
+        else if (eSourceType == MAINLOOP_ENTRYTYPE_ZIP)
+        {
+            char loadedName[512];
+            loadedName[0] = 0;
+
+            _MainLoopLoadProgressBegin(nExpectedRomBytes);
+            nRomBytes = bZipIndexValid
+                ? MinizReadZipEntryToBuffer(
+                    pFileName, uZipIndex,
+                    _RomData, nExpectedRomBytes,
+                    loadedName, (int)sizeof(loadedName))
+                : -1;
+            _MainLoopLoadProgressFinish(
+                nRomBytes == nExpectedRomBytes ? TRUE : FALSE);
+
+            if (nRomBytes > 0 &&
+                strcmp(loadedName, ZipMemberName) != 0)
+                nRomBytes = -1;
+        }
+        else
+        {
+            nRomBytes = _MainLoopReadBinaryDataProgress(
+                _RomData, nExpectedRomBytes, pFileName);
+        }
 
     if (nRomBytes != nExpectedRomBytes)
     {
@@ -4379,17 +4990,56 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
         MZ_CRC32_INIT, _RomData, (size_t)nRomBytes);
 #endif
 
-    {
-        Int32 guard = (Int32)(_RomDataCapacity - (Uint32)nRomBytes);
-        if (guard > 1024) guard = 1024;
-        if (guard > 0)
-            memset(_RomData + nRomBytes, 0, (size_t)guard);
+        {
+            Int32 guard = (Int32)(_RomDataCapacity - (Uint32)nRomBytes);
+            if (guard > 1024) guard = 1024;
+            if (guard > 0)
+                memset(_RomData + nRomBytes, 0, (size_t)guard);
+        }
     }
 
-    printf("ROM data read: %s (%d/%u bytes backing)\n",
-           pFileName, nRomBytes, (unsigned)_RomDataCapacity);
+    if (bSnesOwnedFileLoaded)
+        printf("ROM data read: %s (%d bytes, SnesRom-owned)\n",
+               pFileName, nRomBytes);
+    else
+        printf("ROM data read: %s (%d/%u bytes backing)\n",
+               pFileName, nRomBytes, (unsigned)_RomDataCapacity);
     _MainLoopGetName(_RomName, FileName);
     printf("ROMName: '%s'\n", _RomName);
+
+    /* AURORA_LOAD_BYTE_PROGRESS_V1_20260915
+     * All blocking ROM I/O is complete while the browser raster is still
+     * intact. Switch to the target gameplay raster only now. */
+    if (!MainLoopEnsureGameplayRasterWidth(rasterWidth))
+    {
+        if (bSnesOwnedFileLoaded)
+            _pSnesRom->Unload();
+        _MainLoopAbortPreCoreLoad();
+        MainLoopModalPrintf(
+            60 * 3, "ERROR: cannot configure video raster");
+        return FALSE;
+    }
+
+    /* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914
+     * Deliberately late: secure/read the large ROM backing before
+     * constructing a core, preserving contiguous EE heap. */
+    if (!_MainLoopEnsureSystemForType(eType))
+    {
+        _MainLoopAbortPreCoreLoad();
+        MainLoopModalPrintf(60 * 3,
+            "ERROR: not enough memory for emulator core");
+        return FALSE;
+    }
+
+    switch (eType)
+    {
+        case MAINLOOP_ENTRYTYPE_NESROM:  pSystem = _pNes;  break;
+        case MAINLOOP_ENTRYTYPE_SEGAROM: pSystem = _pSega; break;
+        case MAINLOOP_ENTRYTYPE_SNESROM: pSystem = _pSnes; break;
+        case MAINLOOP_ENTRYTYPE_GBROM:   pSystem = _pGb;   break;
+        case MAINLOOP_ENTRYTYPE_PCEROM:  pSystem = _pPce;  break;
+        default: break;
+    }
 
     if (eType == MAINLOOP_ENTRYTYPE_GBROM)
     {
@@ -4515,17 +5165,18 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
         }
     }
 
-    if (pRom && !_MainLoopLoadRomData(pRom, _RomData, nRomBytes))
+    if (pRom && !bSnesOwnedFileLoaded &&
+        !_MainLoopLoadRomData(pRom, _RomData, nRomBytes))
     {
         _MainLoopUnloadRom();
         return FALSE;
     }
 
-    /* AURORA_ROM_LIFETIME_RAMONLY_ZIP_V2_20260913: release frontend staging as soon as the copying core
-     * has absorbed it. Sega/PCE are zero-copy AttachBuffer users and must
-     * retain _RomData for the cartridge lifetime. Special SWC/SMD/FDS
-     * media paths bypass this generic block entirely. */
-    if (pRom == _pSnesRom || pRom == _pNesRom)
+    /* AURORA_SNES_OWNED_ZIP_V1_20260914
+     * NesRom copies from CMemFileIO. SnesRom may retain ReadPtr(), so a GZ
+     * SNES image must keep _RomData until unload. Plain/ZIP SNES use the
+     * owned CFileIO path and never allocated frontend staging here. */
+    if (pRom == _pNesRom)
         _MainLoopFreeRomBuffer();
 
     if (pBios)
