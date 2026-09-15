@@ -58,7 +58,8 @@ static Uint32 _ObjCountBits8(Uint32 v)
 void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 	const SnesRenderObj8T *pObjLine, Int32 nObjLine,
 	const SNMaskT *pWindow, const SNMaskT *pMask,
-	SNMaskT *pAddSubMask, Bool bAddSubMask)
+	SNMaskT *pAddSubMask, Bool bAddSubMask,
+	Uint8 *pDirectAttrib, Uint8 uDirectShift)
 {
 	SNMaskT ObjMask;
 	SNMaskT PriorityMask[4];
@@ -173,6 +174,19 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 			 * avoids eight branches in sprite-heavy scenes (Top Gear). */
 			if (!uVisible)
 				continue;
+
+			/* AURORA_V4_MODE34_DIRECT_COLOR_20260915
+			 * OBJ is composited after BG1. Clear Direct Color ownership only
+			 * for OBJ pixels that survived window and priority masking. */
+			if (pDirectAttrib)
+			{
+				const Uint8 uKeep = uDirectShift ? 0x0F : 0xF0;
+				Int32 iDirect;
+				for (iDirect = 0; iDirect < 8; iDirect++)
+					if (uVisible & (1u << iDirect))
+						pDirectAttrib[iPosX + iDirect] &= uKeep;
+			}
+
 			if (uVisible == 0xFF)
 			{
 				memcpy(pDest8, pObjData, 8);
@@ -226,6 +240,8 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 				}
 
 				pLine8[iX] = pObjData[iPixel];
+				if (pDirectAttrib)
+					pDirectAttrib[iX] &= uDirectShift ? 0x0F : 0xF0;
 #if SNDBG_DEEP
 				g_DbgObjDrawnPixels++;
 #endif

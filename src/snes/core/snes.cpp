@@ -1649,7 +1649,16 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 		break;
 	}
 
-	return uAddr >> 8;
+	/* AURORA_V2_TRICKY_ACCURACY_20260915
+	 * Unhandled/write-only reads in this $2000-$3FFF trap expose CPU open
+	 * bus. Explicit PPU1/PPU2 MDR cases are handled above. */
+	/* AURORA_V9_GLOBAL_TRICKY_AUDIT_20260915
+	 * Final global SNESdev tricky-games pass. Existing hardware fixes are
+	 * preserved; dot-level VRAM/OAM contention, exact OBJ-fetch corruption,
+	 * per-cycle SPC, CPU read-side-effect phase, and board-specific SRAM are
+	 * not approximated by this scanline scheduler. SuperFX RPIX already does
+	 * a real cache flush plus bitplane read and remains intact. */
+	return pCpu->uMDR;
 }
 
 //#define SNES_SPCWRITE_LATENCY (21)

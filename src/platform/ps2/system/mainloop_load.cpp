@@ -520,70 +520,34 @@ static Bool _MainLoopSegaWantsNative320(
 }
 
 
-/* AURORA_LOAD_BYTE_PROGRESS_V1_20260915
- * Keep synchronous cartridge loading visible without turning rendering into
- * the bottleneck. The UI is refreshed only at coarse output-byte intervals.
- * The displayed count is always real bytes loaded/decompressed. */
-static Int32 s_MainLoopLoadProgressTotal = 0;
-static Int32 s_MainLoopLoadProgressShown = 0;
-static Int32 s_MainLoopLoadProgressStep = 0;
-
+/* AURORA_V9_FINAL_TRICKY_TIMING_20260915
+ * AURORA_V9_LOADING_STATIC_20260915
+ * Cartridge loading stays synchronous and uses the same I/O/decompression
+ * paths, but the UI is rendered exactly once. Repeated progress formatting
+ * and MainLoopRender() calls were host overhead and did not affect emulation. */
 static void _MainLoopLoadProgressBegin(Int32 total)
 {
     if (total <= 0)
         return;
-
-    s_MainLoopLoadProgressTotal = total;
-    s_MainLoopLoadProgressShown = 0;
-    s_MainLoopLoadProgressStep = total / 8;
-    if (s_MainLoopLoadProgressStep < 65536)
-        s_MainLoopLoadProgressStep = 65536;
-    if (s_MainLoopLoadProgressStep > 1048576)
-        s_MainLoopLoadProgressStep = 1048576;
-
-    MainLoopStatusPrintf(120, "Loading... 0/%d", (int)total);
+    MainLoopStatusPrintf(120, "Loading game...");
     MainLoopRender();
 }
 
 static void _MainLoopLoadProgressUpdate(Int32 done)
 {
-    if (s_MainLoopLoadProgressTotal <= 0)
-        return;
-
-    if (done < 0)
-        done = 0;
-    if (done > s_MainLoopLoadProgressTotal)
-        done = s_MainLoopLoadProgressTotal;
-
-    if (done != s_MainLoopLoadProgressTotal &&
-        done - s_MainLoopLoadProgressShown < s_MainLoopLoadProgressStep)
-        return;
-
-    MainLoopStatusPrintf(
-        120, "Loading... %d/%d",
-        (int)done, (int)s_MainLoopLoadProgressTotal);
-    MainLoopRender();
-    s_MainLoopLoadProgressShown = done;
+    (void)done;
 }
 
 static void _MainLoopLoadProgressMiniz(int done, int total, void *user)
 {
-    (void)user;
+    (void)done;
     (void)total;
-    _MainLoopLoadProgressUpdate((Int32)done);
+    (void)user;
 }
 
 static void _MainLoopLoadProgressFinish(Bool complete)
 {
-    if (complete && s_MainLoopLoadProgressTotal > 0)
-        _MainLoopLoadProgressUpdate(s_MainLoopLoadProgressTotal);
-
-    s_MainLoopLoadProgressTotal = 0;
-    s_MainLoopLoadProgressShown = 0;
-    s_MainLoopLoadProgressStep = 0;
-
-    /* Do not render the clear: leave the last progress frame visible until
-       the next normal UI/game frame replaces it. */
+    (void)complete;
     _MainLoop_StatusCount = 0;
     _MainLoop_StatusStr[0] = 0;
 }
@@ -1170,13 +1134,18 @@ Bool _MainLoopLoadSnesPalette(const char *pFileName)
 static char s_PceCdrdaoTempCue[1024];
 
 /* AURORA_SWC_32MBIT_CART_BACKING_V1_20260914
+ * AURORA_SWC_LAZY_CART_BACKING_V3_20260915
+ * AURORA_V2_TRICKY_ACCURACY_20260915
  *
- * Classic 32-Mbit SWC needs two distinct 4-MiB memories when a full-size
- * physical cartridge is inserted: copier DRAM and Game Pak ROM. Reserving
- * the cart backing before SNSuperWildCard::Load() asks for DRAM prevents
- * the later hot-insert from depending on a fresh contiguous 4-MiB hole.
+ * A classic 32-Mbit SWC needs two DISTINCT memories when a full-size
+ * external cartridge is inserted: 4 MiB copier DRAM + up to 4 MiB Game Pak
+ * ROM. They cannot be aliased because SWC Mode 0 can expose both at once.
  *
- * This memory is never used as copier DRAM, B-RAM, FDC media, or SRAM.
+ * Game Pak backing stays lazy: empty firmware and disk-only boot allocate
+ * only real copier DRAM. On insertion V2 reserves exactly the physical
+ * cartridge payload size, up to 4 MiB.
+ *
+ * This backing is never used as copier DRAM, B-RAM, FDC media, or SRAM.
  */
 enum
 {
@@ -1184,6 +1153,7 @@ enum
 };
 
 static Uint8 *s_pSwcCartReserve = NULL;
+static Uint32 s_uSwcCartReserveBytes = 0;
 
 static void _MainLoopSwcReleaseCartReserve()
 {
@@ -1192,24 +1162,31 @@ static void _MainLoopSwcReleaseCartReserve()
         free(s_pSwcCartReserve);
         s_pSwcCartReserve = NULL;
     }
+    s_uSwcCartReserveBytes = 0;
 }
 
-static Bool _MainLoopSwcEnsureCartReserve()
+static Bool _MainLoopSwcEnsureCartReserve(Uint32 nBytes)
 {
-    if (s_pSwcCartReserve)
+    if (!nBytes || nBytes > MAINLOOP_SWC_CART_RESERVE_BYTES)
+        return FALSE;
+
+    if (s_pSwcCartReserve && s_uSwcCartReserveBytes >= nBytes)
         return TRUE;
 
-    s_pSwcCartReserve =
-        (Uint8 *)malloc((size_t)MAINLOOP_SWC_CART_RESERVE_BYTES);
+    _MainLoopSwcReleaseCartReserve();
 
+    s_pSwcCartReserve = (Uint8 *)malloc((size_t)nBytes);
     if (!s_pSwcCartReserve)
     {
-        printf("[SWC] 32-Mbit cart reserve unavailable; "
-               "using normal allocation fallback\n");
+        printf("[SWC] %u-byte cart backing unavailable; "
+               "using normal allocation fallback\n",
+               (unsigned)nBytes);
         return FALSE;
     }
 
-    printf("[SWC] reserved 4 MiB contiguous backing for external cartridge\n");
+    s_uSwcCartReserveBytes = nBytes;
+    printf("[SWC] reserved %u bytes contiguous backing for external cartridge\n",
+           (unsigned)s_uSwcCartReserveBytes);
     return TRUE;
 }
 
@@ -2793,10 +2770,9 @@ static Bool _MainLoopExecuteSwcFirmware(const char *pFirmwarePath,
     if (!MainLoopEnsureGameplayRasterWidth(256))
         return FALSE;
 
-    /* AURORA_SWC_32MBIT_CART_BACKING_V1_20260914
-     * Reserve cart ROM before the copier DRAM allocation. Failure is nonfatal
-     * so disk/smaller-cart workflows retain their historical behavior. */
-    (void)_MainLoopSwcEnsureCartReserve();
+    /* AURORA_SWC_LAZY_CART_BACKING_V3_20260915
+     * Empty copier boot needs SWC DRAM only. */
+    _MainLoopSwcReleaseCartReserve();
 
     if (!_pSnes->LoadSuperWildCard(pFirmwarePath, NULL))
     {
@@ -2914,23 +2890,22 @@ static Bool _MainLoopSwcInsertCartridge(const char *pPath)
 
     if (nPayloadBytes && nPayloadBytes <= MAINLOOP_SWC_CART_RESERVE_BYTES)
     {
-        /* Prefer the block guaranteed before SWC DRAM allocation. */
-        (void)_MainLoopSwcEnsureCartReserve();
+        /* AURORA_V2_TRICKY_ACCURACY_20260915 */
+        (void)_MainLoopSwcEnsureCartReserve(nPayloadBytes);
     }
     else if (nPayloadBytes > MAINLOOP_SWC_CART_RESERVE_BYTES)
     {
-        /* Do not penalize >32-Mbit external carts with an unused reserve. */
         _MainLoopSwcReleaseCartReserve();
     }
 
     if (s_pSwcCartReserve &&
         nPayloadBytes &&
-        nPayloadBytes <= MAINLOOP_SWC_CART_RESERVE_BYTES)
+        s_uSwcCartReserveBytes >= nPayloadBytes)
     {
         eError = _pSnesRom->LoadRom(
             &romfile,
             s_pSwcCartReserve,
-            (Uint32)MAINLOOP_SWC_CART_RESERVE_BYTES);
+            s_uSwcCartReserveBytes);
     }
     else
     {
@@ -2947,6 +2922,8 @@ static Bool _MainLoopSwcInsertCartridge(const char *pPath)
          * V3 also removes the resident D88 mirror, so the usual cause of this
          * false error releases ~1.69 MiB before the cartridge is parsed. */
         _pSnesRom->Unload();
+        /* AURORA_SWC_LAZY_CART_BACKING_V3_20260915 */
+        _MainLoopSwcReleaseCartReserve();
         if (eError == Emu::Rom::LOADERROR_OUTOFSPACE)
             MainLoopStatusPrintf(240,
                 "Not enough EE memory for Wild Card cartridge");
@@ -2959,6 +2936,8 @@ static Bool _MainLoopSwcInsertCartridge(const char *pPath)
     if (!_pSnes->InsertSuperWildCardCartridge(_pSnesRom))
     {
         _pSnesRom->Unload();
+        /* AURORA_SWC_LAZY_CART_BACKING_V3_20260915 */
+        _MainLoopSwcReleaseCartReserve();
         MainLoopStatusPrintf(180, "Cartridge insertion failed");
         return FALSE;
     }
@@ -3567,7 +3546,10 @@ static Bool _MainLoopExecuteSwcDisk(const char *pMappedPath,
     }
 
     if (!bMagicom)
-        (void)_MainLoopSwcEnsureCartReserve();
+    {
+        /* AURORA_SWC_LAZY_CART_BACKING_V3_20260915 */
+        _MainLoopSwcReleaseCartReserve();
+    }
 
     if (!(bMagicom ? _pSnes->LoadSuperMagicom(FirmwarePath, pMappedPath)
                    : _pSnes->LoadSuperWildCard(FirmwarePath, pMappedPath)))

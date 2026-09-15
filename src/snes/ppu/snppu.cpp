@@ -543,7 +543,13 @@ void SnesPPU::Write8(Uint32 uAddr, Uint8 uData)
 		break;
 
 	case 0x2106:	// mosaic (screen pixelation)
-		m_Regs.mosaic = uData;
+		/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+		if (m_Regs.mosaic != uData)
+		{
+			m_Regs.mosaic = uData;
+			m_uMosaicStartLine =
+				(m_uLine > 0 && m_uLine <= 224) ? m_uLine : 1;
+		}
 		break;
 
 	case 0x2107:	// bg1sc (BG1 vram location)
@@ -848,6 +854,24 @@ Uint8 SnesPPU::Read8(Uint32 uAddr)
 */
 
 
+/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+Int32 SnesPPU::GetMode7MosaicSourceLine(Int32 iLine) const
+{
+	Int32 nSize;
+	Int32 nStart;
+
+	if (!(m_Regs.mosaic & 0x01))
+		return iLine;
+	nSize = (Int32)(((m_Regs.mosaic >> 4) & 0x0F) + 1);
+	if (nSize <= 1)
+		return iLine;
+	nStart = (Int32)m_uMosaicStartLine;
+	if (nStart < 1) nStart = 1;
+	if (iLine < nStart) return iLine;
+	return nStart + ((iLine - nStart) / nSize) * nSize;
+}
+
+
 void SnesPPU::SetRegionPAL(Bool bPAL)
 {
     if (bPAL)
@@ -860,6 +884,10 @@ void SnesPPU::BeginFrame()
 {
 	m_uLine   = 0;
     m_bVBlank = FALSE;
+	/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+	m_uMosaicStartLine = 1;
+	m_Mode7LineHofs = m_Regs.m7hofs.w;
+	m_Mode7LineVofs = m_Regs.m7vofs.w;
 }
 
 void SnesPPU::EndFrame()
@@ -893,6 +921,10 @@ void SnesPPU::Sync(Uint32 uLine)
 	{
 		while (m_uLine <= uLine)
 		{
+			/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+			m_Mode7LineHofs = m_Regs.m7hofs.w;
+			m_Mode7LineVofs = m_Regs.m7vofs.w;
+
 			// dequeue all pending writes before this line
 			while ( (pElement=m_Queue.Dequeue(m_uLine)) != NULL)
 			{
@@ -953,6 +985,10 @@ void SnesPPU::Reset()
 	/* AURORA_MEGA_V2_PPU_MDR_RESET */
 	m_PPU1MDR = 0;
 	m_PPU2MDR = 0;
+	/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+	m_Mode7LineHofs = 0;
+	m_Mode7LineVofs = 0;
+	m_uMosaicStartLine = 1;
 
 	// confirmed:
 	m_Regs.stat77 =  SNPPU_VERSION_5C77;
@@ -976,6 +1012,10 @@ void SnesPPU::SoftReset()
 	/* AURORA_MEGA_V2_PPU_MDR_RESET */
 	m_PPU1MDR = 0;
 	m_PPU2MDR = 0;
+	/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+	m_Mode7LineHofs = 0;
+	m_Mode7LineVofs = 0;
+	m_uMosaicStartLine = 1;
 
     m_Regs.stat77 = SNPPU_VERSION_5C77;
     m_Regs.stat78 = SNPPU_VERSION_5C78;
@@ -988,6 +1028,10 @@ SnesPPU::SnesPPU()
 	m_CGRAMLatch = 0;
 	m_PPU1MDR = 0;
 	m_PPU2MDR = 0;
+	/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+	m_Mode7LineHofs = 0;
+	m_Mode7LineVofs = 0;
+	m_uMosaicStartLine = 1;
 }
 
 #ifdef SNES_DEBUG
