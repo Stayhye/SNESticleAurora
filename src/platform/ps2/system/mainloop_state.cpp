@@ -2801,16 +2801,16 @@ static Uint32 _MainLoopStateGetPayloadBytes()
          */
         Int32 nBytes = _pNes ? _pNes->GetStateSize() : 0;
 
-        if (nBytes > 0 && nBytes <= (Int32)sizeof(_NesState))
+        if (nBytes > 0 && nBytes <= (Int32)sizeof(NesStateT))
         {
             return (Uint32)nBytes;
         }
 
         /* Defensive compatibility fallback. */
-        return (Uint32)sizeof(_NesState);
+        return (Uint32)sizeof(NesStateT);
     }
 
-    return (Uint32)sizeof(_SnesState);
+    return (Uint32)sizeof(SnesStateT);
 }
 
 static Uint8 *_MainLoopStateGetPayloadData()
@@ -2825,12 +2825,17 @@ static Uint8 *_MainLoopStateGetPayloadData()
         return _MainLoopStateEnsureSegaStateData(
             _MainLoopStateGetPayloadBytes());
     if (_pSystem == _pNes)
-        return (Uint8 *)&_NesState;
+        return _MainLoopStateEnsureSegaStateData(
+            _MainLoopStateGetPayloadBytes());
     if (_pSystem == _pSega || _pSystem == _pPce ||
         _pSystem == _pFds) /* AURORA_FCEUMM_FDS_V0_6_STATE */
         return _MainLoopStateEnsureSegaStateData(
             _MainLoopStateGetPayloadBytes());
-    return (Uint8 *)&_SnesState;
+
+    /* AURORA_STATE_PAYLOAD_HEAP_V1_20260914
+     * Plain SNES now uses the same operation-scoped raw-state scratch too. */
+    return _MainLoopStateEnsureSegaStateData(
+        _MainLoopStateGetPayloadBytes());
 }
 
 static void _MainLoopStateSetMessage(const Char *pFormat, ...)
@@ -4914,6 +4919,12 @@ Bool _MainLoopLoadState()
         Bool bRestoreOK = FALSE;
         if (bPayloadOK)
         {
+            /* AURORA_SWC_32MBIT_LOADSTATE_PAYLOAD_FIX_V1_20260915
+             * The SWC 32-Mbit backing patch moved plain SNES/NES state
+             * envelopes out of permanent .bss.  _MainLoopStateReadPayload()
+             * has just filled the operation-scoped payload scratch, so use
+             * that same scratch for legacy typed RestoreState() calls. */
+            Uint8 *pStateData = _MainLoopStateGetPayloadData();
             /* AURORA_PICODRIVE_STAGE2_STATE_RESTORE */
             if (_pSystem == _pGb)
             {
@@ -4932,7 +4943,8 @@ Bool _MainLoopLoadState()
                 if (bRestoreOK) _MainLoop_SRAMUpdated = TRUE; /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911 */
             }
             else if (_pSystem == _pNes)
-                bRestoreOK = _pNes->RestoreState(&_NesState);
+                bRestoreOK = pStateData &&
+                    _pNes->RestoreState((NesStateT *)pStateData);
             else if (_pSystem == _pFds)
             {
                 /* AURORA_FCEUMM_FDS_V0_6_STATE */
@@ -4964,7 +4976,8 @@ Bool _MainLoopLoadState()
                         pSwcStateData, (Int32)nSwcStateBytes);
             }
             else
-                bRestoreOK = _pSnes->RestoreState(&_SnesState);
+                bRestoreOK = pStateData &&
+                    _pSnes->RestoreState((SnesStateT *)pStateData);
         }
 
         if (bRestoreOK)
@@ -5131,13 +5144,13 @@ Bool _MainLoopSaveState()
     }
     else if (_pSystem == _pNes)
     {
-        _pNes->SaveState(&_NesState);
+        _pNes->SaveState((NesStateT *)pStateData);
         /* SNESTICLE_NES_CORE_STATE_MAGIC
          * Do not hard-code InfoNES's NSST payload magic here. Every NesSystem
          * implementation owns and validates its inner state format. Both the
          * InfoNES and QuickNES wrappers memset the envelope to zero first and
          * write a non-zero magic only after a complete snapshot succeeds. */
-        if (_NesState.uMagic == 0)
+        if (((NesStateT *)pStateData)->uMagic == 0)
         {
             _MainLoopStateSetMessage("Could not snapshot the NES core state.");
             return FALSE;
@@ -5180,7 +5193,7 @@ Bool _MainLoopSaveState()
     }
     else
     {
-        _pSnes->SaveState(&_SnesState);
+        _pSnes->SaveState((SnesStateT *)pStateData);
     }
     uPayloadCRC = (Uint32)mz_crc32(
         MZ_CRC32_INIT,

@@ -102,7 +102,7 @@ extern Emu::System    *_pSystem;
 extern Emu::MovieClip *s_pMovieClip;
 extern SnesSystem     *_pSnes;
 extern SnesRom        *_pSnesRom;
-extern SnesStateT      _SnesState;
+/* AURORA_STATE_PAYLOAD_HEAP_V1_20260914: SNES state payload is transient heap scratch. */
 
 /* NES integration (Phase 2). Defined in mainloop_globals.cpp.
    FDS disk-swap state lives here too even though the runtime path
@@ -114,7 +114,7 @@ extern FdsSystem      *_pFds; /* AURORA_FCEUMM_FDS_V0_5_SHARED */
 extern NesRom         *_pNesRom;
 extern NesFDSBios     *_pNesFDSBios;
 extern NesDisk        *_pNesFDSDisk;
-extern NesStateT       _NesState;
+/* AURORA_STATE_PAYLOAD_HEAP_V1_20260914: NES state payload is transient heap scratch. */
 extern Int32           _MainLoop_iDisk;
 extern Bool            _MainLoop_bDiskInserted;
 

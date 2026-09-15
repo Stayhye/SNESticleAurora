@@ -994,6 +994,69 @@ Bool _MainLoopLoadSnesPalette(const char *pFileName)
 /* AURORA_V4_12_PRIVATE_FILEXIO_CDDA_PCE_TOC2CUE_20260830 */
 static char s_PceCdrdaoTempCue[1024];
 
+/* AURORA_SWC_32MBIT_CART_BACKING_V1_20260914
+ *
+ * Classic 32-Mbit SWC needs two distinct 4-MiB memories when a full-size
+ * physical cartridge is inserted: copier DRAM and Game Pak ROM. Reserving
+ * the cart backing before SNSuperWildCard::Load() asks for DRAM prevents
+ * the later hot-insert from depending on a fresh contiguous 4-MiB hole.
+ *
+ * This memory is never used as copier DRAM, B-RAM, FDC media, or SRAM.
+ */
+enum
+{
+    MAINLOOP_SWC_CART_RESERVE_BYTES = 4 * 1024 * 1024
+};
+
+static Uint8 *s_pSwcCartReserve = NULL;
+
+static void _MainLoopSwcReleaseCartReserve()
+{
+    if (s_pSwcCartReserve)
+    {
+        free(s_pSwcCartReserve);
+        s_pSwcCartReserve = NULL;
+    }
+}
+
+static Bool _MainLoopSwcEnsureCartReserve()
+{
+    if (s_pSwcCartReserve)
+        return TRUE;
+
+    s_pSwcCartReserve =
+        (Uint8 *)malloc((size_t)MAINLOOP_SWC_CART_RESERVE_BYTES);
+
+    if (!s_pSwcCartReserve)
+    {
+        printf("[SWC] 32-Mbit cart reserve unavailable; "
+               "using normal allocation fallback\n");
+        return FALSE;
+    }
+
+    printf("[SWC] reserved 4 MiB contiguous backing for external cartridge\n");
+    return TRUE;
+}
+
+static Uint32 _MainLoopSwcCartPayloadBytes(const char *pPath)
+{
+    struct stat st;
+    Uint32 nFileBytes;
+    Uint32 nHeaderBytes;
+
+    if (!pPath || !*pPath || stat(pPath, &st) != 0 ||
+        S_ISDIR(st.st_mode) || st.st_size <= 0 ||
+        (unsigned long long)st.st_size > 0xffffffffULL)
+        return 0;
+
+    nFileBytes = (Uint32)st.st_size;
+
+    /* Match the normal 512-byte copier-header case at the 32-Mbit boundary. */
+    nHeaderBytes = ((nFileBytes & 0x1FFFu) == 512u) ? 512u : 0u;
+    return nFileBytes - nHeaderBytes;
+}
+
+
 void _MainLoopUnloadRom()
 {
     /* AURORA_AUDIO_HARDCUT_ROM_UNLOAD_V1 */
@@ -1161,6 +1224,7 @@ _MainLoopSwcCartSRAMDetach();
 	if (_pSnes) _pSnes->SetRom(NULL);
     s_SwcExternalCartPath[0] = 0; /* AURORA_SWC_MEGA_V9_20260831 */
 	_pSnesRom->Unload();
+    _MainLoopSwcReleaseCartReserve(); /* AURORA_SWC_32MBIT_CART_BACKING_V1_20260914 */
 
 	/* Phase 2: NES unload mirrors the SNES path. NesDisk is unloaded
 	   even though disk-swap input is still gated for Phase 5 - the
@@ -2554,8 +2618,14 @@ static Bool _MainLoopExecuteSwcFirmware(const char *pFirmwarePath,
     if (!MainLoopEnsureGameplayRasterWidth(256))
         return FALSE;
 
+    /* AURORA_SWC_32MBIT_CART_BACKING_V1_20260914
+     * Reserve cart ROM before the copier DRAM allocation. Failure is nonfatal
+     * so disk/smaller-cart workflows retain their historical behavior. */
+    (void)_MainLoopSwcEnsureCartReserve();
+
     if (!_pSnes->LoadSuperWildCard(pFirmwarePath, NULL))
     {
+        _MainLoopSwcReleaseCartReserve();
         MainLoopModalPrintf(
             60 * 5, "SWC boot failed: %s",
             _pSnes->GetSuperWildCardError());
@@ -2624,6 +2694,7 @@ static Bool _MainLoopSwcInsertCartridge(const char *pPath)
 {
     CFileIO romfile;
     Emu::Rom::LoadErrorE eError;
+    Uint32 nPayloadBytes;
     if (!_pSnes || !_pSnes->IsSuperWildCard() ||
         !pPath || !*pPath || !_pSnesRom)
         return FALSE;
@@ -2664,7 +2735,33 @@ static Bool _MainLoopSwcInsertCartridge(const char *pPath)
         return FALSE;
     }
 
-    eError = _pSnesRom->LoadRom(&romfile);
+    nPayloadBytes = _MainLoopSwcCartPayloadBytes(pPath);
+
+    if (nPayloadBytes && nPayloadBytes <= MAINLOOP_SWC_CART_RESERVE_BYTES)
+    {
+        /* Prefer the block guaranteed before SWC DRAM allocation. */
+        (void)_MainLoopSwcEnsureCartReserve();
+    }
+    else if (nPayloadBytes > MAINLOOP_SWC_CART_RESERVE_BYTES)
+    {
+        /* Do not penalize >32-Mbit external carts with an unused reserve. */
+        _MainLoopSwcReleaseCartReserve();
+    }
+
+    if (s_pSwcCartReserve &&
+        nPayloadBytes &&
+        nPayloadBytes <= MAINLOOP_SWC_CART_RESERVE_BYTES)
+    {
+        eError = _pSnesRom->LoadRom(
+            &romfile,
+            s_pSwcCartReserve,
+            (Uint32)MAINLOOP_SWC_CART_RESERVE_BYTES);
+    }
+    else
+    {
+        eError = _pSnesRom->LoadRom(&romfile);
+    }
+
     romfile.Close();
     SnesRomResetRuntimeCompatForExternalDevice();
 
@@ -3294,8 +3391,14 @@ static Bool _MainLoopExecuteSwcDisk(const char *pMappedPath,
         return FALSE;
     }
 
-    if (!(bMagicom ? _pSnes->LoadSuperMagicom(FirmwarePath, pMappedPath) : _pSnes->LoadSuperWildCard(FirmwarePath, pMappedPath)))
+    if (!bMagicom)
+        (void)_MainLoopSwcEnsureCartReserve();
+
+    if (!(bMagicom ? _pSnes->LoadSuperMagicom(FirmwarePath, pMappedPath)
+                   : _pSnes->LoadSuperWildCard(FirmwarePath, pMappedPath)))
     {
+        if (!bMagicom)
+            _MainLoopSwcReleaseCartReserve();
         MainLoopModalPrintf(
             60 * 5,
             "SWC boot failed: %s",
