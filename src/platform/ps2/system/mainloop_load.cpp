@@ -118,9 +118,10 @@ static Bool _MainLoopEnsureSystemForType(PathExtTypeE eType)
     switch (eType)
     {
         case MAINLOOP_ENTRYTYPE_SNESROM:
+            return _MainLoopEnsureSnesSystem();
         case MAINLOOP_ENTRYTYPE_SNESWCBIOS:
         case MAINLOOP_ENTRYTYPE_SNESWCDISK:
-            return _MainLoopEnsureSnesSystem();
+            return TRUE;
         case MAINLOOP_ENTRYTYPE_NESROM:
             return _MainLoopEnsureNesSystem();
         case MAINLOOP_ENTRYTYPE_NESFDSDISK:
@@ -1319,10 +1320,11 @@ static Bool _MainLoopSwcEnsureCartReserve(Uint32 nBytes)
  * Failure remains non-fatal so disk-only boot retains the old low-RAM path. */
 static Uint32 _MainLoopSwcPrepareCartHeadroom()
 {
+    /* AURORA_SWC_32MBIT_FIRST_HEADROOM_V1_20260915
+     * Preserve exactly the 4 MiB needed by a classic 32-Mbit Game Pak.
+     * Reserving 8 MiB here only increases pre-core heap pressure; larger
+     * cartridges may still attempt their exact allocation at hot insert. */
     _MainLoopSwcReleaseCartReserve();
-
-    if (_MainLoopSwcEnsureCartReserve(MAINLOOP_SWC_CART_RESERVE_BYTES))
-        return MAINLOOP_SWC_CART_RESERVE_BYTES;
 
     if (_MainLoopSwcEnsureCartReserve(MAINLOOP_SWC_CART_32MBIT_BYTES))
         return MAINLOOP_SWC_CART_32MBIT_BYTES;
