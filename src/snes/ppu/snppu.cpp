@@ -33,9 +33,13 @@ void SnesPPU::WriteCGDATA(Uint8 uData)
 	{
 		Uint16 uColor = (Uint16)m_CGRAMLatch |
 		                ((Uint16)(uData & 0x7F) << 8);
-		Bool bChanged = m_CGRAM[uCGAddr] != uColor;
+		Bool bChanged = FALSE;
 
-		m_CGRAM[uCGAddr] = uColor;
+		if (IsCGRAMAccessAllowed())
+		{
+			bChanged = m_CGRAM[uCGAddr] != uColor;
+			m_CGRAM[uCGAddr] = uColor;
+		}
 
 		/* AURORA_REDUNDANT_CGRAM_ELIDE_V2
 		 * The write and CGADD advance remain identical. Only host-side
@@ -56,7 +60,14 @@ Uint8 SnesPPU::ReadCGDATA()
 
 	uCGAddr = m_Regs.cgadd.w >> 1;
 	uCGAddr&= SNESPPU_CGRAM_NUM-1;
-	if (!(m_Regs.cgadd.w&1))
+	if (!IsCGRAMAccessAllowed())
+	{
+		/* Hardware exposes the DAC's dot-selected CGRAM address here. The
+		 * scanline renderer cannot know that address yet, so retain PPU2 MDR
+		 * rather than incorrectly reading the software-selected CGADD entry. */
+		uData = m_PPU2MDR;
+	}
+	else if (!(m_Regs.cgadd.w&1))
 	{
 		// lower byte
 		uData =  m_CGRAM[uCGAddr] & 0xFF;
@@ -97,12 +108,52 @@ static Uint32 _SwizzleVramAddr(Uint32 uVramAddr, Uint32 uFullGraphic)
 }
 
 
+/* AURORA_PPU_MEMORY_V3_PPU_20260915
+ * Memory-port arbitration follows the high-confidence hardware windows used
+ * by ares/bsnes.  Exact dot-selected OAM/CGRAM contention addresses are a
+ * separate dot-raster concern; V3 keeps requested-address corruption out of
+ * the emulated memories when that address cannot be known. */
+Uint8 SnesPPU::BuildMemoryAccessFlags(Uint32 uLine, Uint32 uHClock) const
+{
+	Uint8 uFlags = 0;
+	if (uLine <= m_uFrameVisibleLines)
+		uFlags |= SNESPPU_MEMBUS_VRAM_OAM_BUSY;
+	if (uLine > 0 && uLine <= m_uFrameVisibleLines &&
+	    uHClock >= SNESPPU_CGRAM_ACTIVE_H_BEGIN &&
+	    uHClock < SNESPPU_CGRAM_ACTIVE_H_END)
+		uFlags |= SNESPPU_MEMBUS_CGRAM_BUSY;
+	return uFlags;
+}
+
+Bool SnesPPU::IsVRAMAccessAllowed() const
+{
+	return IsForceBlank() || !(m_uMemoryAccessFlags & SNESPPU_MEMBUS_VRAM_OAM_BUSY);
+}
+
+Bool SnesPPU::IsOAMAccessAllowed() const
+{
+	return IsForceBlank() || !(m_uMemoryAccessFlags & SNESPPU_MEMBUS_VRAM_OAM_BUSY);
+}
+
+Bool SnesPPU::IsCGRAMAccessAllowed() const
+{
+	return IsForceBlank() || !(m_uMemoryAccessFlags & SNESPPU_MEMBUS_CGRAM_BUSY);
+}
+
 /* AURORA_ACCURACY_VRAM_READ_BUFFER_V1
  * The S-PPU exposes a prefetched 16-bit VRAM data latch. $2116/$2117 fill
  * this latch; $2139/$213a return the old latch, then (on the selected port)
  * fetch the current VMADD word and advance VMADD. This is data, not an address. */
 void SnesPPU::UpdateVRAMReadBuffer()
 {
+	/* During active display VRAM is owned by the PPU. The read buffer is
+	 * filled with zero; the externally visible read still returns the OLD
+	 * buffer first, exactly like the normal prefetch pipeline. */
+	if (!IsVRAMAccessAllowed())
+	{
+		m_Regs.vmreadlatch.w = 0;
+		return;
+	}
 	Uint32 uVramAddr = _SwizzleVramAddr(
 		m_Regs.vmaddr.w, (m_Regs.vmain >> 2) & 3);
 	m_Regs.vmreadlatch.w = m_VRAM[uVramAddr];
@@ -120,9 +171,14 @@ void SnesPPU::WriteVMDATAL(Uint8 uData)
 
 	uVramAddr = _SwizzleVramAddr(m_Regs.vmaddr.w, (m_Regs.vmain >> 2) & 3);
 
-	bChanged = pVram[uVramAddr].b.l != uData;
-	pVram[uVramAddr].b.l = uData;
+	bChanged = FALSE;
+	if (IsVRAMAccessAllowed())
+	{
+		bChanged = pVram[uVramAddr].b.l != uData;
+		pVram[uVramAddr].b.l = uData;
+	}
 
+	/* Address increment is outside the VRAM write itself on hardware. */
 	m_Regs.vmaddr.w += m_Regs.vminc[0];
 
 	/* AURORA_REDUNDANT_VRAM_ELIDE_V2 */
@@ -141,8 +197,12 @@ void SnesPPU::WriteVMDATAH(Uint8 uData)
 
 	uVramAddr = _SwizzleVramAddr(m_Regs.vmaddr.w, (m_Regs.vmain >> 2) & 3);
 
-	bChanged = pVram[uVramAddr].b.h != uData;
-	pVram[uVramAddr].b.h = uData;
+	bChanged = FALSE;
+	if (IsVRAMAccessAllowed())
+	{
+		bChanged = pVram[uVramAddr].b.h != uData;
+		pVram[uVramAddr].b.h = uData;
+	}
 
 	m_Regs.vmaddr.w += m_Regs.vminc[1];
 
@@ -152,6 +212,15 @@ void SnesPPU::WriteVMDATAH(Uint8 uData)
 
 void SnesPPU::WriteVMDATALH(Uint8 uDataL, Uint8 uDataH)
 {
+	/* Preserve both port increments on an invalid active-display transfer.
+	 * The slow fallback is cold by definition and avoids duplicating VMAIN
+	 * increment-mode corner cases. */
+	if (!IsVRAMAccessAllowed())
+	{
+		WriteVMDATAL(uDataL);
+		WriteVMDATAH(uDataH);
+		return;
+	}
 #if SNDBG_LOG
 	g_DbgVRAMWrites += 2;
 #endif
@@ -192,6 +261,21 @@ void SnesPPU::WriteVMDATALH(Uint8 uDataL, Uint8 uDataH)
 
 void SnesPPU::WriteVMDATABlock(const Uint8 *pData, Int32 nBytes)
 {
+	if (!IsVRAMAccessAllowed())
+	{
+		/* Invalid active-display MDMA still clocks the two data ports and
+		 * therefore advances VMADD according to VMAIN. */
+		while (nBytes >= 2)
+		{
+			WriteVMDATAL(pData[0]);
+			WriteVMDATAH(pData[1]);
+			pData += 2;
+			nBytes -= 2;
+		}
+		if (nBytes) WriteVMDATAL(*pData);
+		return;
+	}
+
 	/* DMA mode 1 to $2118/$2119 is by far the most common path for tile
 	   uploads. With normal address mapping and increment-after-high, each
 	   byte pair is one consecutive VRAM word. Copy those words here and
@@ -365,7 +449,19 @@ void SnesPPU::WriteOAMDATA(Uint8 uData)
 	if (!(uAddress & 1))
 		m_OAMLatch = uData;
 
-	if (uAddress & 0x200)
+	if (!IsOAMAccessAllowed())
+	{
+		/* Accurate hardware redirects to the current OBJ-fetch latch. Until
+		 * V6 has dot timing, use the same $0218 contention approximation as
+		 * the mature ares performance PPU. Low-OAM even writes remain latch-only. */
+		if ((uAddress & 0x200) || (uAddress & 1))
+		{
+			Uint32 uPhysical = 0x218;
+			bChanged = pOamData[uPhysical] != uData;
+			pOamData[uPhysical] = uData;
+		}
+	}
+	else if (uAddress & 0x200)
 	{
 		Uint32 uPhysical = _MapOAMAddress(uAddress);
 		bChanged = pOamData[uPhysical] != uData;
@@ -390,6 +486,12 @@ void SnesPPU::WriteOAMDATA(Uint8 uData)
 
 void SnesPPU::WriteOAMBlock(const Uint8 *pData, Int32 nBytes)
 {
+	if (!IsOAMAccessAllowed())
+	{
+		/* Cold invalid-transfer path; preserve every latch/address side effect. */
+		while (nBytes-- > 0) WriteOAMDATA(*pData++);
+		return;
+	}
 	Uint8 *pOamData = (Uint8 *)&m_OAM;
 	Uint32 uAddress = m_Regs.oamaddr.w & 0x3FF;
 	Bool bChanged = FALSE;
@@ -438,7 +540,9 @@ Uint8 SnesPPU::ReadOAMDATA()
 {
 	Uint8	*pOamData = (Uint8 *)&m_OAM;
 	Uint32 uAddress = m_Regs.oamaddr.w & 0x3FF;
-	Uint8 uData = pOamData[_MapOAMAddress(uAddress)];
+	Uint32 uPhysical = IsOAMAccessAllowed()
+		? _MapOAMAddress(uAddress) : 0x218;
+	Uint8	uData = pOamData[uPhysical];
 
 	m_Regs.oamaddr.w = (m_Regs.oamaddr.w & 0x8000) |
 	                     ((uAddress + 1) & 0x3FF);
@@ -543,7 +647,13 @@ void SnesPPU::Write8(Uint32 uAddr, Uint8 uData)
 		break;
 
 	case 0x2106:	// mosaic (screen pixelation)
-		m_Regs.mosaic = uData;
+		/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+		if (m_Regs.mosaic != uData)
+		{
+			m_Regs.mosaic = uData;
+			m_uMosaicStartLine =
+				(m_uLine > 0 && m_uLine <= m_uFrameVisibleLines) ? m_uLine : 1;
+		}
 		break;
 
 	case 0x2107:	// bg1sc (BG1 vram location)
@@ -787,6 +897,12 @@ void SnesPPU::Write8(Uint32 uAddr, Uint8 uData)
 		break;
 
 	case 0x2133:	// SETINI (screen mode)
+		/* Screen interlace/overscan are frame-latched by BeginFrame().
+		 * Pseudo-hires and EXTBG remain live register state. OBJ interlace is
+		 * consumed by the V2 evaluator/fetcher, so a bit-1 change invalidates
+		 * every derived OBJ scanline before the next rendered line. */
+		if (((Uint8)m_Regs.setini ^ uData) & SNESPPU_SETINI_OBJ_INTERLACE)
+			m_pRender->SetUpdateFlags(SNESPPURENDER_UPDATE_OBJ);
 		m_Regs.setini = uData;
 		break;
 
@@ -848,6 +964,24 @@ Uint8 SnesPPU::Read8(Uint32 uAddr)
 */
 
 
+/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+Int32 SnesPPU::GetMode7MosaicSourceLine(Int32 iLine) const
+{
+	Int32 nSize;
+	Int32 nStart;
+
+	if (!(m_Regs.mosaic & 0x01))
+		return iLine;
+	nSize = (Int32)(((m_Regs.mosaic >> 4) & 0x0F) + 1);
+	if (nSize <= 1)
+		return iLine;
+	nStart = (Int32)m_uMosaicStartLine;
+	if (nStart < 1) nStart = 1;
+	if (iLine < nStart) return iLine;
+	return nStart + ((iLine - nStart) / nSize) * nSize;
+}
+
+
 void SnesPPU::SetRegionPAL(Bool bPAL)
 {
     if (bPAL)
@@ -860,14 +994,62 @@ void SnesPPU::BeginFrame()
 {
 	m_uLine   = 0;
     m_bVBlank = FALSE;
+    m_bRasterLineRendered = FALSE;
+
+	/* AURORA_SETINI_DISPLAY_V1_PPU_20260915
+	 * Hardware samples screen interlace/overscan for the frame at V=0.
+	 * Do not let a mid-frame SETINI write move this frame's VBlank edge. */
+	const Uint32 uPreviousVisibleLines = m_uFrameVisibleLines;
+	m_uFrameVisibleLines = (m_Regs.setini & SNESPPU_SETINI_OVERSCAN)
+		? SNESPPU_VISIBLE_LINES_OVERSCAN
+		: SNESPPU_VISIBLE_LINES_NORMAL;
+	m_bFrameInterlace = (m_Regs.setini & SNESPPU_SETINI_INTERLACE) != 0;
+	m_bTimingInterlace = m_bFrameInterlace;
+
+	/* AURORA_OBJ_STAT77_V2_PPU_20260915
+	 * Range/Time Over are sticky for the current picture and restart at V=0.
+	 * Preserve STAT77 version/open-bus/master bits while clearing only 6/7. */
+	m_Regs.stat77 &= (Uint8)~(SNESPPU_STAT77_RANGE_OVER |
+	                            SNESPPU_STAT77_TIME_OVER);
+
+	/* When 239-line output falls back to 224, retire pixels 225..239 from
+	 * the persistent GS output texture. Safe Frameskip can give us a NULL
+	 * target, so keep the request pending until every tail line was really
+	 * cleared on a presented frame. Overscan itself overwrites the tail. */
+	if (m_uFrameVisibleLines > SNESPPU_VISIBLE_LINES_NORMAL)
+	{
+		m_bInactiveTailClearPending = FALSE;
+	}
+	else
+	{
+		if (uPreviousVisibleLines > m_uFrameVisibleLines)
+			m_bInactiveTailClearPending = TRUE;
+		if (m_bInactiveTailClearPending && m_pRender)
+		{
+			Bool bCleared = TRUE;
+			for (Uint32 uLine = SNESPPU_VISIBLE_LINES_NORMAL + 1u;
+			     uLine <= SNESPPU_VISIBLE_LINES_OVERSCAN; ++uLine)
+			{
+				if (!m_pRender->ClearLine((Int32)uLine))
+					bCleared = FALSE;
+			}
+			if (bCleared)
+				m_bInactiveTailClearPending = FALSE;
+		}
+	}
+
+	/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+	m_uMosaicStartLine = 1;
+	m_Mode7LineHofs = m_Regs.m7hofs.w;
+	m_Mode7LineVofs = m_Regs.m7vofs.w;
 }
 
 void SnesPPU::EndFrame()
 {
+    /* AURORA_SAFE_RASTER_V4_PPU_20260915
+     * This is the VBlank edge, not the end of the physical field.
+     * OAM address reset belongs here; STAT78.field does not. */
     m_bVBlank = TRUE;
-
-	// toggle field
-	m_Regs.stat78^=0x80;
 
     // forced blanking?
     if (!(m_Regs.inidisp & 0x80))
@@ -880,61 +1062,105 @@ void SnesPPU::EndFrame()
     }
 }
 
-
-void SnesPPU::Sync(Uint32 uLine)
+void SnesPPU::AdvanceField()
 {
-	SNQueueElementT *pElement;
-#if SNDBG_LOG
-	Uint32 uAppliedWrites = 0;
-#endif
+    /* Field toggles on V-counter wrap, after the final scanline. */
+    m_Regs.stat78 ^= 0x80;
+}
 
-    // are we rendering?
-	if (!m_bVBlank)
-	{
-		while (m_uLine <= uLine)
-		{
-			// dequeue all pending writes before this line
-			while ( (pElement=m_Queue.Dequeue(m_uLine)) != NULL)
-			{
-				// perform write
-				Write8(pElement->uAddr, pElement->uData);
-#if SNDBG_LOG
-				uAppliedWrites++;
-#endif
-			}
 
-            // are we within a frame?
-            if (m_uLine > 0 && m_uLine < (224 + 1))
+
+void SnesPPU::ApplyQueuedWritesBefore(Uint32 uRasterTime)
+{
+    SNQueueElementT *pElement;
+    while ((pElement = m_Queue.Dequeue(uRasterTime)) != NULL)
+    {
+        m_uMemoryAccessFlags = pElement->uPad;
+        Write8(pElement->uAddr, pElement->uData);
+#if SNDBG_LOG
+        g_DbgPPUAppliedWrites++;
+#endif
+    }
+    m_uMemoryAccessFlags = 0;
+}
+
+void SnesPPU::Sync(Uint32 uLine, Uint32 uHClock)
+{
+    /* AURORA_DOT_RASTER_V6_PPU_20260915
+     * The old queue tagged only V and therefore every write made on line N
+     * became visible on N+1. V6 retains the scanline renderer but timestamps
+     * writes in master clocks. A line is sampled once at H=512: writes before
+     * that point are visible on the current line; writes at/after H=512 are
+     * committed after rendering and therefore affect the following line.
+     * Reads can catch the PPU up to the live H without rendering early. */
+    if (uHClock > SNESPPU_RASTER_H_MASK)
+        uHClock = SNESPPU_RASTER_H_MASK;
+
+    if (m_bVBlank)
+    {
+        SNQueueElementT *pElement;
+        while ((pElement = m_Queue.Dequeue()) != NULL)
+        {
+            m_uMemoryAccessFlags = pElement->uPad;
+            Write8(pElement->uAddr, pElement->uData);
+#if SNDBG_LOG
+            g_DbgPPUAppliedWrites++;
+#endif
+        }
+        m_uMemoryAccessFlags = 0;
+        return;
+    }
+
+    while (m_uLine <= uLine)
+    {
+        Uint32 uTargetH = (m_uLine < uLine)
+            ? SNESPPU_RASTER_H_FALLBACK : uHClock;
+
+        if (!m_bRasterLineRendered)
+        {
+            if (uTargetH < SNESPPU_RASTER_SNAPSHOT_H)
             {
-                // render a line
-				PROF_ENTER("PPURender");
-#if SNDBG_LOG
-				Uint32 _tPPU = ProfCtrGetCycle();
-				g_DbgPPURenderLines++;
-#endif
-				m_pRender->RenderLine(m_uLine);;
-#if SNDBG_LOG
-				g_TmgCycPPU += ProfCtrGetCycle() - _tPPU;
-#endif
-				PROF_LEAVE("PPURender");
-			}
+                ApplyQueuedWritesBefore(SnesPPURasterAfter(m_uLine, uTargetH));
+                break;
+            }
 
-			m_uLine  ++;
-		}
-	}
+            /* Strictly-before H=512 matches synchronize-before-MMIO ordering:
+             * a write timestamped exactly at the snapshot is a post-snapshot
+             * change and therefore must not repaint the already sampled line. */
+            ApplyQueuedWritesBefore(
+                SnesPPUPackRasterTime(m_uLine, SNESPPU_RASTER_SNAPSHOT_H));
 
-	// dequeue all pending writes
-	while ( (pElement=m_Queue.Dequeue()) != NULL)
-	{
-		// perform write
-		Write8(pElement->uAddr, pElement->uData);
+            /* Mode 7 line state must be captured AFTER pre-snapshot writes. */
+            m_Mode7LineHofs = m_Regs.m7hofs.w;
+            m_Mode7LineVofs = m_Regs.m7vofs.w;
+
+            if (m_uLine > 0 && m_uLine <= m_uFrameVisibleLines)
+            {
+                PROF_ENTER("PPURender");
 #if SNDBG_LOG
-		uAppliedWrites++;
+                Uint32 _tPPU = ProfCtrGetCycle();
+                g_DbgPPURenderLines++;
 #endif
-	}
+                m_pRender->RenderLine(m_uLine);
 #if SNDBG_LOG
-	g_DbgPPUAppliedWrites += uAppliedWrites;
+                g_TmgCycPPU += ProfCtrGetCycle() - _tPPU;
 #endif
+                PROF_LEAVE("PPURender");
+            }
+            m_bRasterLineRendered = TRUE;
+        }
+
+        /* Commit post-snapshot state through the caller's live H. It cannot
+         * change pixels already emitted for this line, but reads and the next
+         * scanline observe the correct register/latch ordering. */
+        ApplyQueuedWritesBefore(SnesPPURasterAfter(m_uLine, uTargetH));
+
+        if (m_uLine == uLine)
+            break;
+
+        ++m_uLine;
+        m_bRasterLineRendered = FALSE;
+    }
 }
 
 void SnesPPU::Reset()
@@ -942,6 +1168,11 @@ void SnesPPU::Reset()
 	m_pRender->SetUpdateFlags(SNESPPURENDER_UPDATE_ALL);
 	m_Queue.Reset();
 	m_uLine = 0;
+	m_bRasterLineRendered = FALSE;
+	m_uFrameVisibleLines = SNESPPU_VISIBLE_LINES_NORMAL;
+	m_bFrameInterlace = FALSE;
+	m_bTimingInterlace = FALSE;
+	m_bInactiveTailClearPending = FALSE;
 
 	memset(&m_Regs, 0, sizeof(m_Regs));
 	memset(&m_CGRAM, 0, sizeof(m_CGRAM));
@@ -953,6 +1184,11 @@ void SnesPPU::Reset()
 	/* AURORA_MEGA_V2_PPU_MDR_RESET */
 	m_PPU1MDR = 0;
 	m_PPU2MDR = 0;
+	m_uMemoryAccessFlags = 0;
+	/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+	m_Mode7LineHofs = 0;
+	m_Mode7LineVofs = 0;
+	m_uMosaicStartLine = 1;
 
 	// confirmed:
 	m_Regs.stat77 =  SNPPU_VERSION_5C77;
@@ -965,6 +1201,11 @@ void SnesPPU::SoftReset()
     m_Queue.Reset();
     m_uLine = 0;
     m_bVBlank = FALSE;
+    m_bRasterLineRendered = FALSE;
+    m_uFrameVisibleLines = SNESPPU_VISIBLE_LINES_NORMAL;
+    m_bFrameInterlace = FALSE;
+	m_bTimingInterlace = FALSE;
+    m_bInactiveTailClearPending = FALSE;
 
     /*
      * Reset only PPU registers/internal state.
@@ -976,6 +1217,11 @@ void SnesPPU::SoftReset()
 	/* AURORA_MEGA_V2_PPU_MDR_RESET */
 	m_PPU1MDR = 0;
 	m_PPU2MDR = 0;
+	m_uMemoryAccessFlags = 0;
+	/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+	m_Mode7LineHofs = 0;
+	m_Mode7LineVofs = 0;
+	m_uMosaicStartLine = 1;
 
     m_Regs.stat77 = SNPPU_VERSION_5C77;
     m_Regs.stat78 = SNPPU_VERSION_5C78;
@@ -984,10 +1230,20 @@ void SnesPPU::SoftReset()
 SnesPPU::SnesPPU()
 {
 	m_pRender = NULL;
+	m_bRasterLineRendered = FALSE;
+	m_uFrameVisibleLines = SNESPPU_VISIBLE_LINES_NORMAL;
+	m_bFrameInterlace = FALSE;
+	m_bTimingInterlace = FALSE;
+	m_bInactiveTailClearPending = FALSE;
 	m_OAMLatch = 0;
 	m_CGRAMLatch = 0;
 	m_PPU1MDR = 0;
 	m_PPU2MDR = 0;
+	m_uMemoryAccessFlags = 0;
+	/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+	m_Mode7LineHofs = 0;
+	m_Mode7LineVofs = 0;
+	m_uMosaicStartLine = 1;
 }
 
 #ifdef SNES_DEBUG

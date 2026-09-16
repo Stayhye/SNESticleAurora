@@ -556,18 +556,12 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
 
 	SNPPUColorCalibrate(&_ColorCalib);
 
-	// create nes machine
-	_pSnes = new SnesSystem();
-	_pSnes->Reset();
-
+	/* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914
+	 * System objects are created on demand by mainloop_load.cpp.
+	 * Keep the small ROM descriptor resident for browser/loading. */
 	_pSnesRom = new SnesRom();
 
-	/* AURORA_GAMBATTE_STANDALONE_V2_20260908 */
-	_pGb = new GambatteSystem();
-	_pGb->Reset();
-	/* AURORA_GPSP_GBA_V1_20260911 */
-	_pGba = new GpSPSystem();
-	_pGba->Reset();
+	/* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914: GB/GBA System wrappers are lazy. */
 	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"sfc");
 	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"smc");
 	PathExtAdd(MAINLOOP_ENTRYTYPE_SNESROM, (char *)"fig");
@@ -597,12 +591,7 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
 	   The NesSystem::ExecuteFrame() body is still a STUB - selecting
 	   a .nes paints a diagnostic test pattern. Real InfoNES wiring
 	   comes in Phase 3. */
-	_pNes = new NesSystem();
-	_pNes->Reset();
-
-	/* AURORA_FCEUMM_FDS_V0_5_INIT: dedicated FDS system; .nes stays QuickNES. */
-	_pFds = new FdsSystem();
-	_pFds->Reset();
+	/* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914: NES/FDS System wrappers are lazy. */
 
 	_pNesRom = new NesRom();
 	for (Uint32 iExt=0; iExt < _pNesRom->GetNumExts(); iExt++)
@@ -613,8 +602,7 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
 	PathExtAdd(MAINLOOP_ENTRYTYPE_NESPALETTE, (char *)"pal");
 
 	/* AURORA_PICODRIVE_STAGE2_INIT */
-	_pSega = new SegaSystem();
-	_pSega->Reset();
+	/* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914: PicoDrive System wrapper is lazy. */
 	_pSegaRom = new SegaRom();
 	for (Uint32 iExt=0; iExt < _pSegaRom->GetNumExts(); iExt++)
 	{
@@ -622,8 +610,7 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
 	}
 
 	/* AURORA_PCE_EXPERIMENTAL_V1 */
-	_pPce = new PceSystem();
-	_pPce->Reset();
+	/* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914: PCE System wrapper is lazy. */
 	_pPceRom = new PceRom();
 	for (Uint32 iExt=0; iExt < _pPceRom->GetNumExts(); iExt++)
 	{
@@ -648,21 +635,10 @@ TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
 		PathExtAdd(MAINLOOP_ENTRYTYPE_NESFDSBIOS, _pNesFDSBios->GetExtName(iExt));
 	}
 
-	/* SNESTICLE_MOVIE_MAX_SYSTEM_STATE
-	 * MovieClip::RecordBegin changes m_uStateSize to the ACTIVE system and
-	 * asserts it is <= the constructor maximum. Allocate for whichever
-	 * core has the larger frontend state envelope instead of assuming SNES. */
-	{
-		Uint32 uMovieStateBytes = (Uint32)_pSnes->GetStateSize();
-		Uint32 uNesStateBytes   = (Uint32)_pNes->GetStateSize();
-		if (uNesStateBytes > uMovieStateBytes)
-			uMovieStateBytes = uNesStateBytes;
-		/* AURORA_GPSP_GBA_V1_20260911 */
-		Uint32 uGbaStateBytes   = _pGba ? (Uint32)_pGba->GetStateSize() : 0U;
-		if (uGbaStateBytes > uMovieStateBytes)
-			uMovieStateBytes = uGbaStateBytes;
-		s_pMovieClip = new Emu::MovieClip(uMovieStateBytes, 60 * 60 * 60);
-	}
+	/* AURORA_WILDCARD_32MBIT_CORE_LIFECYCLE_V1_20260914
+	 * MovieClip learns state size from the active core at RecordBegin().
+	 * No System needs to exist merely to query GetStateSize(). */
+	s_pMovieClip = new Emu::MovieClip(0, 60 * 60 * 60);
 
 	// init menu
 	/* AURORA_STABLEINIT_V6_2_20260824

@@ -69,7 +69,11 @@ void SNSpcIO::SyncQueueAll()
 	m_Queue.Reset();
 }
 
-inline void SNSpcIO::SyncQueue(Uint32 uCycle)
+/* AURORA_BLIZZARD_APUIO_QUEUE_ORDER_V1_20260914
+ * SyncSPC's ordered APUIO-read path calls this from snes.cpp too;
+ * keep a normal externally linkable definition rather than an inline
+ * definition hidden in this translation unit. */
+void SNSpcIO::SyncQueue(Uint32 uCycle)
 {
 	SNQueueElementT *pElement;
 

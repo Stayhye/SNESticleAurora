@@ -12,6 +12,8 @@ bool PicoDriveBridge_Init(void);
 void PicoDriveBridge_Shutdown(void);
 /* AURORA_DYNAMIC_ROM_BUFFER_V1_20260823 */
 size_t PicoDriveBridge_RequiredRomCapacity(size_t nBytes);
+/* AURORA_LARGE_MD_COMPACT_V2_20260914: compact backing for validated plain MD >4 MiB. */
+size_t PicoDriveBridge_CompactMegaDriveCapacity(size_t nBytes);
 bool PicoDriveBridge_LoadGame(const void *pData, size_t nBytes,
                               size_t nCapacity, const char *pName);
 /* AURORA_SUPER_MAGIC_DRIVE_V1_20260902 */

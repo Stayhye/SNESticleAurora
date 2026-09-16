@@ -442,8 +442,19 @@ static void _MainLoopStateConfirmPromptClose()
         /* AURORA_AUDIO_UI_SOFT_TRANSITION_V1_20260901
          * Isolated quick-state prompt: it never scheduled normal menu SRAM
          * work or entered menu BGM, so do not route its close through
-         * _MenuEnable(FALSE), which performs a destructive audsrv hard-cut. */
-        _bMenu = FALSE;
+         * _MenuEnable(FALSE), which performs a destructive audsrv hard-cut.
+         *
+         * AURORA_EMPTY_FRONTEND_INVARIANT_V1_20260914: with lazy cores, a System may no longer
+         * exist. Never manufacture gameplay-without-core here. */
+        if (_pSystem)
+        {
+                _bMenu = FALSE;
+        }
+        else
+        {
+                _MainLoopSetScreen((CScreen *)_MainLoop_pBrowserScreen);
+                _bMenu = TRUE;
+        }
 }
 
 void _MainLoopStateConfirmPromptOpen(Bool bSave)

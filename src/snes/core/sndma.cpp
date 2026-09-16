@@ -13,6 +13,7 @@ extern "C" {
 #include "snppu.h"
 #include "snsdd1.h"
 #include "sndbglog.h"
+#include "sntiming.h"
 
 #define SNESDMA_DEBUG 0
 
@@ -143,13 +144,24 @@ static _INLINE Uint8 SnesHDMARead8(SNCpuT *pCPU, Uint32 uAddr)
  * Queue-full returns FALSE so the caller takes the original path, which
  * performs SyncPPU() as needed and retries the write.
  */
+/* AURORA_DOT_RASTER_V6_DMA_20260915 */
 static _INLINE Bool SnesHDMATryQueuePPUWrite(
-    SnesPPU *pPPU, Uint32 uLine, Uint8 uPortB, Uint8 uData)
+    SnesPPU *pPPU, Uint32 uLine, Uint32 uHClock,
+    Uint8 uPortB, Uint8 uData)
 {
     if (uPortB < 0x40)
     {
+        /* AURORA_CUMULATIVE_V5_DMA_20260915 */
+        Uint8 uMemoryAccessFlags = 0;
+        if (uPortB == 0x04 || uPortB == 0x18 ||
+            uPortB == 0x19 || uPortB == 0x22)
+        {
+            uMemoryAccessFlags =
+                pPPU->BuildMemoryAccessFlags(uLine, SNES_HDMA_START_CYCLE);
+        }
         return pPPU->EnqueueWrite(
-            uLine, 0x2100u | (Uint32)uPortB, uData, FALSE);
+            uLine, 0x2100u | (Uint32)uPortB, uData, FALSE,
+            uMemoryAccessFlags, uHClock);
     }
 
     return FALSE;
@@ -168,6 +180,17 @@ static _INLINE Bool SnesDMAPathTouches16(Uint16 uStart, Uint32 nBytes,
 	else
 		uDistance = ((Uint32)uStart - uHi) & 0xFFFFu;
 	return uDistance < nBytes;
+}
+
+/* AURORA_PPU_MEMORY_V3_DMA_20260915 */
+static Bool SnesDMAChannelTouchesBPort(const SnesDMAChT *pChan, Uint8 uTarget)
+{
+	Uint32 i;
+	Uint8 uMode = (Uint8)(pChan->dmapx & 7);
+	for (i = 0; i < 4; i++)
+		if ((Uint8)(pChan->bbadx + _SNDma_MDMATransfer[uMode][i]) == uTarget)
+			return TRUE;
+	return FALSE;
 }
 
 static Bool SnesDMAChannelNeedsAccurateBus(const SnesDMAChT *pChan)
@@ -619,7 +642,51 @@ void SnesDMAC::TransferData(SnesDMAChT *pChan, Uint8 *pData, Int32 nBytes)
     if (nBytes > 0)
         m_pCPU->uMDR = pData[nBytes - 1];
 
+    if (!m_pPPU->IsForceBlank() &&
+        !(m_pSDD1 && m_pSDD1->DmaActive()) &&
+        m_uRasterLine > 0 &&
+        m_uRasterLine <= m_pPPU->GetFrameVisibleLineCount() &&
+        SnesDMAChannelTouchesBPort(pChan, 0x22))
+    {
+        Uint8 *pTransfer = _SNDma_MDMATransfer[pChan->dmapx & 7];
+        while (nBytes > 0)
+        {
+            Uint8 uData = *pData++;
+            Uint8 uPortB = (Uint8)(pChan->bbadx + pTransfer[uPhase]);
+            uPhase = (Uint8)((uPhase + 1) & 3);
+
+            SNCPUConsumeCycles(m_pCPU, SNCPU_CYCLE_SLOW);
+            m_pPPU->SetMemoryAccessFlags(
+                m_pPPU->BuildMemoryAccessFlags(
+                    m_uRasterLine,
+                    (Uint32)SNCPUGetCounter(m_pCPU, SNCPU_COUNTER_LINE)));
+
+            switch (uPortB)
+            {
+            case 0x04: m_pPPU->WriteOAMDATA(uData); break;
+            case 0x18: m_pPPU->WriteVMDATAL(uData); break;
+            case 0x19: m_pPPU->WriteVMDATAH(uData); break;
+            case 0x22: m_pPPU->WriteCGDATA(uData); break;
+            default:
+                if (uPortB < 0x40)
+                    SnesDMAWritePPUPort(m_pPPU, uPortB, uData);
+                else
+                    SNCPUWrite8(m_pCPU, 0x2100 + uPortB, uData);
+                break;
+            }
+            nBytes--;
+        }
+        m_MDMAPhase[uChan] = uPhase;
+        m_pPPU->SetMemoryAccessFlags(0);
+        return;
+    }
+
     SNCPUConsumeCycles(m_pCPU, SNCPU_CYCLE_SLOW * nBytes);
+
+    m_pPPU->SetMemoryAccessFlags(
+        m_pPPU->BuildMemoryAccessFlags(
+            m_uRasterLine,
+            (Uint32)SNCPUGetCounter(m_pCPU, SNCPU_COUNTER_LINE)));
 
     /* AURORA_V82_MDMA_BYTE_SLICING
      * V8.1's fast path rounded every slice UP to a four-byte group because
@@ -699,6 +766,7 @@ void SnesDMAC::TransferData(SnesDMAChT *pChan, Uint8 *pData, Int32 nBytes)
     }
 
     m_MDMAPhase[uChan] = uPhase;
+    m_pPPU->SetMemoryAccessFlags(0);
 }
 
 
@@ -1056,7 +1124,9 @@ void SnesDMAC::ProcessHDMACh(Uint32 uChan, Uint32 uLine)
 			 * whenever the PPU queue is full. Emulated HDMA cycle charging
 			 * remains below, unchanged. */
 			if (!SnesHDMATryQueuePPUWrite(
-			        m_pPPU, uLine, uPortB, uData))
+			        m_pPPU, uLine,
+			        (Uint32)SNCPUGetCounter(m_pCPU, SNCPU_COUNTER_LINE),
+			        uPortB, uData))
 			{
 				SnesDMAWriteB(m_pCPU, uAddrA, uPortB, uData);
 			}
@@ -1257,4 +1327,5 @@ void SnesDMAC::Reset()
 	m_HDMAEnable = 0;
 	m_HDMAEnded = 0;
 	m_HDMADoTransfer = 0;
+	m_uRasterLine = 0;
 }

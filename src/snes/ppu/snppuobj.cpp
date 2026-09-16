@@ -44,6 +44,38 @@ Bool _SnesPPUOBJVisibleX(Uint16 uPosX, Uint8 uWidth)
 }
 
 
+/* AURORA_OBJ_STAT77_V2_OBJ_20260915
+ * SETINI.1 halves the number of display scanlines occupied by an OBJ while
+ * selecting alternating source rows by field. The documented 16x32 quirk is
+ * harsher: it behaves as the top 16x16 only, squeezed into 8 display lines.
+ * 32x64 follows the ordinary interlace rule. */
+static _INLINE Uint32 _SnesPPUOBJDisplayHeight(
+	const SnesRenderObjT *pObj, Bool bObjInterlace)
+{
+	if (!bObjInterlace)
+		return pObj->uHeight;
+	if (pObj->uWidth == 16 && pObj->uHeight == 32)
+		return 8;
+	return (Uint32)pObj->uHeight >> 1;
+}
+
+static _INLINE Uint16 _SnesPPUOBJCountPhysicalSlivers(
+	const SnesRenderObjT *pObj)
+{
+	Int32 iObjectX;
+	Int32 iFirstTile;
+	Int32 nTiles;
+
+	iObjectX = (pObj->uPosX & 0x100)
+		? ((Int32)(pObj->uPosX & 0x1FF) - 512)
+		: (Int32)(pObj->uPosX & 0x1FF);
+	_SnesPPUOBJCountedTileRange(
+		pObj->uPosX, iObjectX, pObj->uWidth, &iFirstTile, &nTiles);
+	(void)iFirstTile;
+	return (Uint16)nTiles;
+}
+
+
 #if SNDBG_DEEP
 static Uint32 _ObjCountBits8(Uint32 v)
 {
@@ -58,7 +90,8 @@ static Uint32 _ObjCountBits8(Uint32 v)
 void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 	const SnesRenderObj8T *pObjLine, Int32 nObjLine,
 	const SNMaskT *pWindow, const SNMaskT *pMask,
-	SNMaskT *pAddSubMask, Bool bAddSubMask)
+	SNMaskT *pAddSubMask, Bool bAddSubMask,
+	Uint8 *pDirectAttrib, Uint8 uDirectShift)
 {
 	SNMaskT ObjMask;
 	SNMaskT PriorityMask[4];
@@ -173,6 +206,19 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 			 * avoids eight branches in sprite-heavy scenes (Top Gear). */
 			if (!uVisible)
 				continue;
+
+			/* AURORA_V4_MODE34_DIRECT_COLOR_20260915
+			 * OBJ is composited after BG1. Clear Direct Color ownership only
+			 * for OBJ pixels that survived window and priority masking. */
+			if (pDirectAttrib)
+			{
+				const Uint8 uKeep = uDirectShift ? 0x0F : 0xF0;
+				Int32 iDirect;
+				for (iDirect = 0; iDirect < 8; iDirect++)
+					if (uVisible & (1u << iDirect))
+						pDirectAttrib[iPosX + iDirect] &= uKeep;
+			}
+
 			if (uVisible == 0xFF)
 			{
 				memcpy(pDest8, pObjData, 8);
@@ -226,6 +272,8 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 				}
 
 				pLine8[iX] = pObjData[iPixel];
+				if (pDirectAttrib)
+					pDirectAttrib[iX] &= uDirectShift ? 0x0F : 0xF0;
 #if SNDBG_DEEP
 				g_DbgObjDrawnPixels++;
 #endif
@@ -438,11 +486,12 @@ static Bool _SnesPPUOBJScreenLimiterVisibleX(Uint16 uPosX, Uint8 uWidth)
 	return iX < 256 && iX > -(Int32)uWidth;
 }
 
-static Bool _SnesPPUOBJScreenLimiterVisibleY(Uint32 uObjY, Uint32 uObjSize)
+static Bool _SnesPPUOBJScreenLimiterVisibleY(
+	Uint32 uObjY, Uint32 uObjSize, Uint32 uLineCount)
 {
 	while (uObjSize > 0)
 	{
-		if (uObjY < SNPPU_MAXLINE)
+		if (uObjY < uLineCount)
 			return TRUE;
 		uObjY = (uObjY + 1) & 0xFF;
 		uObjSize--;
@@ -452,130 +501,187 @@ static Bool _SnesPPUOBJScreenLimiterVisibleY(Uint32 uObjY, Uint32 uObjSize)
 
 void SnesPPURender::UpdateOBJVisibility(Uint8 *pObjY, Uint8 *pObjSize, Int32 iObj, Int32 nObjs)
 {
-	Int32 screenBudget=SNPPURenderGetObjScreenBudget();
-	Bool screenLimited=screenBudget<SNESPPU_OBJ_NUM;
-	Bool trackTiles=SNPPURenderGetObjTileBudget()<SNPPU_MAXOBJCHR;
-	memset(m_nObjLine,0,sizeof(m_nObjLine));
-	/* AURORA_SAFE_HOTPATH_V4: stale pressure is harmless whenever trackTiles is false;
-	   RenderLine8 now short-circuits before consulting it in that case. */
-	if (trackTiles)
-		memset(m_nObjTilePotential,0,sizeof(m_nObjTilePotential));
+	const Int32 screenBudget = SNPPURenderGetObjScreenBudget();
+	const Bool screenLimited = screenBudget < SNESPPU_OBJ_NUM;
+	/* AURORA_SETINI_DISPLAY_V1_OBJ_20260915
+	 * V2 supersedes V1's visibility implementation but retains its active
+	 * 224/239-line contract and marker for cumulative-idempotency checks. */
+	const Uint32 lineCount = m_pPPU->GetFrameVisibleLineCount() + 1u;
+	const Bool bObjInterlace = m_pPPU->IsObjInterlace();
+	const SnesPPURegsT *pRegs = m_pPPU->GetRegs();
+	const Bool bFirstSpritePlusY =
+		(pRegs->oamaddr.w & 0x8000) != 0 &&
+		(pRegs->oamaddr.w & 3) == 3;
 
-	/* AURORA_ACCURACY_OAM_FIRSTSPRITE_Y_V1_VIS_20260825
-	 * reference emulator's special priority-rotation case is:
-	 *     OAMPriorityRotation && OAMFlip && (OAMAddr & 1)
-	 *
-	 * Aurora stores the internal OAM address in BYTE phases, therefore
-	 * OAMFlip==1 plus odd word address maps exactly to (oamaddr & 3) == 3.
-	 * In that state the PPU's range evaluation starts at
-	 *     (FirstSprite + scanline) & 127
-	 * independently for each line, before the existing 32-OBJ/34-tile limits.
-	 *
-	 * Keep Aurora's non-hardware per-screen limiter on its established path;
-	 * this branch covers normal hardware behavior and the scanline limiter. */
-	if (!screenLimited)
+	(void)pObjSize;
+	memset(m_nObjLine, 0, sizeof(m_nObjLine));
+	memset(m_nObjTilePotential, 0, sizeof(m_nObjTilePotential));
+	memset(m_ObjRangeOver, 0, sizeof(m_ObjRangeOver));
+	memset(m_ObjTimeOver, 0, sizeof(m_ObjTimeOver));
+
+	/* Phase 1: physical range evaluation. Keep at most the first 32 OBJ in
+	 * the current priority traversal and remember the real 33rd candidate.
+	 * Sliver pressure is accumulated only from those selected 32 OBJ. */
+	if (bFirstSpritePlusY)
 	{
-		const SnesPPURegsT *pRegs = m_pPPU->GetRegs();
-		Bool bFirstSpritePlusY =
-			(pRegs->oamaddr.w & 0x8000) != 0 &&
-			(pRegs->oamaddr.w & 3) == 3;
-
-		if (bFirstSpritePlusY)
+		const Int32 baseFirst = iObj & 0x7F;
+		for (Int32 line = 0; line < (Int32)lineCount; line++)
 		{
-			Int32 baseFirst = iObj & 0x7F;
+			Int32 obj = (baseFirst + line) & 0x7F;
+			Int32 left = nObjs;
 
-			for (Int32 line = 0; line < SNPPU_MAXLINE; line++)
+			while (left-- > 0)
 			{
-				Int32 obj = (baseFirst + line) & 0x7F;
-				Int32 left = nObjs;
+				const SnesRenderObjT *pObj = &m_Objs[obj];
+				const Uint32 displayHeight =
+					_SnesPPUOBJDisplayHeight(pObj, bObjInterlace);
+				const Uint32 relY =
+					((Uint32)line - (Uint32)pObjY[obj]) & 0xFF;
 
-				while (left > 0 && m_nObjLine[line] < SNPPU_MAXOBJ)
+				if (relY < displayHeight &&
+				    _SnesPPUOBJVisibleX(pObj->uPosX, pObj->uWidth))
 				{
-					Uint32 relY =
-						((Uint32)line - (Uint32)pObjY[obj]) & 0xFF;
-
-					if (relY < pObjSize[obj] &&
-					    _SnesPPUOBJVisibleX(m_Objs[obj].uPosX,
-					                           m_Objs[obj].uWidth))
+					if (m_nObjLine[line] < SNPPU_MAXOBJ)
 					{
 						m_ObjLine[line][m_nObjLine[line]++] = (Uint8)obj;
+						m_nObjTilePotential[line] +=
+							_SnesPPUOBJCountPhysicalSlivers(pObj);
+					}
+					else
+					{
+						m_ObjRangeOver[line] = 1;
+						break;
+					}
+				}
+				obj = (obj + 1) & 0x7F;
+			}
+		}
+	}
+	else
+	{
+		Int32 obj = iObj;
+		Int32 left = nObjs;
+		while (left-- > 0)
+		{
+			SnesRenderObjT *pObj;
+			Uint32 y;
+			Uint32 h;
+			Uint16 slivers;
 
-						if (trackTiles)
+			obj &= 0x7F;
+			pObj = &m_Objs[obj];
+			h = _SnesPPUOBJDisplayHeight(pObj, bObjInterlace);
+			y = pObjY[obj];
+			slivers = _SnesPPUOBJCountPhysicalSlivers(pObj);
+
+			if (_SnesPPUOBJVisibleX(pObj->uPosX, pObj->uWidth))
+			{
+				while (h-- > 0)
+				{
+					if (y < lineCount)
+					{
+						if (m_nObjLine[y] < SNPPU_MAXOBJ)
 						{
-							Int32 x = (m_Objs[obj].uPosX & 0x100)
-								? ((Int32)(m_Objs[obj].uPosX & 0x1FF) - 512)
-								: (Int32)(m_Objs[obj].uPosX & 0x1FF);
-							Int32 counted = 0;
-
-							for (Int32 t = 0;
-							     t < (m_Objs[obj].uWidth >> 3); t++)
-							{
-								if (_SnesPPUOBJTileCountedX(
-									m_Objs[obj].uPosX, x + (t << 3)))
-									counted++;
-							}
-							m_nObjTilePotential[line] += (Uint16)counted;
+							m_ObjLine[y][m_nObjLine[y]++] = (Uint8)obj;
+							m_nObjTilePotential[y] += slivers;
+						}
+						else
+						{
+							m_ObjRangeOver[y] = 1;
 						}
 					}
-
-					obj = (obj + 1) & 0x7F;
-					left--;
+					y = (y + 1) & 0xFF;
 				}
 			}
-			return;
+			obj++;
 		}
 	}
 
-	if (!screenLimited && !trackTiles)
+	/* Phase 2: the 34-sliver fetch limit is applied only to the OBJ selected
+	 * by phase 1. Equality is legal; the 35th counted sliver sets Time Over.
+	 * Actual dropout order remains in _FetchOBJ: selected OBJ are traversed
+	 * in reverse, while each OBJ advances left-to-right onscreen. */
+	for (Uint32 line = 0; line < lineCount; line++)
 	{
-		while (nObjs>0)
-		{
-			Uint32 y,h; iObj&=0x7F; h=pObjSize[iObj]; y=pObjY[iObj];
-			if (_SnesPPUOBJVisibleX(m_Objs[iObj].uPosX,m_Objs[iObj].uWidth))
-				while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; y++; h--; }
-			iObj++; nObjs--;
-		}
-		return;
+		if (m_nObjTilePotential[line] > SNPPU_MAXOBJCHR)
+			m_ObjTimeOver[line] = 1;
 	}
+
 	if (!screenLimited)
-	{
-		while (nObjs>0)
-		{
-			Uint32 y,h; Int32 counted=0; iObj&=0x7F; h=pObjSize[iObj]; y=pObjY[iObj];
-			if (_SnesPPUOBJVisibleX(m_Objs[iObj].uPosX,m_Objs[iObj].uWidth))
-			{
-				Int32 x=(m_Objs[iObj].uPosX&0x100)?((Int32)(m_Objs[iObj].uPosX&0x1FF)-512):(Int32)(m_Objs[iObj].uPosX&0x1FF);
-				for (Int32 t=0;t<(m_Objs[iObj].uWidth>>3);t++) if (_SnesPPUOBJTileCountedX(m_Objs[iObj].uPosX,x+(t<<3))) counted++;
-				while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) { m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; m_nObjTilePotential[y]+=(Uint16)counted; } y++; h--; }
-			}
-			iObj++; nObjs--;
-		}
 		return;
-	}
+
+	/* Aurora's optional per-screen limiter is non-hardware policy. Rebuild
+	 * only the render list after the physical flags above are frozen. */
 	{
-		Uint8 candidates[SNESPPU_OBJ_NUM],selected[SNESPPU_OBJ_NUM]; Int32 nc=0,so=iObj,sn=nObjs,io=iObj,nn=nObjs;
-		memset(selected,0,sizeof(selected));
-		while (nn>0)
+		Uint8 candidates[SNESPPU_OBJ_NUM];
+		Uint8 selected[SNESPPU_OBJ_NUM];
+		Int32 nc = 0;
+		Int32 obj = iObj;
+		Int32 left = nObjs;
+
+		memset(selected, 0, sizeof(selected));
+		while (left-- > 0)
 		{
-			Uint32 y,h; Bool keep; io&=0x7F; h=pObjSize[io]; y=pObjY[io];
-			keep=_SnesPPUOBJVisibleX(m_Objs[io].uPosX,m_Objs[io].uWidth) &&
-			     _SnesPPUOBJScreenLimiterVisibleX(m_Objs[io].uPosX,m_Objs[io].uWidth) &&
-			     _SnesPPUOBJScreenLimiterVisibleY(y,h);
-			if (keep && nc<SNESPPU_OBJ_NUM) candidates[nc++]=(Uint8)io;
-			io++; nn--;
+			SnesRenderObjT *pObj;
+			Uint32 h;
+			Uint32 y;
+			Bool keep;
+
+			obj &= 0x7F;
+			pObj = &m_Objs[obj];
+			h = _SnesPPUOBJDisplayHeight(pObj, bObjInterlace);
+			y = pObjY[obj];
+			keep = _SnesPPUOBJVisibleX(pObj->uPosX, pObj->uWidth) &&
+			       _SnesPPUOBJScreenLimiterVisibleX(pObj->uPosX, pObj->uWidth) &&
+			       _SnesPPUOBJScreenLimiterVisibleY(y, h, lineCount);
+			if (keep && nc < SNESPPU_OBJ_NUM)
+				candidates[nc++] = (Uint8)obj;
+			obj++;
 		}
+
 		if (nc)
 		{
-			Int32 keep=nc<screenBudget?nc:screenBudget,start=0;
-			if (nc>screenBudget) start=(Int32)(((g_SnesObjLimitFramePhase%(Uint32)nc)*(Uint32)screenBudget)%(Uint32)nc);
-			for (Int32 i=0;i<keep;i++) selected[candidates[(start+i)%nc]]=1;
+			const Int32 keep = nc < screenBudget ? nc : screenBudget;
+			Int32 begin = 0;
+			if (nc > screenBudget)
+				begin = (Int32)(((g_SnesObjLimitFramePhase % (Uint32)nc) *
+					(Uint32)screenBudget) % (Uint32)nc);
+			for (Int32 i = 0; i < keep; i++)
+				selected[candidates[(begin + i) % nc]] = 1;
 		}
-		iObj=so; nObjs=sn;
-		while (nObjs>0)
+
+		memset(m_nObjLine, 0, sizeof(m_nObjLine));
+		memset(m_nObjTilePotential, 0, sizeof(m_nObjTilePotential));
+
+		obj = iObj;
+		left = nObjs;
+		while (left-- > 0)
 		{
-			Uint32 y,h; iObj&=0x7F; h=pObjSize[iObj]; y=pObjY[iObj];
-			if (selected[iObj]) while (h > 0) { if (y<SNPPU_MAXLINE && m_nObjLine[y]<SNPPU_MAXOBJ) m_ObjLine[y][m_nObjLine[y]++]=(Uint8)iObj; y++; h--; }
-			iObj++; nObjs--;
+			SnesRenderObjT *pObj;
+			Uint32 y;
+			Uint32 h;
+			Uint16 slivers;
+
+			obj &= 0x7F;
+			if (!selected[obj])
+			{
+				obj++;
+				continue;
+			}
+			pObj = &m_Objs[obj];
+			h = _SnesPPUOBJDisplayHeight(pObj, bObjInterlace);
+			y = pObjY[obj];
+			slivers = _SnesPPUOBJCountPhysicalSlivers(pObj);
+			while (h-- > 0)
+			{
+				if (y < lineCount && m_nObjLine[y] < SNPPU_MAXOBJ)
+				{
+					m_ObjLine[y][m_nObjLine[y]++] = (Uint8)obj;
+					m_nObjTilePotential[y] += slivers;
+				}
+				y = (y + 1) & 0xFF;
+			}
+			obj++;
 		}
 	}
 }

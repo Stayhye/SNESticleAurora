@@ -73,6 +73,7 @@ struct GpSPSystem::Impl
     Uint8 *tfaData;
     Uint32 romCRC;
     Uint32 romBytes; /* AURORA_GBA_STATE_TFA_CONNECTION_V1_20260913: state identity, no extra ROM pass */
+    Uint32 romGameCode; /* AURORA_V4_1B_TFA_GAMECODE_20260914: GBA header 0xAC..0xAF; TFA attachment identity */
 
     Impl()
         : initialized(FALSE), loaded(FALSE), pad(0),
@@ -80,7 +81,7 @@ struct GpSPSystem::Impl
           target(NULL), mix(NULL),
           directVideoData(NULL), directVideoW(0), directVideoH(0),
           directVideoPitch(0), directVideoValid(FALSE),
-          tfaData(NULL), romCRC(0), romBytes(0)
+          tfaData(NULL), romCRC(0), romBytes(0), romGameCode(0) /* AURORA_V4_1B_TFA_GAMECODE_20260914 */
     {
         systemDirectory[0] = 0;
     }
@@ -547,18 +548,61 @@ GpSPSystem::~GpSPSystem()
     UnloadGame();
 }
 
-/* AURORA_GPSP_GBA_V2_TFA_BLEND_20260911
- * Strict No-Intro CRC whitelist.  Do not enable the accessory from title/game
- * code alone: hacks, overdumps and translations must not accidentally get a
- * physical Turbo File attached. */
-static const Uint32 AURORA_GBA_TFA_CRC_DERBY = 0x9746EF12U;
-static const Uint32 AURORA_GBA_TFA_CRC_TSUKURU = 0xE7FC81D0U;
+/* AURORA_V4_1B_TFA_GAMECODE_20260914
+ * Turbo File Advance is cartridge functionality, so select it from the
+ * official 4-byte GBA game code at header offsets 0xAC..0xAF rather than
+ * tying hardware presence to one exact ROM dump CRC.
+ *
+ * Header bytes are packed little-endian only for cheap comparison here:
+ *   A8PJ -> 0x4A503841  Derby Stallion Advance
+ *   A8TJ -> 0x4A543841  RPG Tsukuru Advance
+ *
+ * romCRC is deliberately retained elsewhere for Aurora's game/state identity;
+ * it no longer decides whether the physical accessory exists.
+ */
+static const Uint32 AURORA_GBA_TFA_CODE_DERBY = 0x4A503841U;  /* "A8PJ" */
+static const Uint32 AURORA_GBA_TFA_CODE_TSUKURU = 0x4A543841U; /* "A8TJ" */
 static const Uint32 AURORA_GBA_TFA_BYTES = 0x200000U;
 
-static Bool AuroraGpSPTurboFileAdvanceCRC(Uint32 crc)
+static Uint32 AuroraGpSPPackGameCode(const Uint8 *p)
 {
-    return (crc == AURORA_GBA_TFA_CRC_DERBY ||
-            crc == AURORA_GBA_TFA_CRC_TSUKURU) ? TRUE : FALSE;
+    if (!p) return 0U;
+    return (Uint32)p[0] |
+           ((Uint32)p[1] << 8) |
+           ((Uint32)p[2] << 16) |
+           ((Uint32)p[3] << 24);
+}
+
+static Bool AuroraGpSPTurboFileAdvanceGameCode(Uint32 code)
+{
+    return (code == AURORA_GBA_TFA_CODE_DERBY ||
+            code == AURORA_GBA_TFA_CODE_TSUKURU) ? TRUE : FALSE;
+}
+
+static Uint32 AuroraGpSPReadGameCodeFile(const Char *pPath)
+{
+    Uint8 code[4];
+    FILE *fp;
+    size_t got;
+
+    if (!pPath || !*pPath) return 0U;
+    fp = fopen(pPath, "rb");
+    if (!fp) return 0U;
+    if (fseek(fp, 0xACL, SEEK_SET) != 0)
+    {
+        fclose(fp);
+        return 0U;
+    }
+    got = fread(code, 1, sizeof(code), fp);
+    fclose(fp);
+    return got == sizeof(code) ? AuroraGpSPPackGameCode(code) : 0U;
+}
+
+static Uint32 AuroraGpSPReadGameCodeMemory(const void *pData, Uint32 nBytes)
+{
+    const Uint8 *rom = (const Uint8 *)pData;
+    if (!rom || nBytes < 0xB0U) return 0U;
+    return AuroraGpSPPackGameCode(rom + 0xACU);
 }
 
 /* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_GPSP_TFA_ORDER
@@ -581,7 +625,7 @@ static void AuroraGpSPAttachTurboFileAdvance(GpSPSystem::Impl *p)
     /* Be explicit even though UnloadGame detaches the previous backing. */
     GPSP_aurora_tfa_set_storage(NULL, 0U);
 
-    if (!AuroraGpSPTurboFileAdvanceCRC(p->romCRC))
+    if (!AuroraGpSPTurboFileAdvanceGameCode(p->romGameCode))
         return;
 
     if (!p->tfaData)
@@ -645,7 +689,8 @@ static Bool AuroraGpSPCRC32File(const Char *pPath, Uint32 *pCRC,
     return TRUE;
 }
 
-Bool GpSPSystem::LoadGame(const Char *pPath, const Char *pSystemDirectory)
+Bool GpSPSystem::LoadGame(const Char *pPath, const Char *pSystemDirectory,
+                            Uint32 uKnownCRC, Uint32 nKnownBytes)
 {
     struct retro_game_info info;
     struct retro_system_av_info av;
@@ -661,22 +706,34 @@ Bool GpSPSystem::LoadGame(const Char *pPath, const Char *pSystemDirectory)
              pSystemDirectory);
     s_GpSPHost = m_p;
 
+    m_p->romGameCode = AuroraGpSPReadGameCodeFile(pPath); /* AURORA_V4_1B_TFA_GAMECODE_20260914 */
+
     /* AURORA_GPSP_GBA_V21_TFA_PREALLOC_20260912
      * Reserve the accessory before gpSP retro_init(). retro_init()
      * allocates the ROM LRU in 1 MiB chunks; allocating TFA later can
      * fail after the LRU has consumed the last contiguous 2 MiB.
      * Normal games still pay zero TFA RAM cost. */
+    /* AURORA_LOADER_REVIEW_V2_20260915
+     * A ZIP member reaches here only after miniz validated extraction against
+     * its central-directory CRC. Reuse it instead of rereading the complete
+     * temporary .gba. Plain .gba/.agb keeps the old exact CRC pass. */
+    if (nKnownBytes)
+    {
+        m_p->romCRC = uKnownCRC;
+        m_p->romBytes = nKnownBytes;
+    }
+    else
     {
         Uint32 crc = 0;
         Uint32 bytes = 0;
-        /* AURORA_GBA_STATE_TFA_CONNECTION_V1_20260913: piggyback size on the pre-existing CRC pass. */
         if (AuroraGpSPCRC32File(pPath, &crc, &bytes))
         {
             m_p->romCRC = crc;
             m_p->romBytes = bytes;
         }
-        /* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_GPSP_TFA_ORDER: TFA backing is attached after GPSP_retro_init(). */
     }
+    /* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_GPSP_TFA_ORDER:
+     * TFA backing is attached after GPSP_retro_init(). */
 
     GPSP_retro_set_environment(AuroraGpSPEnvironment);
     GPSP_retro_set_video_refresh(AuroraGpSPVideo);
@@ -738,6 +795,7 @@ Bool GpSPSystem::LoadGameMemory(const void *pData, Uint32 nBytes, Uint32 uCRC,
      * identity/TFA selection come from that same in-RAM byte stream. */
     m_p->romCRC = uCRC;
     m_p->romBytes = nBytes;
+    m_p->romGameCode = AuroraGpSPReadGameCodeMemory(pData, nBytes); /* AURORA_V4_1B_TFA_GAMECODE_20260914 */
     /* AURORA_TSUKURU_8M_GBA_LOAD_AUDIO_REDERR_V1_20260913_GPSP_TFA_ORDER: TFA backing is attached after GPSP_retro_init(). */
 
     GPSP_retro_set_environment(AuroraGpSPEnvironment);
@@ -935,7 +993,7 @@ Uint8 *GpSPSystem::GetSRAMData()
 Bool GpSPSystem::HasTurboFileAdvance() const
 {
     return (m_p && m_p->loaded && m_p->tfaData &&
-            AuroraGpSPTurboFileAdvanceCRC(m_p->romCRC)) ? TRUE : FALSE;
+            AuroraGpSPTurboFileAdvanceGameCode(m_p->romGameCode)) ? TRUE : FALSE; /* AURORA_V4_1B_TFA_GAMECODE_20260914 */
 }
 
 Uint8 *GpSPSystem::GetTurboFileAdvanceData()

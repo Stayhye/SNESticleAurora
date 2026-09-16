@@ -818,16 +818,36 @@ static _INLINE Uint8 _SnesPPUMode5PackMask4Coverage(
 }
 
 
+/* AURORA_V7_MODE56_HIRES_20260915
+ * Snes9x selects odd hires dots for the main BG converter and even dots
+ * for the subscreen; H-flip swaps those phases, and mosaic uses even.
+ *
+ * Aurora's visible carrier is still 256-wide, so keep the established
+ * coverage fallback for MAIN to avoid losing thin details. SUB, however,
+ * is used as the real color-math source and must carry the exact even phase.
+ */
 static _INLINE Uint64 _SnesPPUMode5PackPair(
     Uint64 uRow0,
     Uint64 uRow1,
     Bool bHFlip,
-    Bool bMosaic)
+    Bool bMosaic,
+    Bool bSubscreen)
 {
-    Bool bPreferredOdd = (Bool)((!bMosaic) ^ bHFlip);
-    Uint64 uOut =
-        (Uint64)_SnesPPUMode5Pack4Coverage(uRow0, bPreferredOdd) |
-        ((Uint64)_SnesPPUMode5Pack4Coverage(uRow1, bPreferredOdd) << 32);
+    Bool bPreferredOdd = (Bool)((!bSubscreen && !bMosaic) ^ bHFlip);
+    Uint64 uOut;
+
+    if (bSubscreen)
+    {
+        uOut =
+            (Uint64)_SnesPPUMode5Pack4(uRow0, bPreferredOdd) |
+            ((Uint64)_SnesPPUMode5Pack4(uRow1, bPreferredOdd) << 32);
+    }
+    else
+    {
+        uOut =
+            (Uint64)_SnesPPUMode5Pack4Coverage(uRow0, bPreferredOdd) |
+            ((Uint64)_SnesPPUMode5Pack4Coverage(uRow1, bPreferredOdd) << 32);
+    }
 
     if (bHFlip)
         uOut = SnesPPUChrCacheReverseBytes(uOut);
@@ -840,13 +860,26 @@ static _INLINE Uint8 _SnesPPUMode5PackPairMask(
     Uint32 uMask0,
     Uint32 uMask1,
     Bool bHFlip,
-    Bool bMosaic)
+    Bool bMosaic,
+    Bool bSubscreen)
 {
-    Bool bPreferredOdd = (Bool)((!bMosaic) ^ bHFlip);
-    Uint8 uOut = (Uint8)(
-        _SnesPPUMode5PackMask4Coverage(uMask0, bPreferredOdd) |
-        (_SnesPPUMode5PackMask4Coverage(uMask1, bPreferredOdd) << 4)
-    );
+    Bool bPreferredOdd = (Bool)((!bSubscreen && !bMosaic) ^ bHFlip);
+    Uint8 uOut;
+
+    if (bSubscreen)
+    {
+        uOut = (Uint8)(
+            _SnesPPUMode5PackMask4(uMask0, bPreferredOdd) |
+            (_SnesPPUMode5PackMask4(uMask1, bPreferredOdd) << 4)
+        );
+    }
+    else
+    {
+        uOut = (Uint8)(
+            _SnesPPUMode5PackMask4Coverage(uMask0, bPreferredOdd) |
+            (_SnesPPUMode5PackMask4Coverage(uMask1, bPreferredOdd) << 4)
+        );
+    }
 
     if (bHFlip)
         uOut = SnesPPUChrCacheReverseMask(uOut);
@@ -950,7 +983,8 @@ static void _FetchCHR2Mode5_64(
 	Uint8 *pDest,
 	Uint8 *pMask,
 	Uint64 *pPalLookup,
-	Bool bMosaic)
+	Bool bMosaic,
+	Bool bSubscreen)
 {
 	PROF_ENTER("_FetchCHR2Mode5_64");
 
@@ -981,9 +1015,9 @@ static void _FetchCHR2Mode5_64(
 			pVram, uAddr1, &uRow1, &uMask1);
 
 		uOut = _SnesPPUMode5PackPair(
-			uRow0, uRow1, bHFlip, bMosaic);
+			uRow0, uRow1, bHFlip, bMosaic, bSubscreen);
 		uOutMask = _SnesPPUMode5PackPairMask(
-			uMask0, uMask1, bHFlip, bMosaic);
+			uMask0, uMask1, bHFlip, bMosaic, bSubscreen);
 
 		uOut |= pPalLookup[pTiles->uPal];
 
@@ -1010,7 +1044,8 @@ static void _FetchCHR4Mode5_64(
 	Uint32 uScrollY,
 	Uint8 *pDest,
 	Uint8 *pMask,
-	Bool bMosaic)
+	Bool bMosaic,
+	Bool bSubscreen)
 {
 	PROF_ENTER("_FetchCHR4Mode5_64");
 
@@ -1041,9 +1076,9 @@ static void _FetchCHR4Mode5_64(
 			pVram, uAddr1, &uRow1, &uMask1);
 
 		uOut = _SnesPPUMode5PackPair(
-			uRow0, uRow1, bHFlip, bMosaic);
+			uRow0, uRow1, bHFlip, bMosaic, bSubscreen);
 		uOutMask = _SnesPPUMode5PackPairMask(
-			uMask0, uMask1, bHFlip, bMosaic);
+			uMask0, uMask1, bHFlip, bMosaic, bSubscreen);
 
 		uOut |= _SnesPPU_Tile4PalLookup64[pTiles->uPal];
 
@@ -1133,7 +1168,7 @@ static void _FetchCHR8_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRende
 
 
 
-static void _FetchCHR_64(Uint8 *pLine, SnesPPU *pPPU, SnesBGInfoT *pBGInfo, struct SnesRenderTileT *pTiles, Int32 nTiles, Int32 iLine,Uint8 *pMask, Bool bOffset)
+static void _FetchCHR_64(Uint8 *pLine, SnesPPU *pPPU, SnesBGInfoT *pBGInfo, struct SnesRenderTileT *pTiles, Int32 nTiles, Int32 iLine,Uint8 *pMask, Bool bOffset, Bool bHiresSubscreen)
 {
 	Uint32 uScrollY = 0;
 
@@ -1162,7 +1197,8 @@ static void _FetchCHR_64(Uint8 *pLine, SnesPPU *pPPU, SnesBGInfoT *pBGInfo, stru
 				pLine,
 				pMask,
 				_SnesPPU_Tile2PalLookup64[pBGInfo->uPalBase],
-				(pPPU->GetRegs()->mosaic & 0x02) != 0
+				(pPPU->GetRegs()->mosaic & 0x02) != 0,
+				bHiresSubscreen
 			);
 		else
 			_FetchCHR2_64(
@@ -1177,8 +1213,9 @@ static void _FetchCHR_64(Uint8 *pLine, SnesPPU *pPPU, SnesBGInfoT *pBGInfo, stru
 			);
 		break;
 	case 4:
-		// Mode 5 decodes the adjacent character pair N/N+1.
-		if ((pPPU->GetRegs()->bgmode & 7) == 5)
+		// Modes 5/6 decode the adjacent hires character pair N/N+1.
+		if (((pPPU->GetRegs()->bgmode & 7) == 5) ||
+		    ((pPPU->GetRegs()->bgmode & 7) == 6))
 			_FetchCHR4Mode5_64(
 				pPPU->GetVramPtr(0),
 				pBGInfo->uChrAddr,
@@ -1187,7 +1224,8 @@ static void _FetchCHR_64(Uint8 *pLine, SnesPPU *pPPU, SnesBGInfoT *pBGInfo, stru
 				uScrollY & 7,
 				pLine,
 				pMask,
-				(pPPU->GetRegs()->mosaic & 0x01) != 0
+				(pPPU->GetRegs()->mosaic & 0x01) != 0,
+				bHiresSubscreen
 			);
 		else
 			_FetchCHR4_64(
@@ -1486,8 +1524,61 @@ static void _RenderBGData_O(Uint8 *pLine8, Uint8 *pSrc8, SNMaskT *pBGMask, Uint3
 #endif
 
 
+/* AURORA_V4_MODE34_DIRECT_COLOR_20260915
+ * Pack Direct Color ownership and the tilemap YYY palette bits into one
+ * nibble per output pixel. Bit 3 is ownership; bits 0-2 are YYY.
+ * Mosaic must replicate the palette metadata from the same source pixel
+ * whose CHR value _MosaicBG8() replicated. */
+static void _SnesPPUTrackMode34DirectColor(Uint8 *pAttrib8, Uint8 uShift,
+	const SNMaskT *pVisible, const SnesRenderTileT *pTiles,
+	Uint32 uScrollX, Uint32 uMosaic)
+{
+	Uint32 iPixel;
+	const Uint8 uKeep = uShift ? 0x0F : 0xF0;
+	const Uint32 uFineScroll = uScrollX & 7;
+	const Uint32 uMosaicSize = uMosaic + 1;
 
-static void _RenderBG8(Uint8 *pLine8, SNMaskT *pLine, SNMaskT *pBGPlane, SNMaskT *pWindow, Uint32 uBitDepth, SNMaskT *pAddSubMask, Uint8 bAddSubMask, SNMaskT *pBGPri, SNMaskT *pExtraMask, Uint32 uPriority, Bool &bRendered, Uint32 uScrollX)
+	for (iPixel = 0; iPixel < 256; iPixel++)
+	{
+		Uint32 uSourceX;
+		Uint32 uTileIndex;
+		Uint8 uNibble;
+
+		if (!(pVisible->uMask8[iPixel >> 3] & (1u << (iPixel & 7))))
+			continue;
+
+		uSourceX = iPixel;
+		if (uMosaic)
+			uSourceX = (uSourceX / uMosaicSize) * uMosaicSize;
+		uTileIndex = (uSourceX + uFineScroll) >> 3;
+		uNibble = (Uint8)(0x08 | (pTiles[uTileIndex].uPal & 0x07));
+		pAttrib8[iPixel] = (Uint8)((pAttrib8[iPixel] & uKeep) |
+			(uNibble << uShift));
+	}
+}
+
+
+/* AURORA_V8_MODE7_RELEASE_AUDIT_20260915
+ * Mode 7 Direct Color uses only the chunky 8-bit pixel: there are no
+ * tilemap palette attributes, so YYY=000. Bit 3 marks Direct Color
+ * ownership and bits 0-2 remain clear. */
+static void _SnesPPUTrackMode7DirectColor(Uint8 *pAttrib8, Uint8 uShift,
+	const SNMaskT *pVisible)
+{
+	Uint32 iPixel;
+	const Uint8 uKeep = uShift ? 0x0F : 0xF0;
+	const Uint8 uDirect = (Uint8)(0x08 << uShift);
+
+	for (iPixel = 0; iPixel < 256; iPixel++)
+	{
+		if (!(pVisible->uMask8[iPixel >> 3] & (1u << (iPixel & 7))))
+			continue;
+		pAttrib8[iPixel] = (Uint8)((pAttrib8[iPixel] & uKeep) | uDirect);
+	}
+}
+
+
+static void _RenderBG8(Uint8 *pLine8, SNMaskT *pLine, SNMaskT *pBGPlane, SNMaskT *pWindow, Uint32 uBitDepth, SNMaskT *pAddSubMask, Uint8 bAddSubMask, SNMaskT *pBGPri, SNMaskT *pExtraMask, Uint32 uPriority, Bool &bRendered, Uint32 uScrollX, SNMaskT *pRenderedMask = NULL)
 {
 	if (uBitDepth!=0)
 	{
@@ -1599,6 +1690,12 @@ static void _RenderBG8(Uint8 *pLine8, SNMaskT *pLine, SNMaskT *pBGPlane, SNMaskT
 			SNMaskBool(pAddSubMask, &BGMask, bAddSubMask ? true : false);
 		}
 
+		/* AURORA_V4_MODE34_DIRECT_COLOR_20260915
+		 * Expose the exact post-window/post-priority pixel set when BG1
+		 * Direct Color needs to retain tile palette metadata. */
+		if (pRenderedMask)
+			SNMaskCopy(pRenderedMask, &BGMask);
+
 
 		if (!bRendered)
 		{
@@ -1640,7 +1737,11 @@ static _INLINE void _DecodeOBJRow4(SnesChrLookupT *pLookup, Uint8 *pHFlip,
 }
 
 
-static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList, SnesRenderObj8T *pObjLine, Int32 MaxObj8Line, Int32 iLine, Uint32 uBaseAddr, Uint32 uNameSelect, Uint16 *pVram)
+/* AURORA_OBJ_STAT77_V2_RENDER8_20260915 */
+static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList,
+	SnesRenderObj8T *pObjLine, Int32 MaxObj8Line, Int32 iLine,
+	Uint32 uBaseAddr, Uint32 uNameSelect, Uint16 *pVram,
+	Bool bObjInterlace, Bool bField)
 {
 	Int32 nObjLine = 0;
 #if SNDBG_LOG && SNPPU_OBJ_CACHE
@@ -1675,9 +1776,25 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 		ObjX = pObj->uPosX;
 		ObjX<<=32-9;
 		ObjX>>=32-9;
-		ObjY = iLine - pObj->uPosY;
-		ObjY^= pObj->uVXOR;
-		ObjY&= pObj->uHeight - 1;
+		ObjY = (iLine - pObj->uPosY) & 0xFF;
+		if (bObjInterlace)
+		{
+			/* One display line addresses two source rows. Vertical flip is
+			 * resolved before field parity; on the flipped field hardware
+			 * subtracts the field bit instead of adding it. */
+			ObjY <<= 1;
+			ObjY ^= pObj->uVXOR;
+			if (pObj->uVXOR)
+				ObjY -= bField ? 1 : 0;
+			else
+				ObjY += bField ? 1 : 0;
+			ObjY &= 0xFF;
+		}
+		else
+		{
+			ObjY ^= pObj->uVXOR;
+			ObjY &= pObj->uHeight - 1;
+		}
 
 		Uint32 uTileAddr;
 		Uint32 uTile0, uTile1, uOpaque;
@@ -1912,6 +2029,15 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 	const Bool bMode7ExtBG =
 		(uBGMode == 7) && ((pRegs->setini & 0x40) != 0);
 	const Uint8 uOBSEL = pRegs->obsel;
+
+	/* Physical OBJ evaluation is independent of Aurora's software layer
+	 * mask. RenderLine8 is reached only while not force-blanked, so publish
+	 * the sticky STAT77 state for this scanline before host policy can elide
+	 * sprite drawing. */
+	m_pPPU->SetObjOverflow(
+		m_ObjRangeOver[iLine] != 0,
+		m_ObjTimeOver[iLine] != 0);
+
 	/* AURORA_V85_SOFTWARE_LAYER_MASK
 	 * Mask before fetch/decode so disabled layers really save EE work. */
 	const Uint8 uSoftwareLayers = SNPPURenderGetSoftwareLayerMask();
@@ -1935,6 +2061,16 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		cgwsel &= 0x03;
 	}
 	Bool bRendered;
+	const Bool bMode34Direct =
+		((cgwsel & 0x01) != 0) && (uBGMode == 3 || uBGMode == 4);
+	const Bool bMode7Direct =
+		((cgwsel & 0x01) != 0) && (uBGMode == 7);
+	const Bool bBG1Direct = bMode34Direct || bMode7Direct;
+	Uint8 *pDirectAttrib =
+		bBG1Direct ? pRenderInfo->BlendInfo.uAttrib8 : NULL;
+
+	if (pDirectAttrib)
+		memset(pDirectAttrib, 0, 256);
 
 	SNMaskT *pMain = pRenderInfo->Main;
 	SNMaskT *pSub = pRenderInfo->Sub;
@@ -2023,7 +2159,8 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 			list=rotated;
 		}
 		nObjLine=_FetchOBJ(m_Objs,list,count,ObjLine,budget,iLine,(uOBSEL&7)<<13,
-			_SnesPPUOBJNameSelect(uOBSEL),m_pPPU->GetVramPtr(0));
+			_SnesPPUOBJNameSelect(uOBSEL),m_pPPU->GetVramPtr(0),
+			m_pPPU->IsObjInterlace(), m_pPPU->GetField());
 	}
 	else
 		nObjLine = 0;
@@ -2049,8 +2186,8 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		g_DbgObjOpaqueTiles += _opaque;
 		if (_objEnabled && nObjLine > 0 && _opaque == 0) g_DbgObjEmptyLines++;
 		#endif
-		if (m_nObjLine[iLine] >= SNPPU_MAXOBJ) g_DbgObjRangeLimitLines++;
-		if (nObjLine >= SNPPU_MAXOBJCHR) g_DbgObjLimitLines++;
+		if (m_ObjRangeOver[iLine]) g_DbgObjRangeLimitLines++;
+		if (m_ObjTimeOver[iLine]) g_DbgObjLimitLines++;
 		g_DbgObjOBSEL = uOBSEL;
 		g_DbgObjTM = pRegs->tm;
 		g_DbgObjTS = pRegs->ts;
@@ -2066,7 +2203,7 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		Uint16 *pOffset = NULL;
 		Uint32 uOffsetOR = 0;
 
-		if ((uBGMode==2 || uBGMode==4) &&
+		if ((uBGMode==2 || uBGMode==4 || uBGMode==6) &&
 		    (uFetchLayers & (SNESPPU_MASK_BG1 | SNESPPU_MASK_BG2)))
 		{
 			pOffset = pRenderInfo->BGOffset;
@@ -2075,7 +2212,7 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 #if SNDBG_LOG
 			Uint32 _tBGOffset = ProfCtrGetCycle();
 #endif
-			uOffsetOR  = FetchOffset(&BGInfo[2], pOffset, iLine, pRenderInfo->uBGVramAddr[2], uBGMode==2 ? TRUE : FALSE);
+			uOffsetOR  = FetchOffset(&BGInfo[2], pOffset, iLine, pRenderInfo->uBGVramAddr[2], uBGMode==4 ? FALSE : TRUE);
 #if SNDBG_LOG
 			g_TmgCycBGOffset += ProfCtrGetCycle() - _tBGOffset;
 #endif
@@ -2127,7 +2264,7 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 
 				// fetch bg tile data
 				#if SNPPURENDER_CHR64
-				_FetchCHR_64((Uint8 *)pRenderInfo->BGPlanes[iBG], m_pPPU, &BGInfo[iBG], pRenderInfo->Tiles[iBG], 33, iLine, TempMask[0], (uBGFlags[iBG]&SNPPU_BGFLAGS_OFFSET));
+				_FetchCHR_64((Uint8 *)pRenderInfo->BGPlanes[iBG], m_pPPU, &BGInfo[iBG], pRenderInfo->Tiles[iBG], 33, iLine, TempMask[0], (uBGFlags[iBG]&SNPPU_BGFLAGS_OFFSET), FALSE);
 				#else
 				_FetchCHR((Uint8 *)pRenderInfo->BGPlanes[iBG], m_pPPU, &BGInfo[iBG], pRenderInfo->Tiles[iBG], 33, iLine, TempMask[0], (uBGFlags[iBG]&SNPPU_BGFLAGS_OFFSET));
 				#endif
@@ -2143,6 +2280,66 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 				}
 			}
 		}
+
+#if SNPPURENDER_CHR64
+		/* AURORA_V7_MODE56_HIRES_20260915
+		 * BG3/BG4 are invisible in modes 5/6, so their line planes are
+		 * safe scratch for the exact EVEN subscreen phase:
+		 *   Mode 5 BG1 -> plane 2, BG2 -> plane 3
+		 *   Mode 6 BG1 -> plane 2
+		 * Decode whenever TS actually uses the layer, independent of the
+		 * main-plane row cache, so dynamic TS changes cannot expose stale
+		 * alternate data. */
+		if (uBGMode == 5 || uBGMode == 6)
+		{
+			for (iBG = 0; iBG < 2; iBG++)
+			{
+				if (!(ts & (1 << iBG)) || !BGInfo[iBG].uBitDepth)
+					continue;
+
+				const Int32 iSubPlane = iBG + 2;
+				Uint8 SubPhaseMask[2][SNPPU_BGPLANE_SIZE];
+
+				_FetchCHR_64(
+					(Uint8 *)pRenderInfo->BGPlanes[iSubPlane],
+					m_pPPU,
+					&BGInfo[iBG],
+					pRenderInfo->Tiles[iBG],
+					33,
+					iLine,
+					SubPhaseMask[0],
+					(uBGFlags[iBG] & SNPPU_BGFLAGS_OFFSET),
+					TRUE
+				);
+
+				SNMaskSHL(
+					&pRenderInfo->BGPlanes[iSubPlane][SNPPU_BGPLANE_OPAQUE],
+					SubPhaseMask[0],
+					(BGInfo[iBG].uScrollX & 7)
+				);
+				SNMaskSHL(
+					&pRenderInfo->BGPlanes[iSubPlane][SNPPU_BGPLANE_PRI],
+					SubPhaseMask[1],
+					(BGInfo[iBG].uScrollX & 7)
+				);
+
+				if (BGInfo[iBG].uMosaic > 0)
+				{
+					_MosaicBGPlanar(
+						(Uint8 *)&pRenderInfo->BGPlanes[iSubPlane][SNPPU_BGPLANE_OPAQUE],
+						256,
+						BGInfo[iBG].uMosaic + 1
+					);
+					_MosaicBGPlanar(
+						(Uint8 *)&pRenderInfo->BGPlanes[iSubPlane][SNPPU_BGPLANE_PRI],
+						256,
+						BGInfo[iBG].uMosaic + 1
+					);
+				}
+			}
+		}
+#endif
+
 		PROF_LEAVE("BGCHR");
 #if SNDBG_LOG
 		g_TmgCycBGChr += ProfCtrGetCycle() - _tBGChr;
@@ -2166,6 +2363,26 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 					&pRenderInfo->BGPlanes[1][SNPPU_BGPLANE_PRI],
 					&pRenderInfo->BGPlanes[1][SNPPU_BGPLANE_OPAQUE],
 					(const Uint8 *)pRenderInfo->BGPlanes[0]);
+
+			/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+			{
+				Uint32 uM7MosaicSize = (Uint32)(((pRegs->mosaic >> 4) & 0x0F) + 1);
+				if (uM7MosaicSize > 1)
+				{
+					if (pRegs->mosaic & 0x01)
+					{
+						_MosaicBG8((Uint8 *)pRenderInfo->BGPlanes[0], 256, uM7MosaicSize);
+						_MosaicBGPlanar((Uint8 *)&pRenderInfo->BGPlanes[0][SNPPU_BGPLANE_OPAQUE], 256, uM7MosaicSize);
+					}
+					if (bMode7ExtBG && (uFetchLayers & SNESPPU_MASK_BG2) &&
+					    (pRegs->mosaic & 0x02))
+					{
+						_MosaicBG8((Uint8 *)pRenderInfo->BGPlanes[1], 256, uM7MosaicSize);
+						_MosaicBGPlanar((Uint8 *)&pRenderInfo->BGPlanes[1][SNPPU_BGPLANE_PRI], 256, uM7MosaicSize);
+						_MosaicBGPlanar((Uint8 *)&pRenderInfo->BGPlanes[1][SNPPU_BGPLANE_OPAQUE], 256, uM7MosaicSize);
+					}
+				}
+			}
 		}
 #if SNDBG_LOG
 		g_TmgCycM7 += ProfCtrGetCycle() - _tM7;
@@ -2202,7 +2419,15 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 	if (tm & SNESPPU_MASK_BG2)
 		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[1], (tmw&SNESPPU_MASK_BG2) ? &pBGWindow[1] : NULL, BGInfo[1].uBitDepth,  pMainAddSubMask, cgadsub & SNESPPU_MASK_BG2, bMode7ExtBG ? &M7BG2MainPri : NULL, bBG3Pri ? &BG3Pri : NULL, BGInfo[1].Priority, bRendered, BGInfo[1].uScrollX);
 	if (tm & SNESPPU_MASK_BG1)
-		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[0], (tmw&SNESPPU_MASK_BG1) ? &pBGWindow[0] : NULL, BGInfo[0].uBitDepth,  pMainAddSubMask, cgadsub & SNESPPU_MASK_BG1, NULL, (bMode7ExtBG && (tm & SNESPPU_MASK_BG2)) ? &M7BG2MainPri : (bBG3Pri ? &BG3Pri : NULL), BGInfo[0].Priority, bRendered, BGInfo[0].uScrollX);
+	{
+		SNMaskT DirectBG1Mask;
+		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[0], (tmw&SNESPPU_MASK_BG1) ? &pBGWindow[0] : NULL, BGInfo[0].uBitDepth,  pMainAddSubMask, cgadsub & SNESPPU_MASK_BG1, NULL, (bMode7ExtBG && (tm & SNESPPU_MASK_BG2)) ? &M7BG2MainPri : (bBG3Pri ? &BG3Pri : NULL), BGInfo[0].Priority, bRendered, BGInfo[0].uScrollX, bBG1Direct ? &DirectBG1Mask : NULL);
+		if (bMode34Direct)
+			_SnesPPUTrackMode34DirectColor(pDirectAttrib, 0, &DirectBG1Mask,
+				pRenderInfo->Tiles[0], BGInfo[0].uScrollX, BGInfo[0].uMosaic);
+		else if (bMode7Direct)
+			_SnesPPUTrackMode7DirectColor(pDirectAttrib, 0, &DirectBG1Mask);
+	}
 	if (!bRendered)
 		_ClearLinePlanar((SNMaskT *)pMain8, 8);
 #if SNDBG_LOG
@@ -2214,7 +2439,7 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		Uint32 _tObjB = ProfCtrGetCycle();
 #endif
 		_SnesPPURenderOBJ8(pMain8, pMain, ObjLine, nObjLine,  (tmw&SNESPPU_MASK_OBJ) ? &pBGWindow[4] : NULL, bBG3Pri ? &BG3Pri : NULL,
-			pMainAddSubMask, (cgadsub & 0x10) ? 1 : 0);
+			pMainAddSubMask, (cgadsub & 0x10) ? 1 : 0, pDirectAttrib, 0);
 #if SNDBG_LOG
 		{
 			Uint32 _dObjDraw = ProfCtrGetCycle() - _tObjB;
@@ -2255,15 +2480,32 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 	SNMaskClear(&pSub[SNPPU_BGPLANE_LAYER1]);
 	bRendered = FALSE;
 
+	/* AURORA_V7_MODE56_HIRES_20260915
+	 * Exact even-dot background planes for the hires subscreen. */
+	SNMaskT *pSubBG1Plane =
+		(uBGMode == 5 || uBGMode == 6)
+		? pRenderInfo->BGPlanes[2] : pRenderInfo->BGPlanes[0];
+	SNMaskT *pSubBG2Plane =
+		(uBGMode == 5)
+		? pRenderInfo->BGPlanes[3] : pRenderInfo->BGPlanes[1];
+
 	// render bg layers to sub screen
 	if (ts & SNESPPU_MASK_BG4)
 		_RenderBG8(pSub8, pSub, pRenderInfo->BGPlanes[3], (tsw&SNESPPU_MASK_BG4) ? &pBGWindow[3] : NULL, BGInfo[3].uBitDepth, pSubAddSubMask, 1, NULL, NULL, BGInfo[3].Priority, bRendered, BGInfo[3].uScrollX);
 	if (ts & SNESPPU_MASK_BG3)
 		_RenderBG8(pSub8, pSub, pRenderInfo->BGPlanes[2], (tsw&SNESPPU_MASK_BG3) ? &pBGWindow[2] : NULL, BGInfo[2].uBitDepth, pSubAddSubMask, 1, &BG3Pri, NULL, BGInfo[2].Priority, bRendered, BGInfo[2].uScrollX);
 	if (ts & SNESPPU_MASK_BG2)
-		_RenderBG8(pSub8, pSub, pRenderInfo->BGPlanes[1], (tsw&SNESPPU_MASK_BG2) ? &pBGWindow[1] : NULL, BGInfo[1].uBitDepth, pSubAddSubMask, 1, bMode7ExtBG ? &M7BG2SubPri : NULL, bBG3Pri ? &BG3Pri : NULL, BGInfo[1].Priority, bRendered, BGInfo[1].uScrollX);
+		_RenderBG8(pSub8, pSub, pSubBG2Plane, (tsw&SNESPPU_MASK_BG2) ? &pBGWindow[1] : NULL, BGInfo[1].uBitDepth, pSubAddSubMask, 1, bMode7ExtBG ? &M7BG2SubPri : NULL, bBG3Pri ? &BG3Pri : NULL, BGInfo[1].Priority, bRendered, BGInfo[1].uScrollX);
 	if (ts & SNESPPU_MASK_BG1)
-		_RenderBG8(pSub8, pSub, pRenderInfo->BGPlanes[0], (tsw&SNESPPU_MASK_BG1) ? &pBGWindow[0] : NULL, BGInfo[0].uBitDepth, pSubAddSubMask, 1, NULL, (bMode7ExtBG && (ts & SNESPPU_MASK_BG2)) ? &M7BG2SubPri : (bBG3Pri ? &BG3Pri : NULL), BGInfo[0].Priority, bRendered, BGInfo[0].uScrollX);
+	{
+		SNMaskT DirectBG1Mask;
+		_RenderBG8(pSub8, pSub, pSubBG1Plane, (tsw&SNESPPU_MASK_BG1) ? &pBGWindow[0] : NULL, BGInfo[0].uBitDepth, pSubAddSubMask, 1, NULL, (bMode7ExtBG && (ts & SNESPPU_MASK_BG2)) ? &M7BG2SubPri : (bBG3Pri ? &BG3Pri : NULL), BGInfo[0].Priority, bRendered, BGInfo[0].uScrollX, bBG1Direct ? &DirectBG1Mask : NULL);
+		if (bMode34Direct)
+			_SnesPPUTrackMode34DirectColor(pDirectAttrib, 4, &DirectBG1Mask,
+				pRenderInfo->Tiles[0], BGInfo[0].uScrollX, BGInfo[0].uMosaic);
+		else if (bMode7Direct)
+			_SnesPPUTrackMode7DirectColor(pDirectAttrib, 4, &DirectBG1Mask);
+	}
 	if (!bRendered)
 		_ClearLinePlanar((SNMaskT *)pSub8, 8);
 #if SNDBG_LOG
@@ -2275,7 +2517,7 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		Uint32 _tObjC = ProfCtrGetCycle();
 #endif
 		_SnesPPURenderOBJ8(pSub8, pSub, ObjLine, nObjLine,  (tsw&SNESPPU_MASK_OBJ) ? &pBGWindow[4] : NULL, bBG3Pri ? &BG3Pri : NULL,
-			pSubAddSubMask, 4|1);
+			pSubAddSubMask, 4|1, pDirectAttrib, 4);
 #if SNDBG_LOG
 		{
 			Uint32 _dObjDraw = ProfCtrGetCycle() - _tObjC;
@@ -2608,8 +2850,9 @@ static void _FetchMode7(Uint8 *pLine, SnesPPU *pPPU, Int32 iLine, SNMaskT *pPrio
 	#define AURORA_M7_CLIP(_n) \
 		((((Int32)(_n) & 0x2000) != 0) ? ((Int32)(_n) | ~1023) : ((Int32)(_n) & 1023))
 
-	hofs = AURORA_M7_SIGN13(pRegs->m7hofs.w);
-	vofs = AURORA_M7_SIGN13(pRegs->m7vofs.w);
+	/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+	hofs = AURORA_M7_SIGN13(pPPU->GetMode7LineHofs());
+	vofs = AURORA_M7_SIGN13(pPPU->GetMode7LineVofs());
 	cx   = AURORA_M7_SIGN13(pRegs->m7x.w);
 	cy   = AURORA_M7_SIGN13(pRegs->m7y.w);
 
@@ -2618,11 +2861,9 @@ static void _FetchMode7(Uint8 *pLine, SnesPPU *pPPU, Int32 iLine, SNMaskT *pPrio
 	const Int32 clippedH = AURORA_M7_CLIP(hofs - cx);
 	const Int32 clippedV = AURORA_M7_CLIP(vofs - cy);
 
-	/* Mode 7 mosaic is deliberately not approximated here. Its vertical phase
-	 * is controlled by an internal PPU counter that can be reloaded mid-frame;
-	 * absolute scanline grouping would create a new inaccuracy. */
-
-	screenY = (m7sel & 0x02) ? (255 - iLine) : iLine;
+	/* AURORA_V9_MODE7_MOSAIC_LATCH_20260915 */
+	const Int32 iMode7SourceLine = pPPU->GetMode7MosaicSourceLine(iLine);
+	screenY = (m7sel & 0x02) ? (255 - iMode7SourceLine) : iMode7SourceLine;
 
 	/* AURORA_UPSTREAM_20260827_MODE7_SIGNED_CENTER_V1
 	 * Keep Aurora's already-correct per-product truncation/flip/repeat path,

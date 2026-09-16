@@ -128,9 +128,9 @@ enum
 };
 
 
-// maximum number of lines (224 + first dummy line)
-#define SNPPU_MAXLINE   225 
-
+/* AURORA_SETINI_DISPLAY_V1_RENDERH_20260915
+ * Storage capacity, not active height: 239 overscan lines + dummy line 0. */
+#define SNPPU_MAXLINE   (SNESPPU_VISIBLE_LINES_OVERSCAN + 1u)
 // maximum number of obj's per line
 #define SNPPU_MAXOBJ    32
 
@@ -249,7 +249,8 @@ struct SnesRenderObj8T
 void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 	const SnesRenderObj8T *pObjLine, Int32 nObjLine,
 	const SNMaskT *pWindow, const SNMaskT *pMask,
-	SNMaskT *pAddSubMask, Bool bAddSubMask);
+	SNMaskT *pAddSubMask, Bool bAddSubMask,
+	Uint8 *pDirectAttrib = 0, Uint8 uDirectShift = 0);
 
 
 
@@ -299,6 +300,12 @@ private:
 
     Uint8           m_nObjLine[SNPPU_MAXLINE];
     Uint16          m_nObjTilePotential[SNPPU_MAXLINE];
+    /* AURORA_OBJ_STAT77_V2_RENDERH_20260915
+     * Physical PPU overflow is cached separately from Aurora's optional
+     * artificial OBJ limiters, so host performance policy cannot leak into
+     * emulated STAT77. */
+    Uint8           m_ObjRangeOver[SNPPU_MAXLINE];
+    Uint8           m_ObjTimeOver[SNPPU_MAXLINE];
     Uint8           m_ObjLine[SNPPU_MAXLINE][SNPPU_MAXOBJ];
 
     ISNPPUBlend    *m_pBlend;
@@ -326,6 +333,7 @@ private:
 
 public:
 	void RenderLine(Int32 iLine);
+	Bool ClearLine(Int32 iLine);
 	void Reset();
 	void BeginRender(CRenderSurface *pTarget);
 	void EndRender();

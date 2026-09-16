@@ -11,6 +11,11 @@
 extern "C" {
 #endif
 
+/* AURORA_LOAD_BYTE_PROGRESS_V1_20260915
+ * Progress is reported in uncompressed/output bytes. */
+typedef void (*MinizProgressCallback)(
+    int done, int total, void *user);
+
 /* Reads a `.gz` file at `path`, decompresses the deflate stream into
    `out_buf`, returning the number of decompressed bytes (>0) or -1
    on any failure (open / parse / decompress). At most `out_max`
@@ -18,6 +23,12 @@ extern "C" {
 int MinizReadGZToBuffer(const char *path,
                         void *out_buf,
                         int out_max);
+
+int MinizReadGZToBufferProgress(const char *path,
+                                void *out_buf,
+                                int out_max,
+                                MinizProgressCallback progress,
+                                void *progress_user);
 
 /* Opens the zip at `path`, walks the central directory and decompresses
    the first non-directory entry whose name is accepted by `name_filter`
@@ -52,6 +63,16 @@ int MinizReadZipEntryToBuffer(const char *path,
                               int out_max,
                               char *out_filename,
                               int filename_max);
+
+int MinizReadZipEntryToBufferProgress(
+    const char *path,
+    unsigned int file_index,
+    void *out_buf,
+    int out_max,
+    char *out_filename,
+    int filename_max,
+    MinizProgressCallback progress,
+    void *progress_user);
 
 int MinizReadZipEntryPrefix(const char *path,
                             unsigned int file_index,

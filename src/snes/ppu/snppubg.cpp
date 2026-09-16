@@ -212,7 +212,7 @@ static void _FetchBG16x16(Uint32 uAddr, SnesRenderTileT *pTile, Int32 nTiles, Sn
 		pOffset = _SNPPUBg_Tile16Pos[uFlip ^ uFlipXOR];
 
 		// write first 8x8 tile
-		pTile->uTile = uTile16 + pOffset[0];
+		pTile->uTile = (Uint16)((uTile16 + pOffset[0]) & 0x03FF); /* AURORA_V3_MODE1_16X16_WRAP_20260915 */
 		pTile->uFlip = uFlip;
 		pTile->uPal  = uPal;
 		pTile->uOffsetY = 0;
@@ -222,7 +222,7 @@ static void _FetchBG16x16(Uint32 uAddr, SnesRenderTileT *pTile, Int32 nTiles, Sn
 		if (!(uFlipXOR&1))
 		{
 			// write second 8x8 tile
-			pTile->uTile = uTile16 + pOffset[1];
+			pTile->uTile = (Uint16)((uTile16 + pOffset[1]) & 0x03FF);
 			pTile->uFlip = uFlip;
 			pTile->uPal  = uPal;
 			pTile->uOffsetY = 0;
@@ -430,7 +430,8 @@ Uint32 SnesPPURender::FetchBG(SnesBGInfoT *pBGInfo, struct SnesRenderTileT *pTil
 	 * The paired-character horizontal expansion itself is handled later by
 	 * the Mode 5 CHR decimator in snppurender8.cpp.
 	 */
-	if (((m_pPPU->GetRegs()->bgmode & 7) == 5) && pBGInfo->uChrSize)
+	if ((((m_pPPU->GetRegs()->bgmode & 7) == 5) ||
+	     ((m_pPPU->GetRegs()->bgmode & 7) == 6)) && pBGInfo->uChrSize)
 	{
 		Uint32 uVHalf;
 		Int32 iTile;
@@ -607,13 +608,12 @@ static void _FetchBG16x16Offset(
         Uint8 *pSubTile;
         Uint16 *pOpt;
 
-        /* AURORA_ACCURACY_OPT_16X16_FIRST_COLUMN_V1
-         * Offset-per-tile exempts one complete target tile, not one
-         * renderer sub-column.  A 16x16 target therefore leaves the
-         * first 16 screen pixels untouched.  The lookup stream is
-         * correspondingly one 8-pixel entry behind the renderer's
-         * pOffset cursor after that exempt region. */
-        pOpt = (uX >= 16) ? (pOffset - 2) : NULL;
+        /* AURORA_V5_MODE02_OPT_16X16_8PX_20260915
+         * OPT is consumed per visible 8x8 fetch column even when the
+         * target BG uses 16x16 tilemap entries. FetchOffset() already
+         * clears pair zero, so only the first 8-pixel column is exempt;
+         * pair one (BG3 entry 0) applies to the second visible column. */
+        pOpt = pOffset;
 
         if (pOpt)
         {
@@ -728,6 +728,68 @@ static void _FetchBG16x16Offset(
 }
 
 
+/* AURORA_V7_MODE56_HIRES_20260915
+ * Mode 6 + large BG1 is asymmetric in Aurora's 256-wide carrier:
+ * one map entry is 8 logical pixels wide (16 physical hires dots) but
+ * 16 pixels tall. Resolve the map at X/8, Y/16, then select vertical
+ * +16 subtile for the lower half. Horizontal N/N+1 expansion happens
+ * later in the hires CHR decoder. */
+static void _FetchBGMode6LargeOffset(
+	Uint32 uScrollX,
+	Uint32 uScrollY,
+	Int32 iLine,
+	SnesRenderTileT *pTile,
+	Int32 nTiles,
+	SnesPPUScreenT **ppScreen,
+	Uint16 *pOffset,
+	Uint32 uOffsetMask)
+{
+	Uint32 uX = 0;
+
+	while (nTiles > 0)
+	{
+		Uint32 uTileScrollX = uScrollX;
+		Uint32 uTileScrollY = uScrollY;
+		Uint32 uTileX, uTileY, uAddr;
+		Uint16 uScrData;
+		const Uint16 uOffsetX = pOffset[0];
+		const Uint16 uOffsetY = pOffset[1];
+
+		if (uOffsetX & uOffsetMask)
+			uTileScrollX = (uScrollX & 7) | (uOffsetX & 0x3F8);
+		if (uOffsetY & uOffsetMask)
+			uTileScrollY = uOffsetY & 0x3FF;
+
+		uTileScrollX += uX;
+		uTileScrollY += iLine;
+
+		/* 16 hires dots = 8 logical carrier pixels horizontally. */
+		uTileX = (uTileScrollX >> 3) & 63;
+		uTileY = (uTileScrollY >> 4) & 63;
+
+		uAddr  = (uTileX & 0x1F);
+		uAddr |= (uTileY & 0x1F) << 5;
+		uAddr |= (uTileX >> 5) << 10;
+		uAddr |= (uTileY >> 5) << 11;
+		uScrData = ((Uint16 *)ppScreen[(uAddr >> 10) & 3])[uAddr & 0x03FF];
+
+		pTile->uFlip = (Uint8)((uScrData >> 14) & 3);
+		pTile->uPal  = (Uint8)((uScrData >> 10) & 0x0F);
+		pTile->uTile = (Uint16)(uScrData & 0x03FF);
+
+		/* Large Mode 6 doubles only the vertical map-cell size. */
+		if (((uTileScrollY >> 3) & 1) ^ ((pTile->uFlip >> 1) & 1))
+			pTile->uTile = (Uint16)((pTile->uTile + 16) & 0x03FF);
+
+		pTile->uOffsetY = (Uint8)(uTileScrollY & 7);
+		pTile++;
+		pOffset += 2;
+		uX += 8;
+		nTiles--;
+	}
+}
+
+
 Uint32 SnesPPURender::FetchBGOffset(SnesBGInfoT *pBGInfo, struct SnesRenderTileT *pTiles, Int32 nTiles, Int32 iLine, Uint16 *pOffset, Uint32 uOffsetMask, Bool bVOffset)
 {
 	SnesPPUScreenT *pScreen[4];
@@ -758,7 +820,7 @@ Uint32 SnesPPURender::FetchBGOffset(SnesBGInfoT *pBGInfo, struct SnesRenderTileT
 		}
 		break;
 	case 1:
-		// target BG uses 16x16 map tiles
+		// target BG uses a large map cell
 		_GetScreenPtrs(
 			pScreen,
 			m_pPPU,
@@ -766,17 +828,33 @@ Uint32 SnesPPURender::FetchBGOffset(SnesBGInfoT *pBGInfo, struct SnesRenderTileT
 			pBGInfo->uScrSize
 		);
 
-		_FetchBG16x16Offset(
-			pBGInfo->uScrollX,
-			pBGInfo->uScrollY,
-			iLine,
-			pTiles,
-			nTiles,
-			pScreen,
-			pOffset,
-			uOffsetMask,
-			bVOffset
-		);
+		if ((m_pPPU->GetRegs()->bgmode & 7) == 6)
+		{
+			_FetchBGMode6LargeOffset(
+				pBGInfo->uScrollX,
+				pBGInfo->uScrollY,
+				iLine,
+				pTiles,
+				nTiles,
+				pScreen,
+				pOffset,
+				uOffsetMask
+			);
+		}
+		else
+		{
+			_FetchBG16x16Offset(
+				pBGInfo->uScrollX,
+				pBGInfo->uScrollY,
+				iLine,
+				pTiles,
+				nTiles,
+				pScreen,
+				pOffset,
+				uOffsetMask,
+				bVOffset
+			);
+		}
 		break;
 
 	default:
@@ -884,6 +962,52 @@ static Uint32 _FetchOffset16x16Map(
 }
 
 
+/* AURORA_V7_MODE56_HIRES_20260915 */
+static Uint16 _SNPPUReadOffsetMode6LargeCell(
+	Uint32 uPixelX,
+	Uint32 uPixelY,
+	SnesPPUScreenT **ppScreen)
+{
+	Uint32 uTileX = (uPixelX >> 3) & 63;
+	Uint32 uTileY = (uPixelY >> 4) & 63;
+	Uint32 uAddr;
+
+	uAddr  = (uTileX & 0x1F);
+	uAddr |= (uTileY & 0x1F) << 5;
+	uAddr |= (uTileX >> 5) << 10;
+	uAddr |= (uTileY >> 5) << 11;
+
+	return ((Uint16 *)ppScreen[(uAddr >> 10) & 3])[uAddr & 0x03FF];
+}
+
+
+static Uint32 _FetchOffsetMode6LargeMap(
+	Uint32 uScrollX,
+	Uint32 uScrollY,
+	Uint16 *pOffset,
+	SnesPPUScreenT **ppScreen)
+{
+	Uint32 uOffsetOR = 0;
+	Int32 i;
+
+	pOffset[0] = 0;
+	pOffset[1] = 0;
+
+	for (i = 1; i < 33; i++)
+	{
+		Uint32 uX = (uScrollX & ~7U) + ((Uint32)(i - 1) << 3);
+		Uint16 h = _SNPPUReadOffsetMode6LargeCell(uX, uScrollY, ppScreen);
+		Uint16 v = _SNPPUReadOffsetMode6LargeCell(uX, uScrollY + 8, ppScreen);
+
+		pOffset[i * 2]     = h;
+		pOffset[i * 2 + 1] = v;
+		uOffsetOR |= h | v;
+	}
+
+	return uOffsetOR;
+}
+
+
 Uint32 SnesPPURender::FetchOffset(
     SnesBGInfoT *pBGInfo,
     Uint16 *pOffset,
@@ -923,7 +1047,10 @@ Uint32 SnesPPURender::FetchOffset(
         | (((pBGInfo->uScrAddr >> 10) & 0x1F) << 14)
         | ((pBGInfo->uScrSize & 3) << 19)
         | ((pBGInfo->uChrSize & 1) << 21)
-        | ((bVOffset ? 1U : 0U) << 22);
+        | ((bVOffset ? 1U : 0U) << 22)
+        /* Mode 6 changes the horizontal interpretation of large BG3
+         * offset cells, so mode is part of the derived-cache identity. */
+        | (((m_pPPU->GetRegs()->bgmode & 7) & 7U) << 23);
 
     if (uCacheKey != uOldVramAddr)
     {
@@ -996,16 +1123,31 @@ Uint32 SnesPPURender::FetchOffset(
         else
         {
             /*
-             * BG3 itself uses 16x16 tilemap entries.
+             * Large BG3 is 16x16 normally. In forced-hires Mode 6 it is
+             * still 16 physical dots wide, i.e. 8 logical carrier pixels,
+             * while remaining 16 pixels tall.
              */
-            uOffsetOR =
-                _FetchOffset16x16Map(
-                    uScrollX,
-                    uScrollY,
-                    pOffset,
-                    pScreen,
-                    bVOffset
-                );
+            if ((m_pPPU->GetRegs()->bgmode & 7) == 6)
+            {
+                uOffsetOR =
+                    _FetchOffsetMode6LargeMap(
+                        uScrollX,
+                        uScrollY,
+                        pOffset,
+                        pScreen
+                    );
+            }
+            else
+            {
+                uOffsetOR =
+                    _FetchOffset16x16Map(
+                        uScrollX,
+                        uScrollY,
+                        pOffset,
+                        pScreen,
+                        bVOffset
+                    );
+            }
         }
 
         uOldVramAddr = uCacheKey;
@@ -1184,27 +1326,45 @@ void SnesPPURender::DecodeBGInfo(SnesBGInfoT *pBGInfo)
 		break;
 		// these have offset per tile!
 	case 4:
+		/* AURORA_V6_MODE4_AUDIT_20260915
+		 * Mode 4: BG1=8bpp, BG2=2bpp, BG3 supplies one-row OPT.
+		 * BG2 palettes occupy CGRAM 0x00-0x1f. Direct Color, when
+		 * CGWSEL.0 is set, applies only to BG1. The OPT reader handles
+		 * bit15 H/V selection; V5 keeps 16x16 targets 8px-granular. */
 		pBGInfo[0].uBitDepth= 8;
 		pBGInfo[1].uBitDepth= 2;
 		pBGInfo[2].uBitDepth= 0;
 		pBGInfo[3].uBitDepth= 0;
+		pBGInfo[0].uPalBase = 0x00;
+		pBGInfo[1].uPalBase = 0x00;
 		pBGInfo[0].Priority  =  5;
 		pBGInfo[1].Priority  =  4;
 		break;
 
 	case 5: // hi-res
+		/* AURORA_V7_MODE56_HIRES_20260915
+		 * Mode 5: BG1=4bpp, BG2=2bpp. Both are forced hires.
+		 * The tilemap size bit selects 16x8 vs 16x16 physical cells. */
 		pBGInfo[0].uBitDepth= 4;
 		pBGInfo[1].uBitDepth= 2;
 		pBGInfo[2].uBitDepth= 0;
 		pBGInfo[3].uBitDepth= 0;
+		pBGInfo[0].uPalBase = 0x00;
+		pBGInfo[1].uPalBase = 0x00;
 		pBGInfo[0].Priority  =  5;
 		pBGInfo[1].Priority  =  4;
 		break;
 
-	case 6: // hi-res
-		/* AURORA_ACCURACY_MODE6_4BPP_V1: hardware Mode 6 BG1 is 4bpp. */
+	case 6: // hi-res + OPT
+		/* AURORA_ACCURACY_MODE6_4BPP_V1
+		 * AURORA_V7_MODE56_HIRES_20260915
+		 * Mode 6: BG1=4bpp forced hires; invisible BG3 supplies
+		 * independent horizontal/vertical OPT exactly like Mode 2. */
 		pBGInfo[0].uBitDepth= 4;
 		pBGInfo[1].uBitDepth= 0;
+		pBGInfo[2].uBitDepth= 0;
+		pBGInfo[3].uBitDepth= 0;
+		pBGInfo[0].uPalBase = 0x00;
 		pBGInfo[0].Priority  =  5;
 		pBGInfo[1].Priority  =  4;
 		break;

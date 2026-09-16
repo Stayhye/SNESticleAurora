@@ -102,6 +102,18 @@ Bool MainLoopProcess()
 	    _MainLoopInputProcess(buttons);
 	}
 
+    /* AURORA_EMPTY_FRONTEND_INVARIANT_V1_20260914
+     * Defensive invariant backstop: no active System means there is
+     * no valid gameplay state. Repair any direct/legacy transition
+     * that bypassed _MenuEnable() and return to the Browser through
+     * the canonical menu-entry path before frame execution/render. */
+    if (!_pSystem && !_bMenu)
+    {
+        if (_MainLoop_pBrowserScreen)
+            _MainLoopSetScreen((CScreen *)_MainLoop_pBrowserScreen);
+        _MenuEnable(TRUE);
+    }
+
 //	_MainLoopInputProcess(InputGetPadData(0));
 //	_MainLoopInputProcess(InputGetPadData(1));
 

@@ -37,7 +37,11 @@ public:
 		return m_nCount == 0;
 	}
 
-	inline Bool Enqueue(Uint32 uCycle, Uint32 uAddr, Uint8 uData)
+	/* AURORA_PPU_MEMORY_V3_QUEUE_20260915
+	 * SNQueueElementT already has one padding byte. PPU writes reuse it for
+	 * memory-bus phase metadata, so the 4096-entry queue stays exactly the
+	 * same size. SPC callers keep the default zero metadata. */
+	inline Bool Enqueue(Uint32 uCycle, Uint32 uAddr, Uint8 uData, Uint8 uMeta = 0)
 	{
 		if (m_nCount < t_nSize)
 		{
@@ -49,6 +53,7 @@ public:
 			pElement->uCycle = uCycle;
 			pElement->uAddr  = uAddr;
 			pElement->uData = uData;
+			pElement->uPad  = uMeta;
 			return TRUE;
 		}
 

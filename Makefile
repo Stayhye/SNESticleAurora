@@ -745,6 +745,12 @@ DEPFLAGS := -MMD -MP
 DEPS := $(OBJS:.o=.d)
 -include $(DEPS)
 
+# AURORA_EE_SECTION_GC_V2_20260914
+# O link já usa --gc-sections. Estes flags dão uma seção por função/dado aos
+# C/C++ principais para o linker poder descartar símbolos realmente mortos.
+# Não alteram -O2, fast-math, aliasing, ABI nem as regras de assembly.
+AURORA_SECTION_GC_FLAGS := -ffunction-sections -fdata-sections
+
 SDK_NET_IRX := ps2dev9.irx netman.irx ps2ip-nm.irx smap.irx
 SDK_COMPAT_NET_IRX := ps2ip.irx ps2ips.irx smap-ps2ip.irx
 SDK_MC_IRX := mcman.irx mcserv.irx
@@ -1060,9 +1066,9 @@ $(OBJ_DIR)/platform/ps2/system/embedded_irx.o: $(EMBED_HEADERS)
 $(OBJS): $(BUILD_CONFIG_FILE)
 
 $(OBJ_DIR)/%.o: src/%.c | $(OBJ_DIR)
-	$(call RUN_COMPILE,CC,$<,$(EE_CC) $(CFLAGS) $(DEPFLAGS) $(INCS) -c "$<" -o "$@")
+	$(call RUN_COMPILE,CC,$<,$(EE_CC) $(CFLAGS) $(AURORA_SECTION_GC_FLAGS) $(DEPFLAGS) $(INCS) -c "$<" -o "$@")
 $(OBJ_DIR)/%.o: src/%.cpp | $(OBJ_DIR)
-	$(call RUN_COMPILE,CXX,$<,$(EE_CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCS) -c "$<" -o "$@")
+	$(call RUN_COMPILE,CXX,$<,$(EE_CXX) $(CXXFLAGS) $(AURORA_SECTION_GC_FLAGS) $(DEPFLAGS) $(INCS) -c "$<" -o "$@")
 $(OBJ_DIR)/%.o: src/%.s | $(OBJ_DIR)
 	$(call RUN_COMPILE,AS,$<,$(EE_CC) $(CFLAGS) $(DEPFLAGS) $(INCS) -c "$<" -o "$@")
 $(OBJ_DIR)/%.o: src/%.S | $(OBJ_DIR)

@@ -18,7 +18,11 @@ public:
     GpSPSystem();
     virtual ~GpSPSystem();
 
-    Bool LoadGame(const Char *pPath, const Char *pSystemDirectory);
+    /* AURORA_LOADER_REVIEW_V2_20260915
+     * ZIP extraction has already validated member CRC + size, so those
+     * callers may skip a second complete file pass before gpSP paging. */
+    Bool LoadGame(const Char *pPath, const Char *pSystemDirectory,
+                  Uint32 uKnownCRC = 0, Uint32 nKnownBytes = 0);
     Bool LoadGameMemory(const void *pData, Uint32 nBytes, Uint32 uCRC,
                         const Char *pContentName,
                         const Char *pSystemDirectory); /* AURORA_ROM_LIFETIME_RAMONLY_ZIP_V2_20260913 */
