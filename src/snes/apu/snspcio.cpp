@@ -113,11 +113,22 @@ Uint8 SNSpcIO::Read8Trap(SNSpcT *pSpc, Uint32 uAddr)
 #endif
 	switch (uAddr)
 	{
+	/* AURORA_SPC700_MEGA_ACCURACY_V1_20260916 */
+	case 0xF0:
+	case 0xF1:
+	case 0xFA:
+	case 0xFB:
+	case 0xFC:
+		return 0x00;
+
 	case 0xF2:
-		return pSpc->Mem[uAddr];
+		return (Uint8)(pSpc->Mem[uAddr] & 0x7F);
 
 	case 0xF3:
-		pIO->m_pSpcDsp->Sync();
+		/* AURORA_HW_ACCURACY_DSPDATA_ORDER_V1_20260916
+		 * Do not make future S-DSP writes visible to an $F3 read. */
+		pIO->m_pSpcDsp->Sync(
+			SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME));
 		return pIO->m_pSpcDsp->Read8(pSpc->Mem[0xF2]);
 	case 0xF4: // port 0-4
 	case 0xF5:
@@ -163,32 +174,26 @@ void SNSpcIO::Write8Trap(SNSpcT *pSpc, Uint32 uAddr, Uint8 uData)
 	{
 	case 0xF1:	// control
 		{
-			if (uData&0x10)
-			{
-				pSpc->Mem[0xf4] = pIO->m_Regs.apu_w[0] = 0x00;
-				pSpc->Mem[0xf5] = pIO->m_Regs.apu_w[1] = 0x00;
-			}
-			if (uData&0x20)
-			{
-				pSpc->Mem[0xf6] = pIO->m_Regs.apu_w[2] = 0x00;
-				pSpc->Mem[0xf7] = pIO->m_Regs.apu_w[3] = 0x00;
-			}		
+			#if SNSPCIO_WRITEQUEUE
+			if (uData & 0x30) pIO->SyncQueue(SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME));
+			#endif
+			if (uData&0x10) { pIO->m_Regs.apu_w[0]=0; pIO->m_Regs.apu_w[1]=0; }
+			if (uData&0x20) { pIO->m_Regs.apu_w[2]=0; pIO->m_Regs.apu_w[3]=0; }
 			SNSpcTimerSetEnable(&pIO->m_Regs.spc_timer[0], iCycle, (uData & 1));
 			SNSpcTimerSetEnable(&pIO->m_Regs.spc_timer[1], iCycle, (uData & 2));
 			SNSpcTimerSetEnable(&pIO->m_Regs.spc_timer[2], iCycle, (uData & 4));
-
-			// set rom enable
 			SNSPCSetRomEnable(pSpc, uData & 0x80);
 		}
 		break;
 	case 0xF2:	// dsp addr
 		break;
 	case 0xF3:  // dsp data
-		while (!pIO->m_pSpcDsp->EnqueueWrite(SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME), pSpc->Mem[0xF2] & 0x7F, uData))
+		if (!(pSpc->Mem[0xF2] & 0x80))
 		{
-			pIO->m_pSpcDsp->Sync();
+			Uint32 uDspCycle = (Uint32)SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME);
+			while (!pIO->m_pSpcDsp->EnqueueWrite(uDspCycle, pSpc->Mem[0xF2] & 0x7F, uData))
+				pIO->m_pSpcDsp->Sync(uDspCycle);
 		}
-		//pIO->m_pSpcDsp->Write8(pSpc->Mem[0xF2] & 0x7F, uData);
 		break;
 
 	case 0xF4:

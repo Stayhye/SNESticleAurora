@@ -2460,7 +2460,9 @@ SnesSystem::SnesSystem()
 	m_SpcDsp.SetMixer(1,&m_SpcDspSilentMixer);
 	m_SpcDspMixer.SetDsp(&m_SpcDsp);
 	m_SpcDspSilentMixer.SetDsp(&m_SpcDsp);
-	m_SpcDsp.SetMem(m_Spc.Mem);
+	/* AURORA_SPC700_MEGA_ACCURACY_V1_20260916
+	 * Wire both IPL-visible memory and underlying physical APURAM. */
+	m_SpcDsp.SetMem(m_Spc.Mem, m_Spc.ShadowMem, &m_Spc.bRomEnable);
 
 	// setup dma controller
 	m_DMAC.SetCPU(&m_Cpu);
@@ -2837,11 +2839,15 @@ void SnesSystem::SetSnesRom(SnesRom *pRom)
 
 /* AURORA_SWC_FLOPPY_V1_20260831 */
 Bool SnesSystem::LoadSuperWildCard(const Char *pFirmwarePath,
-                                   const Char *pDiskPath)
+                                   const Char *pDiskPath,
+                                   Uint8 *pExternalDRAM,
+                                   Uint32 nExternalDRAMBytes) /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916 */
 {
     SetSnesRom(NULL);
 
-    if (!m_SWC.Load(pFirmwarePath, pDiskPath, SNSuperWildCard::MODEL_SWC))
+    if (!m_SWC.Load(pFirmwarePath, pDiskPath,
+                    SNSuperWildCard::MODEL_SWC,
+                    pExternalDRAM, nExternalDRAMBytes)) /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916 */
         return FALSE;
 
     m_bSuperWildCard = TRUE;

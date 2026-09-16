@@ -312,7 +312,21 @@ static __inline Uint8 __SNSPCRead8(SNSpcT *pCpu, Uint32 uAddr)
 {
 	uAddr &= 0xFFFFu;
 	if ((uAddr - 0xF0u) < 0x10u)
+	{
+		/* AURORA_HW_ACCURACY_SMP_CPUIO_BUS_HOLD_V1_20260916
+		 * CPUIO $F4-$F7 is sampled at the midpoint of the access without
+		 * changing the instruction's total cycle budget. */
+		if ((uAddr & 0xFFFCu) == 0x00F4u)
+		{
+			Int32 nSavedCycles = pCpu->Cycles;
+			Uint8 uData;
+			pCpu->Cycles -= (SNSPC_CYCLE >> 1);
+			uData = pCpu->pReadTrapFunc(pCpu, uAddr);
+			pCpu->Cycles = nSavedCycles;
+			return uData;
+		}
 		return pCpu->pReadTrapFunc(pCpu, uAddr);
+	}
 	return pCpu->Mem[uAddr];
 }
 
@@ -757,11 +771,12 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 		SNSPC_DUMMYREAD8(rPC); /* first read(PC) of the 3-cycle wait entry */
 		SNSPC_ENDOP(3);
 
-	SNSPC_OP(0xFF, 3);
-		// STOP: distinct persistent state, also cleared by reset.
+	SNSPC_OP(0xFF, 2);
+		/* AURORA_SPC700_MEGA_ACCURACY_V1_20260916
+		 * SNESdev: STOP is 2 cycles; halted cadence remains read(PC)+idle. */
 		pCpu->Regs.uPad = SNSPC_HALT_STOP;
-		SNSPC_DUMMYREAD8(rPC); /* first read(PC) of the 3-cycle stop entry */
-		SNSPC_ENDOP(3);
+		SNSPC_DUMMYREAD8(rPC);
+		SNSPC_ENDOP(2);
 
 
 
@@ -785,7 +800,8 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 		}
 
 		SNSPC_WRITE8(t0,t1);
-		SNSPC_ENDOP(5)
+		/* MOV1 abs.bit,C is 6 cycles; inherited ENDOP(5) undercharged it. */
+		SNSPC_ENDOP(6)
 
 
 	SNSPC_OP(0x0F, 8);

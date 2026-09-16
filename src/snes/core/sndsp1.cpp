@@ -605,7 +605,9 @@ static void DSP1_DoInverse(Int16 *in, Int16 *out)
 static void DSP1_DoMemoryTest(Int16 *in, Int16 *out)
 {
     (void)in;
-    out[0] = (Int16)0xAAAA;
+    /* AURORA_HW_ACCURACY_DSP1_OP0F_V1_20260916 / AURORA_SPC700_MEGA_ACCURACY_V1_20260916
+     * DSP-1/1B Memory Test reports a passing result as $0000. */
+    out[0] = (Int16)0x0000;
 }
 static void DSP1_DoMemorySize(Int16 *in, Int16 *out)
 {

@@ -223,7 +223,10 @@ public:
     void 	SetRom(class Emu::Rom *pRom);
     void	SetSnesRom(SnesRom *pRom);
     /* AURORA_SWC_FLOPPY_V1_20260831 -- isolated copier mode. */
-    Bool    LoadSuperWildCard(const Char *pFirmwarePath, const Char *pDiskPath);
+    /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916: optional borrowed 4 MiB copier DRAM; emulation semantics unchanged. */
+    Bool    LoadSuperWildCard(const Char *pFirmwarePath, const Char *pDiskPath,
+                              Uint8 *pExternalDRAM = NULL,
+                              Uint32 nExternalDRAMBytes = 0);
     Bool    LoadSuperMagicom(const Char *pFirmwarePath, const Char *pDiskPath); /* AURORA_V6_MAGICOM_FRONT_FAREAST_20260831 */
     Bool    SwapSuperWildCardDisk(const Char *pDiskPath);
     void    ShutdownSuperWildCard();

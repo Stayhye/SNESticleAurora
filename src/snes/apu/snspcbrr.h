@@ -12,6 +12,7 @@ typedef struct SNSpcBRRBlock_t
 } SNSpcBRRBlockT;
 
 
+/* AURORA_SPC700_MEGA_ACCURACY_V1_20260916 */
 Uint8 SNSpcBRRDecode(Uint8 *pBRRBlock, Int16 *pOut, Int32 iPrev0, Int32 iPrev1);
 void SNSpcBRRClear(Int16 *pOut, Int16 iPrev);
 

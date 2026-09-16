@@ -35,6 +35,7 @@ SNSuperWildCard::SNSuperWildCard()
     m_eModel = MODEL_SWC; /* AURORA_V6_MAGICOM_FRONT_FAREAST_20260831 */
     m_pDRAM = NULL;
     m_nDRAMBytes = 0;
+    m_bOwnDRAM = FALSE; /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916 */
     m_pFirmware = NULL;
     m_nFirmwareBytes = 0;
     m_pCartRom = NULL; /* AURORA_SWC_FLOPPY_V5_20260831 */
@@ -1015,7 +1016,9 @@ Bool SNSuperWildCard::SwapDisk(const Char *pDiskPath)
 
 Bool SNSuperWildCard::Load(const Char *pFirmwarePath,
                              const Char *pDiskPath,
-                             ModelE eModel)
+                             ModelE eModel,
+                             Uint8 *pExternalDRAM,
+                             Uint32 nExternalDRAMBytes) /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916 */
 {
     Shutdown();
     m_LastError[0]=0;
@@ -1024,10 +1027,24 @@ Bool SNSuperWildCard::Load(const Char *pFirmwarePath,
 
     m_eModel=eModel;
     m_nDRAMBytes=(m_eModel==MODEL_MAGICOM)?MAGICOM_DRAM_BYTES:SWC_DRAM_BYTES;
-    /* AURORA_V6_MAGICOM_FRONT_FAREAST_20260831: allocate only the physical model capacity. */
-    m_pDRAM=(Uint8 *)malloc(m_nDRAMBytes);
-    if (!m_pDRAM)
-    { SetError("not enough EE memory for copier DRAM"); m_nDRAMBytes=0; return FALSE; }
+    /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916
+     * Classic SWC can borrow the exact physical 4 MiB block that the PS2
+     * frontend reserved before constructing SnesSystem. This changes only
+     * host allocation order: the emulated DRAM size/addressing is unchanged.
+     * Magicom and fallback boots keep the original internal malloc path. */
+    m_pDRAM = NULL;
+    m_bOwnDRAM = FALSE;
+    if (pExternalDRAM && nExternalDRAMBytes >= m_nDRAMBytes)
+    {
+        m_pDRAM = pExternalDRAM;
+    }
+    else
+    {
+        m_pDRAM=(Uint8 *)malloc(m_nDRAMBytes);
+        if (!m_pDRAM)
+        { SetError("not enough EE memory for copier DRAM"); m_nDRAMBytes=0; return FALSE; }
+        m_bOwnDRAM = TRUE;
+    }
     memset(m_pDRAM,0,m_nDRAMBytes);
 
     if (!LoadFirmware(pFirmwarePath))
@@ -1079,9 +1096,13 @@ void SNSuperWildCard::Shutdown()
 
     if (m_pDRAM)
     {
-        free(m_pDRAM);
+        /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916: borrowed frontend DRAM outlives Shutdown() and is
+         * released only after SnesSystem destruction. */
+        if (m_bOwnDRAM)
+            free(m_pDRAM);
         m_pDRAM = NULL;
     }
+    m_bOwnDRAM = FALSE;
 
     m_bActive = FALSE;
     m_nDRAMBytes = 0;
