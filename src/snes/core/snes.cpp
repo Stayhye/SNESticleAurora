@@ -2365,6 +2365,20 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::ReadDSP1(SNCpuT *pCpu, Uint32 uAddr)
 {
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 
+#if SNES_DSP1
+	/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V2_DSP2_20260917
+	 * The DSP-2 $6000-$6FFF data window shares Aurora's 8-KiB CPU page with
+	 * physically unmapped $7000-$7FFF.  The map must trap the whole page to
+	 * satisfy SNCpuT's descriptor ABI, but the upper half must not clock the
+	 * DSP HLE.  Preserve the core's ordinary unmapped read value (0xFF). */
+	if (pSnes->m_pDsp == &pSnes->m_DSP2)
+	{
+		Uint16 a = (Uint16)uAddr;
+		if (a >= 0x7000u && a < 0x8000u)
+			return 0xFF;
+	}
+#endif
+
 	// Guarda anti-crash: se o chip nao esta ligado (ex.: jogo de
 	// DSP-3/DSP-4 sem o firmware correspondente), nao ha objeto DSP.
 	// Devolve um status "ocupado/sem RQM" e dados 0 em vez de
@@ -2396,6 +2410,16 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::ReadDSP1(SNCpuT *pCpu, Uint32 uAddr)
 void SNCPU_TRAPFUNC SnesSystem::WriteDSP1(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
 {
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+
+#if SNES_DSP1
+	/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V2_DSP2_20260917: companion write guard for the widened host descriptor page. */
+	if (pSnes->m_pDsp == &pSnes->m_DSP2)
+	{
+		Uint16 a = (Uint16)uAddr;
+		if (a >= 0x7000u && a < 0x8000u)
+			return;
+	}
+#endif
 
 	// Guarda anti-crash: sem chip DSP ligado, ignora a escrita.
 	if (!pSnes->m_pDsp)

@@ -133,31 +133,38 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
 #define SNSPC_SETFLAGI_C(_x)  fC = (_x) & 1;
 #define SNSPC_GETFLAG_C(_x)  _x = fC & 1;
 
-#define SNSPC_SETFLAG_V() r_P |= SNSPC_FLAG_V;
-#define SNSPC_CLRFLAG_V() r_P &= ~SNSPC_FLAG_V;
+#define SNSPC_SETFLAG_V() fHV |= SNSPC_FLAG_V;
+#define SNSPC_CLRFLAG_V() fHV &= ~SNSPC_FLAG_V;
 #define SNSPC_SETFLAG_I() r_P |= SNSPC_FLAG_I;
 #define SNSPC_CLRFLAG_I() r_P &= ~SNSPC_FLAG_I;
 #define SNSPC_SETFLAG_B() r_P |= SNSPC_FLAG_B;
 #define SNSPC_SETFLAG_D() r_P |= SNSPC_FLAG_D;
 #define SNSPC_CLRFLAG_D() r_P &= ~SNSPC_FLAG_D;
-#define SNSPC_SETFLAGI_V(__V) r_P &= ~SNSPC_FLAG_V; r_P |= ((__V) & 1) << 6;
+#define SNSPC_SETFLAGI_V(__V) do { \
+	fHV = (fHV & ~SNSPC_FLAG_V) | (((__V) & 1u) << 6); \
+} while (0)
 #define SNSPC_SETFLAG_H(__H) do { \
-	r_P = (r_P & ~SNSPC_FLAG_H) | (((__H) & 1) << 3); \
+	fHV = (fHV & ~SNSPC_FLAG_H) | (((__H) & 1u) << 3); \
 } while (0)
 
 #define SNSPC_SETFLAG_P() r_P |= SNSPC_FLAG_P; r_DP=0x100;
 #define SNSPC_CLRFLAG_P() r_P &= ~SNSPC_FLAG_P; r_DP=0x000;
 #define SNSPC_SETPC(_Addr)	r_PC= _Addr;
 
+/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V3_SPC_LAZY_HV_20260917
+ * C/Z/N were already lazy. Keep H/V lazy as well and synchronize them only
+ * where the architectural PSW byte is observed or when the interpreter exits. */
 #define SNSPC_UNPACKFLAGS()					\
 	fC = (r_P & SNSPC_FLAG_C);					\
+	fHV = (r_P & (SNSPC_FLAG_H | SNSPC_FLAG_V));		\
 	r_DP = (r_P & SNSPC_FLAG_P) << 3;					\
 	fZ = (r_P & SNSPC_FLAG_Z) ^ SNSPC_FLAG_Z;	\
 	fN = (r_P << 8);							
 
 #define SNSPC_PACKFLAGS()								\
-	r_P &= ~(SNSPC_FLAG_C | SNSPC_FLAG_Z |SNSPC_FLAG_N);	\
+	r_P &= ~(SNSPC_FLAG_C | SNSPC_FLAG_Z | SNSPC_FLAG_N | SNSPC_FLAG_H | SNSPC_FLAG_V);	\
 	r_P |= fC & SNSPC_FLAG_C;												\
+	r_P |= fHV & (SNSPC_FLAG_H | SNSPC_FLAG_V);				\
 	r_P |= (fN >> 8) & SNSPC_FLAG_N;								\
 	if (!(fZ&0xFFFF)) r_P|=SNSPC_FLAG_Z;		
 
@@ -229,11 +236,9 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
     Uint32 _Target = (_Dest) & 0xFFu;                                \
     Uint32 _Source = (_Src) & 0xFFu;                                 \
     Uint32 _Result = _Target + _Source + (fC & 1u);                  \
-    r_P &= ~(SNSPC_FLAG_V | SNSPC_FLAG_H);                           \
-    if ((_Target ^ _Source ^ _Result) & 0x10u)                      \
-        r_P |= SNSPC_FLAG_H;                                         \
-    if ((~(_Target ^ _Source) & (_Target ^ _Result) & 0x80u) != 0) \
-        r_P |= SNSPC_FLAG_V;                                         \
+    Uint32 _H = (_Target ^ _Source ^ _Result) & 0x10u;               \
+    Uint32 _V = (~(_Target ^ _Source) & (_Target ^ _Result)) & 0x80u; \
+    fHV = (_H >> 1) | (_V >> 1);                                    \
     (_Dest) = _Result;                                               \
 } while (0)
 
@@ -243,11 +248,9 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
     Uint32 _Target = (_Dest) & 0xFFFFu;                                   \
     Uint32 _Source = (_Src) & 0xFFFFu;                                    \
     Uint32 _Result = _Target + _Source;                                   \
-    r_P &= ~(SNSPC_FLAG_V | SNSPC_FLAG_H);                                \
-    if ((_Target ^ _Source ^ _Result) & 0x1000u)                         \
-        r_P |= SNSPC_FLAG_H;                                              \
-    if ((~(_Target ^ _Source) & (_Target ^ _Result) & 0x8000u) != 0)    \
-        r_P |= SNSPC_FLAG_V;                                              \
+    Uint32 _H = (_Target ^ _Source ^ _Result) & 0x1000u;                  \
+    Uint32 _V = (~(_Target ^ _Source) & (_Target ^ _Result)) & 0x8000u;  \
+    fHV = (_H >> 9) | (_V >> 9);                                         \
     (_Dest) = _Result;                                                    \
 } while (0)
 
@@ -255,12 +258,10 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
     Uint32 _Target = (_Dest) & 0xFFFFu;                                  \
     Uint32 _Source = (_Src) & 0xFFFFu;                                   \
     Uint32 _Result = _Target + ((~_Source) & 0xFFFFu) + 1u;              \
-    r_P &= ~(SNSPC_FLAG_V | SNSPC_FLAG_H);                               \
-    if ((~(_Target ^ _Source ^ _Result)) & 0x1000u)                     \
-        r_P |= SNSPC_FLAG_H;                                             \
-    if (((_Target ^ _Source) & (_Target ^ _Result) & 0x8000u) != 0)    \
-        r_P |= SNSPC_FLAG_V;                                             \
-    (_Dest) = _Result;                                                   \
+    Uint32 _H = (~(_Target ^ _Source ^ _Result)) & 0x1000u;              \
+    Uint32 _V = ((_Target ^ _Source) & (_Target ^ _Result)) & 0x8000u;   \
+    fHV = (_H >> 9) | (_V >> 9);                                         \
+    (_Dest) = _Result;                                                    \
 } while (0)
 
 
@@ -433,6 +434,7 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 	Uint32 fN; // N??????? ????????
 	Uint32 fZ; // ZZZZZZZZ ZZZZZZZZ
 	Uint32 fC; // 00000000 0000000C
+	Uint32 fHV; /* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V3_SPC_LAZY_HV_20260917: lazy H/V bits, mask 0x48 */
 	Uint32 rDP;
 //	Uint32 bDone = FALSE;
 
@@ -702,7 +704,7 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 			t0 = (t0 - 0x60u) & 0xFFu;
 			SNSPC_SETFLAGI_C(0);
 		}
-		if (!(r_P & SNSPC_FLAG_H) || (t0 & 0x0Fu) > 0x09u)
+		if (!(fHV & SNSPC_FLAG_H) || (t0 & 0x0Fu) > 0x09u)
 			t0 = (t0 - 0x06u) & 0xFFu;
 		SNSPC_SET_A8(t0);
 		SNSPC_SETFLAG_N8(t0);
@@ -717,7 +719,7 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 			t0 = (t0 + 0x60u) & 0xFFu;
 			SNSPC_SETFLAGI_C(1);
 		}
-		if ((r_P & SNSPC_FLAG_H) || (t0 & 0x0Fu) > 0x09u)
+		if ((fHV & SNSPC_FLAG_H) || (t0 & 0x0Fu) > 0x09u)
 			t0 = (t0 + 0x06u) & 0xFFu;
 		SNSPC_SET_A8(t0);
 		SNSPC_SETFLAG_N8(t0);

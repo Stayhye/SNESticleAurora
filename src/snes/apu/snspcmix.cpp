@@ -532,14 +532,78 @@ Int32 SNSpcDspMixFull::OutputNoise(Int16 *pOut, Uint16 *pFrac, Int32 nSamples, I
 	Uint32 noise=m_uNoiseGen&0x7FFFu;
 	Uint32 period=_SNSpcDspCounterRate[rate];
 	Uint32 offset=_SNSpcDspCounterOffset[rate];
+	Uint32 eventCountdown=0;
 	(void)nSampleRate;
+
 	if(!noise) noise=0x4000;
+
+	/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V2_DSP2_20260917
+	 * The S-DSP noise counter is free-running even with NON/NOV == 0.
+	 * When nobody consumes the generated samples, advance the exact counter
+	 * phase and exact number of LFSR events without writing the transient
+	 * sample/fraction buffers.  All legal periods divide the 30720-step
+	 * counter, so the event cadence remains identical across wrap. */
+	if(!pOut || !pFrac)
+	{
+		Uint32 n=(nSamples > 0) ? (Uint32)nSamples : 0u;
+
+		/* V1 never leaves 30720 after a positive sample, but accept that
+		 * boundary representation from old/debug states: on the next sample
+		 * it behaves exactly like stored zero. Preserve it when n==0. */
+		if(n && counter==30720u) counter=0;
+
+		if(rate && period && n)
+		{
+			Uint32 firstCounter=counter ? (counter-1u) : 30719u;
+			Uint32 firstEvent=((firstCounter+offset)%period)+1u;
+			Uint32 events=(n < firstEvent) ? 0u :
+				(1u + (n-firstEvent)/period);
+			while(events--)
+				noise=(((noise<<13)^(noise<<14))&0x4000u)|(noise>>1);
+		}
+
+		if(n)
+		{
+			Uint32 step=n%30720u;
+			if(step)
+			{
+				Uint32 start=counter ? counter : 30720u;
+				if(step < start) counter=start-step;
+				else if(step == start) counter=0;
+				else counter=30720u-(step-start);
+			}
+			/* A complete 30720-sample revolution returns the stored counter
+			 * to exactly the same representation, including zero. */
+		}
+
+		m_iNoisePhase=(Int32)counter;
+		m_uNoiseGen=noise;
+		return 1;
+	}
+
+	/* V1 generated-output path: one exact phase calculation per chunk, then
+	 * a countdown instead of a modulo at every 32-kHz sample. */
+	if(rate && period)
+	{
+		Uint32 firstCounter=counter ? (counter-1u) : 30719u;
+		eventCountdown=((firstCounter+offset)%period)+1u;
+	}
+
 	while(nSamples-- > 0)
 	{
 		if(!counter) counter=30720;
 		counter--;
-		if(rate && ((counter+offset)%period)==0)
-			noise=(((noise<<13)^(noise<<14))&0x4000u)|(noise>>1);
+
+		if(rate)
+		{
+			eventCountdown--;
+			if(!eventCountdown)
+			{
+				noise=(((noise<<13)^(noise<<14))&0x4000u)|(noise>>1);
+				eventCountdown=period;
+			}
+		}
+
 		Int16 s=(Int16)(noise<<1);
 		pOut[0]=s; pOut[1]=s; pFrac[0]=0;
 		pOut+=2; pFrac++;
@@ -559,44 +623,49 @@ void SNSpcDspMixFull::FetchBlock(Int32 iChannel)
 	pChannel->BlockData[0][15] = pChannel->BlockData[1][15];
 
 	// decode next block
-	if (pChannel->uBlockAddr!=0) 
+	if (pChannel->uBlockAddr!=0)
 	{
 		PROF_ENTER("SNSpcBRRDecode");
-		Uint8 BrrBlock[9];
-		Uint16 uBrrAddr = pChannel->uBlockAddr;
-		Int32 iBrrByte;
-		for (iBrrByte=0; iBrrByte<9; ++iBrrByte)
+		Uint16 uBrrAddr = (Uint16)pChannel->uBlockAddr;
+		Uint8 *pBrrBlock = m_pDsp->GetRAMSpan(uBrrAddr, 9);
+
+		/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V1_20260917: almost every BRR block is contiguous physical APURAM.
+		 * Keep byte-wise ReadRAM only for the real exceptional boundaries. */
+		if (pBrrBlock)
 		{
-			BrrBlock[iBrrByte] = m_pDsp->ReadRAM(uBrrAddr);
-			uBrrAddr = (Uint16)(uBrrAddr + 1);
+			uFlags = SNSpcBRRDecode(
+				pBrrBlock, pChannel->BlockData[1],
+				pChannel->BlockData[0][15], pChannel->BlockData[0][14]);
 		}
-		uFlags = SNSpcBRRDecode(BrrBlock, pChannel->BlockData[1], pChannel->BlockData[0][15], pChannel->BlockData[0][14]);
+		else
+		{
+			Uint8 BrrBlock[9];
+			Int32 iBrrByte;
+			for (iBrrByte=0; iBrrByte<9; ++iBrrByte)
+			{
+				BrrBlock[iBrrByte] = m_pDsp->ReadRAM(uBrrAddr);
+				uBrrAddr = (Uint16)(uBrrAddr + 1);
+			}
+			uFlags = SNSpcBRRDecode(
+				BrrBlock, pChannel->BlockData[1],
+				pChannel->BlockData[0][15], pChannel->BlockData[0][14]);
+		}
 		PROF_LEAVE("SNSpcBRRDecode");
 		pChannel->uBlockAddr += 9;
-	}  else
+	}
+	else
 	{
-		// fade out slowly
-//		SNSpcBRRClear(pChannel->BlockData[1], pChannel->BlockData[0][15] - (pChannel->BlockData[0][15]>>1));
 		SNSpcBRRClear(pChannel->BlockData[1], 0);
 	}
 
-	// end of sample reached?
 	if (uFlags&1)
 	{
 		const SNSpcVoiceRegsT *pRegs = m_pDsp->GetVoiceRegs(iChannel);
-
-		//$ set ENDX
 		pChannel->endx = TRUE;
-		//m_RegsSNSPCDSP_REG_ENDX] |=   1 << iChannel;
-
-		if (uFlags & 2 )
-		{
-			// do looping here?
+		if (uFlags & 2)
 			pChannel->uBlockAddr = m_pDsp->GetSampleDir(pRegs->srcn, 2);
-		} else
-		{
+		else
 			pChannel->uBlockAddr = 0;
-		}
 	}
 }
 
@@ -1302,6 +1371,7 @@ static _INLINE Int32 _SNSpcEchoFIR(const Int16 *l,const Int16 *c)
 static Uint32 _FilterEchoStereoARAM(SNSpcEchoSampleT *L,SNSpcEchoSampleT *R,Int32 n,Int32 fb,SNSpcDsp *dsp,Uint32 base,Uint32 pos,Uint32 size,const Int16 *coef,SNSpcFIRFilterT *f,Bool wr)
 {
 	Int32 fp=f[0].iPos;
+	Uint8 *pLinearRam=dsp->GetLinearPhysicalRAM();
 	if(!size)size=4;
 	if(pos>=size)pos%=size;
 	while(n-- > 0)
@@ -1309,8 +1379,24 @@ static Uint32 _FilterEchoStereoARAM(SNSpcEchoSampleT *L,SNSpcEchoSampleT *R,Int3
 		Int32 inL=*L,inR=*R,rdL,rdR,fl,fr,wl,wrv;
 		Int16 *ll,*rr;
 		Uint32 a=(base+pos)&0xFFFFu;
-		rdL=_SNSpcEchoRead16(dsp,a);
-		rdR=_SNSpcEchoRead16(dsp,a+2);
+
+		/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V1_20260917: direct access is bit-for-bit the same physical APURAM
+		 * when IPL is off.  Keep the split shadow-RAM helpers when IPL is on. */
+		if(pLinearRam)
+		{
+			Uint16 a0=(Uint16)a;
+			Uint16 a1=(Uint16)(a0+1);
+			Uint16 a2=(Uint16)(a0+2);
+			Uint16 a3=(Uint16)(a0+3);
+			rdL=(Int16)((Uint16)pLinearRam[a0]|((Uint16)pLinearRam[a1]<<8));
+			rdR=(Int16)((Uint16)pLinearRam[a2]|((Uint16)pLinearRam[a3]<<8));
+		}
+		else
+		{
+			rdL=_SNSpcEchoRead16(dsp,a);
+			rdR=_SNSpcEchoRead16(dsp,a+2);
+		}
+
 		ll=&f[0].Line[fp&7]; rr=&f[1].Line[fp&7]; fp--;
 		ll[0]=ll[8]=(Int16)(rdL>>1);
 		rr[0]=rr[8]=(Int16)(rdR>>1);
@@ -1318,7 +1404,29 @@ static Uint32 _FilterEchoStereoARAM(SNSpcEchoSampleT *L,SNSpcEchoSampleT *R,Int3
 		*L=(Int16)fl; *R=(Int16)fr;
 		wl=_SNSpcClamp16(inL+(Int16)((fl*fb)>>7))&~1;
 		wrv=_SNSpcClamp16(inR+(Int16)((fr*fb)>>7))&~1;
-		if(wr){_SNSpcEchoWrite16(dsp,a,(Int16)wl);_SNSpcEchoWrite16(dsp,a+2,(Int16)wrv);}
+
+		if(wr)
+		{
+			if(pLinearRam)
+			{
+				Uint16 a0=(Uint16)a;
+				Uint16 a1=(Uint16)(a0+1);
+				Uint16 a2=(Uint16)(a0+2);
+				Uint16 a3=(Uint16)(a0+3);
+				Uint16 uL=(Uint16)(Int16)wl;
+				Uint16 uR=(Uint16)(Int16)wrv;
+				pLinearRam[a0]=(Uint8)uL;
+				pLinearRam[a1]=(Uint8)(uL>>8);
+				pLinearRam[a2]=(Uint8)uR;
+				pLinearRam[a3]=(Uint8)(uR>>8);
+			}
+			else
+			{
+				_SNSpcEchoWrite16(dsp,a,(Int16)wl);
+				_SNSpcEchoWrite16(dsp,a+2,(Int16)wrv);
+			}
+		}
+
 		pos+=4; if(pos>=size)pos=0; L++; R++;
 	}
 	f[0].iPos=fp; f[1].iPos=fp;
@@ -1438,6 +1546,7 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 		Int32 iChannel;
 		Uint8 uEchoEnable;
 		Uint8 uPitchMod;
+		Uint8 uNoiseEnable; /* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V2_DSP2_20260917 */
 		Int16 *pPitchModPrev = pData->PitchModA;
 		Int16 *pPitchModNext = pData->PitchModB;
 
@@ -1449,6 +1558,7 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 
 		/* Voice 0 cannot be pitch-modulated on real hardware. */
 		uPitchMod = m_pDsp->GetReg(SNSPCDSP_REG_PMON) & 0xFE;
+		uNoiseEnable = m_pDsp->GetReg(SNSPCDSP_REG_NOV);
 
 		// dont update more than samples-per-update at a time
 		nSamples = nTotalSamples;
@@ -1463,7 +1573,12 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 		// Noise/rate counter free-runs independent of NON selection.
 		{
 			PROF_ENTER("SNSpcDspOutputNoise");
-			OutputNoise(m_iNoiseSample, m_iNoiseFrac, nSamples, nSampleRate);
+			/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V2_DSP2_20260917: only materialize the transient noise buffers if a voice
+			 * actually consumes them; otherwise advance exact internal state. */
+			if(uNoiseEnable)
+				OutputNoise(m_iNoiseSample, m_iNoiseFrac, nSamples, nSampleRate);
+			else
+				OutputNoise(NULL, NULL, nSamples, nSampleRate);
 			PROF_LEAVE("SNSpcDspOutputNoise");
 		}
 
@@ -1514,7 +1629,7 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 						const SNSpcVoiceRegsT *pRegs = m_pDsp->GetVoiceRegs(iChannel);
 
 						// is noise enabled for this channel?
-						if (m_pDsp->GetReg(SNSPCDSP_REG_NOV) & (1<<iChannel))
+						if (uNoiseEnable & (1<<iChannel))
 						{
 							// use pre-generated noise channel data instead of pcm data
 							pSampleData = m_iNoiseSample;

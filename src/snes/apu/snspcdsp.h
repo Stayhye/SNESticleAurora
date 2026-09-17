@@ -183,6 +183,32 @@ public:
 		else
 			m_pMem[uAddr] = uData;
 	}
+	/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V1_20260917
+	 * Return an exact contiguous physical-APURAM span when one exists.
+	 * NULL means the caller must use ReadRAM/WriteRAM byte semantics. */
+	inline Uint8 *GetRAMSpan(Uint16 uAddr, Uint32 nBytes)
+	{
+		Uint32 uEnd = (Uint32)uAddr + nBytes;
+		if (!nBytes || uEnd > 0x10000u)
+			return NULL; /* wraps $FFFF */
+
+		if (m_pbRomEnable && *m_pbRomEnable && m_pShadowMem)
+		{
+			if (uAddr >= SNSPC_ROM_ADDR)
+				return m_pShadowMem + (uAddr - SNSPC_ROM_ADDR);
+			if (uEnd > SNSPC_ROM_ADDR)
+				return NULL; /* crosses visible RAM -> hidden physical RAM */
+		}
+		return m_pMem + uAddr;
+	}
+
+	/* Exact only when the IPL overlay is not hiding $FFC0-$FFFF. */
+	inline Uint8 *GetLinearPhysicalRAM()
+	{
+		if (!m_pbRomEnable || !*m_pbRomEnable || !m_pShadowMem)
+			return m_pMem;
+		return NULL;
+	}
 	inline Uint8 *GetMem() {return m_pMem;}
 
 	void	UpdateFlags(ISNSpcDspMix *pMixer);
