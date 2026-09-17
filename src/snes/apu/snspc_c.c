@@ -547,12 +547,14 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 
 	SNSPC_OP(0x50, 2);
 		// BVC
-		SNSPC_BRREL(!(r_P&SNSPC_FLAG_V));
+		/* AURORA_V7_1_1_DKC_SPC_VBRANCH_HOTFIX_20260917:
+		 * V3 keeps V in lazy fHV, so control flow must observe fHV too. */
+		SNSPC_BRREL(!(fHV&SNSPC_FLAG_V));
        SNSPC_ENDOP(2);
 
 	SNSPC_OP(0x70, 2);
 		// BVS
-		SNSPC_BRREL((r_P&SNSPC_FLAG_V));
+		SNSPC_BRREL((fHV&SNSPC_FLAG_V));
        SNSPC_ENDOP(2);
 
 	SNSPC_OP(0x2F, 4);
