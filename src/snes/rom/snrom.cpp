@@ -1025,9 +1025,20 @@ void SnesRom::SetCartInfo(SNRomInfoT *pCartInfo)
 		case 227:
 			m_Flags		 = SNROM_FLAG_ROM | SNROM_FLAG_RAM | SNROM_FLAG_GAMEBOY;
 			break;
-		case 246:
-			m_Flags		 = SNROM_FLAG_ROM | SNROM_FLAG_DSP2;
-			break;
+		/* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: $F6 is ST010/ST011-class silicon, not DSP-2; ROM-only fallback. */
+		}
+
+		/* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: prefer hardware header IDs. */
+		if (m_Flags & SNROM_FLAG_DSP1)
+		{
+			Uint32 uVariant = 0;
+			if (pCartInfo->RomType == 0x03 && pCartInfo->RomMakeup == 0x30)
+				uVariant = SNROM_FLAG_DSP4;
+			else if (pCartInfo->RomType == 0x05 && pCartInfo->RomMakeup == 0x20)
+				uVariant = SNROM_FLAG_DSP2;
+			else if (pCartInfo->RomType == 0x05 && pCartInfo->RomMakeup == 0x30 && pCartInfo->License == 0xB2)
+				uVariant = SNROM_FLAG_DSP3;
+			if (uVariant) { m_Flags &= ~SNROM_FLAG_DSP1; m_Flags |= uVariant; }
 		}
 
 		// O byte RomType nao distingue a variante do DSP (1/2/3/4): todos
@@ -1109,24 +1120,30 @@ void SnesRom::SetCartInfo(SNRomInfoT *pCartInfo)
 			}
 		}
 
-		// CX4 (Mega Man X2/X3, Rockman X2/X3): o cartucho reporta RomType
-		// 0xF3, que nao cai em nenhum case do switch acima (m_Flags ficaria
-		// indefinido). E' detectado pelo titulo. Mega Man X1 e' "MEGAMAN X "
-		// (com espaco), entao casar 10 chars de "MEGAMAN X2"/"X3" nao pega o X1.
+		/* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: $F3 is the hardware CX4 identity. Official CX4 boards have
+		 * no cartridge SRAM; their 3 KiB C4RAM belongs to the coprocessor. */
 		{
-			char t[11];
-			int k;
-			for (k = 0; k < 10; k++)
+			Bool bCX4 = (pCartInfo->RomMakeup == 0x20 &&
+			             pCartInfo->RomType == 0xF3) ? TRUE : FALSE;
+			if (!bCX4)
 			{
-				char c = (char)pCartInfo->Title[k];
-				if (c >= 'a' && c <= 'z') c -= 32;
-				t[k] = c;
+				char t[11];
+				int k;
+				for (k = 0; k < 10; k++)
+				{
+					char c = (char)pCartInfo->Title[k];
+					if (c >= 'a' && c <= 'z') c -= 32;
+					t[k] = c;
+				}
+				t[10] = 0;
+				bCX4 = (!strncmp(t, "MEGAMAN X2", 10) || !strncmp(t, "MEGAMAN X3", 10) ||
+				        !strncmp(t, "ROCKMAN X2", 10) || !strncmp(t, "ROCKMAN X3", 10));
 			}
-			t[10] = 0;
-			if (!strncmp(t, "MEGAMAN X2", 10) || !strncmp(t, "MEGAMAN X3", 10) ||
-			    !strncmp(t, "ROCKMAN X2", 10) || !strncmp(t, "ROCKMAN X3", 10))
+			if (bCX4)
 			{
-				m_Flags = SNROM_FLAG_ROM | SNROM_FLAG_SAVERAM | SNROM_FLAG_CX4;
+				m_eMapping = SNROM_MAPPING_LOROM;
+				m_Flags = SNROM_FLAG_ROM | SNROM_FLAG_CX4;
+				m_uSRAMSize = 0;
 			}
 		}
 

@@ -1,3 +1,4 @@
+/* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: cumulative DSP V2 + SA-1 accuracy */
 /* AURORA_V13_UNIFIED_GBC_AUDIO_32X_FRAMESKIP_20260910 */
 #include <string.h>
 #include "types.h"
@@ -199,8 +200,9 @@ void SNSA1::Reset()
 }
 
 /* AURORA_SA1_PERF_STATE_V8_3_20260903 */
+/* AURORA SA-1 state v2: CC2 line semantics are now hardware-accurate. */
 static const Uint8 _SNSA1StateTag[8] =
-    { 'A', 'U', 'S', 'A', '1', 'S', '1', 0 };
+    { 'A', 'U', 'S', 'A', '1', 'S', '2', 0 };
 
 Bool SNSA1::SaveState(SNSA1StateT *pState) const
 {
@@ -211,7 +213,7 @@ Bool SNSA1::SaveState(SNSA1StateT *pState) const
 
     memset(pState, 0, sizeof(*pState));
     memcpy(pState->Tag, _SNSA1StateTag, sizeof(pState->Tag));
-    pState->Version = 1;
+    pState->Version = 2;
 
     pState->CpuRegs = m_Cpu.Regs;
     pState->CpuCycles = m_Cpu.Cycles;
@@ -250,7 +252,7 @@ Bool SNSA1::RestoreState(const SNSA1StateT *pState)
 
     if (!m_bActive || !pState ||
         memcmp(pState->Tag, _SNSA1StateTag, sizeof(pState->Tag)) != 0 ||
-        pState->Version != 1)
+        pState->Version != 2)
         return FALSE;
 
     memcpy(m_Reg, pState->Reg, sizeof(m_Reg));
@@ -514,8 +516,14 @@ void SNSA1::RebuildFastState()
 
     /* Timer mode/targets are hot on every SA-1 scheduler entry but change
      * only through $2210/$2212-$2215. */
-    m_uTimerHMax = (m_Reg[0x10] & 0x80u) ? 0x800u : 1364u;
-    m_uTimerVMax = (m_Reg[0x10] & 0x80u) ? 0x200u : 262u;
+    {
+        Uint32 scanlines = 262u;
+        if (m_pOwner && m_pOwner->m_pRom &&
+            m_pOwner->m_pRom->m_eVideoType == SNROM_VIDEO_PAL)
+            scanlines = 312u;
+        m_uTimerHMax = (m_Reg[0x10] & 0x80u) ? 0x800u : 1364u;
+        m_uTimerVMax = (m_Reg[0x10] & 0x80u) ? 0x200u : scanlines;
+    }
     m_uTimerHTarget = ((Uint32)m_Reg[0x12] |
                        ((Uint32)m_Reg[0x13] << 8)) << 2;
     m_uTimerVTarget = (Uint32)m_Reg[0x14] |
@@ -1464,32 +1472,28 @@ void SNSA1::ReadVariableLength(Bool bInc, Bool bNoShift)
 
 void SNSA1::DoCC2()
 {
-    Uint32 offset = (m_uCharIndex & 7) ? 0u : 1u;
-    Int32 depth = (Int32)m_uCCBPP;
-    Int32 bytesPerChar = 8 * depth;
-    Uint8 *q = m_CharData + offset * 64;
-    Int32 l;
-    Uint32 p = (m_uCCDDA & 0x7FFu) + offset * (Uint32)bytesPerChar;
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916
+     * Hardware Type-2 CC commits one row at a time. m_uCharIndex is the
+     * 4-bit DMA line counter; bit0 selects BRF0-7 vs BRF8-15. */
+    const Uint8 *brf = &m_Reg[0x40 + ((m_uCharIndex & 1u) << 3)];
+    Uint32 bpp = (Uint32)m_uCCBPP;
+    Uint32 address = m_uCCDDA & 0x07FFu;
+    Uint32 alignMask = ((Uint32)m_uCCCharMask << 1) | 1u;
+    Uint32 byte;
+    unsigned long long planes;
 
-    for (l = 0; l < 8; ++l, q += 8)
+    address &= ~alignMask;
+    address += (Uint32)(m_uCharIndex & 8u) * bpp;
+    address += (Uint32)(m_uCharIndex & 7u) * 2u;
+
+    planes = _SA1Transpose8x8ToPlanes(_SA1Pack8Pixels(brf));
+    for (byte = 0; byte < bpp; ++byte)
     {
-        unsigned long long planes = _SA1Transpose8x8ToPlanes(_SA1Pack8Pixels(q));
-        m_IRAM[(p + 0) & 0x7FF] = (Uint8)(planes >> 0);
-        m_IRAM[(p + 1) & 0x7FF] = (Uint8)(planes >> 8);
-        if (depth >= 4)
-        {
-            m_IRAM[(p + 16) & 0x7FF] = (Uint8)(planes >> 16);
-            m_IRAM[(p + 17) & 0x7FF] = (Uint8)(planes >> 24);
-        }
-        if (depth >= 8)
-        {
-            m_IRAM[(p + 32) & 0x7FF] = (Uint8)(planes >> 32);
-            m_IRAM[(p + 33) & 0x7FF] = (Uint8)(planes >> 40);
-            m_IRAM[(p + 48) & 0x7FF] = (Uint8)(planes >> 48);
-            m_IRAM[(p + 49) & 0x7FF] = (Uint8)(planes >> 56);
-        }
-        p += 2;
+        Uint32 q = address + ((byte & 6u) << 3) + (byte & 1u);
+        m_IRAM[q & 0x07FFu] = (Uint8)(planes >> (byte << 3));
     }
+
+    m_uCharIndex = (Uint8)((m_uCharIndex + 1u) & 15u);
 }
 
 void SNSA1::DoDMA()
@@ -1779,8 +1783,11 @@ void SNSA1::WriteRegister(Uint16 uAddr, Uint8 uData)
             RefreshBWRAMDirectWrites();
             return;
         case 0x2229: case 0x222A:
+            m_Reg[i] = uData;
+            return;
         case 0x2230:
             m_Reg[i] = uData;
+            if (!(uData & 0x80u)) m_uCharIndex = 0; /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
             return;
         case 0x2231:
             m_Reg[i] = uData;
@@ -1835,20 +1842,20 @@ void SNSA1::WriteRegister(Uint16 uAddr, Uint8 uData)
             RebuildFastState();
             return;
         case 0x2240: case 0x2241: case 0x2242: case 0x2243:
-        case 0x2244: case 0x2245: case 0x2246: case 0x2247:
+        case 0x2244: case 0x2245: case 0x2246:
+            m_Reg[i] = uData;
+            return;
+        case 0x2247:
+            m_Reg[i] = uData;
+            if ((m_Reg[0x30] & 0xB0) == 0xA0) DoCC2();
+            return;
         case 0x2248: case 0x2249: case 0x224A: case 0x224B:
         case 0x224C: case 0x224D: case 0x224E:
             m_Reg[i] = uData;
             return;
         case 0x224F:
             m_Reg[i] = uData;
-            if ((m_Reg[0x30] & 0xB0) == 0xA0)
-            {
-                memcpy(m_CharData + (m_uCharIndex & 7) * 16,
-                       &m_Reg[0x40], 16);
-                m_uCharIndex = (Uint8)((m_uCharIndex + 1) & 7);
-                if ((m_uCharIndex & 3) == 0) DoCC2();
-            }
+            if ((m_Reg[0x30] & 0xB0) == 0xA0) DoCC2();
             return;
         case 0x2250:
             if (uData & 2) m_uSum = 0;
@@ -1989,41 +1996,68 @@ void SNSA1::ServiceInterrupts()
 
 void SNSA1::UpdateTimer(Uint32 nSA1Cycles)
 {
-    Uint8 uTimer = m_Reg[0x10];
-    Bool thisIRQ;
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: AURORA SA-1 timer event accuracy.
+     * The hardware compares H/V at timer clock positions, not merely at the
+     * final counter value of a scheduler batch. Walk only horizontal-wrap
+     * segments so this stays cheap while preserving exact event crossings. */
+    Uint8 timer = m_Reg[0x10];
+    Bool hEnable = (timer & 1u) ? TRUE : FALSE;
+    Bool vEnable = (timer & 2u) ? TRUE : FALSE;
+    Bool hit = FALSE;
+    Uint32 remaining = nSA1Cycles;
+
+    if (!m_uTimerHMax || !m_uTimerVMax)
+        return;
+
+    if (m_uHCounter >= m_uTimerHMax)
+        m_uHCounter %= m_uTimerHMax;
+    if (m_uVCounter >= m_uTimerVMax)
+        m_uVCounter %= m_uTimerVMax;
 
     m_uPrevHCounter = m_uHCounter;
-    m_uHCounter += nSA1Cycles;
-    while (m_uHCounter >= m_uTimerHMax)
+
+    while (remaining)
     {
-        m_uHCounter -= m_uTimerHMax;
-        if (++m_uVCounter >= m_uTimerVMax) m_uVCounter = 0;
+        Uint32 toWrap = m_uTimerHMax - m_uHCounter;
+        Uint32 step = (remaining < toWrap) ? remaining : toWrap;
+        Uint32 endH = m_uHCounter + step;
+
+        /* Non-zero HCNT belongs to the current scanline. */
+        if (hEnable && m_uTimerHTarget != 0 &&
+            m_uTimerHTarget > m_uHCounter &&
+            m_uTimerHTarget < m_uTimerHMax &&
+            m_uTimerHTarget <= endH &&
+            (!vEnable || m_uVCounter == m_uTimerVTarget))
+            hit = TRUE;
+
+        m_uHCounter = endH;
+        remaining -= step;
+
+        if (m_uHCounter >= m_uTimerHMax)
+        {
+            m_uHCounter = 0;
+            if (++m_uVCounter >= m_uTimerVMax) m_uVCounter = 0;
+
+            /* V-only compares at H=0. HCNT=0 also compares here. */
+            if ((!hEnable && vEnable && m_uVCounter == m_uTimerVTarget) ||
+                (hEnable && m_uTimerHTarget == 0 &&
+                 (!vEnable || m_uVCounter == m_uTimerVTarget)))
+                hit = TRUE;
+        }
     }
 
-    if (!(uTimer & 3))
+    if (!(timer & 3u))
     {
         m_bTimerLastState = FALSE;
         return;
     }
 
-    thisIRQ = TRUE;
-    if (uTimer & 1)
-    {
-        Bool crossed =
-            (m_uPrevHCounter <= m_uTimerHTarget && m_uHCounter >= m_uTimerHTarget) ||
-            (m_uHCounter < m_uPrevHCounter &&
-             (m_uTimerHTarget >= m_uPrevHCounter || m_uTimerHTarget <= m_uHCounter));
-        if (!crossed) thisIRQ = FALSE;
-    }
-    if ((uTimer & 2) && m_uVCounter != m_uTimerVTarget)
-        thisIRQ = FALSE;
-
-    if (!m_bTimerLastState && thisIRQ)
+    if (hit)
     {
         m_Reg[0x101] |= 0x40;
         if (m_Reg[0x0A] & 0x40) m_Reg[0x0B] &= (Uint8)~0x40;
     }
-    m_bTimerLastState = thisIRQ;
+    m_bTimerLastState = hit;
 }
 
 void SNSA1::Run(Int32 nMainMasterCycles)

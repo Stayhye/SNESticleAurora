@@ -340,15 +340,9 @@ static _INLINE Uint16 _SnesPPUResolveMode34Color15(Uint8 uPixel, Uint8 uMeta,
 
 static Bool _SnesPPUHasMode34DirectPixels(const SNPPUBlendInfoT *pInfo)
 {
-	/* AURORA_TOPGEAR_DIRECT_SCAN64_V5_20260917
-	 * uAttrib8 is 64-byte aligned. A direct-color owner is bit 3 in either
-	 * nibble, so 32 packed tests are exactly the old 256 byte tests. */
-	const Uint64 *pAttrib64 = (const Uint64 *)pInfo->uAttrib8;
-	const Uint64 uDirectMask = 0x8888888888888888ULL;
 	Uint32 i;
-
-	for (i = 0; i < 256 / 8; i++)
-		if (pAttrib64[i] & uDirectMask)
+	for (i = 0; i < 256; i++)
+		if (pInfo->uAttrib8[i] & 0x88)
 			return TRUE;
 	return FALSE;
 }

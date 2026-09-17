@@ -103,6 +103,11 @@ static Uint32 s_SafeFrameskipSamplePos = 0;
  * One-shot request raised only by a CDDA cache/hunk miss. */
 static Bool s_SafeFrameskipCdAudioWindowRequested = FALSE;
 
+/* AURORA_SAFE_FRAMESKIP_POSTFLIP_REBASE_V1_20260916
+ * Remains armed across ResetTiming() until a REAL presented gameplay
+ * frame completes. This covers skip bursts that end before max_skip. */
+static Bool s_SafeFrameskipPostFlipRebasePending = FALSE;
+
 static Uint32 _MainLoopSafeFrameskipMedian3(Uint32 a, Uint32 b, Uint32 c)
 {
     if (a > b) { const Uint32 x = a; a = b; b = x; }
@@ -196,6 +201,7 @@ void MainLoopSafeFrameskipSetLevel(Int32 level)
     s_SafeFrameskipLevel = level;
     /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830 */
     s_SafeFrameskipCdAudioWindowRequested = FALSE;
+    s_SafeFrameskipPostFlipRebasePending = FALSE; /* AURORA_SAFE_FRAMESKIP_POSTFLIP_REBASE_V1_20260916 */
     _MainLoopSafeFrameskipResetTiming();
 }
 
@@ -246,6 +252,7 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
     if (!allowed || s_SafeFrameskipLevel <= 0)
     {
         s_SafeFrameskipCdAudioWindowRequested = FALSE;
+        s_SafeFrameskipPostFlipRebasePending = FALSE; /* AURORA_SAFE_FRAMESKIP_POSTFLIP_REBASE_V1_20260916 */
         _MainLoopSafeFrameskipResetTiming();
         return FALSE;
     }
@@ -284,6 +291,7 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
             ++s_SafeFrameskipConsecutive;
         }
 
+        s_SafeFrameskipPostFlipRebasePending = TRUE; /* AURORA_SAFE_FRAMESKIP_POSTFLIP_REBASE_V1_20260916 */
         s_SafeFrameskipSkipPresentation = TRUE;
         return TRUE;
     }
@@ -310,8 +318,7 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
     /* PicoDrive Auto: if more than one target frame late, discard video,
      * limited by max_skip. Here the menu level IS max_skip. */
     /* AURORA_V13: tolerate ordinary scheduling jitter; catch up only
-     * once host debt exceeds one learned VBlank period. */
-    /* AURORA_SAFE_FRAMESKIP_RESTORE_4A350B_V1_20260917: historical 4a350b one-frame trigger. */
+     * once host debt exceeds 1.25 learned VBlank periods. */
     if (diff < -target)
     {
         if (s_SafeFrameskipConsecutive < (Uint32)s_SafeFrameskipLevel)
@@ -355,6 +362,14 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
     /* PicoDrive advances timestamp_aim once for every emulated host tick,
      * whether that tick is shown or skipped. */
     s_SafeFrameskipAim += s_SafeFrameskipPeriod;
+
+    /* AURORA_SAFE_FRAMESKIP_POSTFLIP_REBASE_V1_20260916
+     * If Auto skipped even once, the next real flip must become the
+     * new timing origin. Otherwise the old Aim can survive a naturally
+     * ended burst and immediately recreate stale debt. */
+    if (skip)
+        s_SafeFrameskipPostFlipRebasePending = TRUE;
+
     s_SafeFrameskipSkipPresentation = skip;
     return skip;
 }
@@ -384,14 +399,28 @@ static void _MainLoopSafeFrameskipAfterFlip(void)
             _MainLoopSafeFrameskipLearn(delta, TRUE);
         }
         s_SafeFrameskipLastFlip = now;
+
+        /* AURORA_SAFE_FRAMESKIP_POSTFLIP_REBASE_V1_20260916
+         * First ACTUAL presentation after a skip burst is the recovery
+         * boundary. Rebase transient Aim/debt only after GSK_SyncFlip,
+         * while preserving the learned VBlank period and samples. */
+        if (s_SafeFrameskipPostFlipRebasePending)
+        {
+            s_SafeFrameskipPostFlipRebasePending = FALSE;
+            _MainLoopSafeFrameskipResetTiming();
+        }
     }
     else
     {
         s_SafeFrameskipLastFlip = 0;
+        s_SafeFrameskipPostFlipRebasePending = FALSE;
     }
 
     if (s_SafeFrameskipLevel <= 0 || !gameplay)
+    {
+        s_SafeFrameskipPostFlipRebasePending = FALSE;
         _MainLoopSafeFrameskipResetTiming();
+    }
 }
 
 void MainLoopRender()

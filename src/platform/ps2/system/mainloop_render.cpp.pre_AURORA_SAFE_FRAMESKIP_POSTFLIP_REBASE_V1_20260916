@@ -310,8 +310,7 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
     /* PicoDrive Auto: if more than one target frame late, discard video,
      * limited by max_skip. Here the menu level IS max_skip. */
     /* AURORA_V13: tolerate ordinary scheduling jitter; catch up only
-     * once host debt exceeds one learned VBlank period. */
-    /* AURORA_SAFE_FRAMESKIP_RESTORE_4A350B_V1_20260917: historical 4a350b one-frame trigger. */
+     * once host debt exceeds 1.25 learned VBlank periods. */
     if (diff < -target)
     {
         if (s_SafeFrameskipConsecutive < (Uint32)s_SafeFrameskipLevel)

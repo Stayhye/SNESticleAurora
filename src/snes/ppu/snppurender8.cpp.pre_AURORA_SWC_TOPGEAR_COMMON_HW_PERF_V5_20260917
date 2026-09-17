@@ -1538,36 +1538,6 @@ static void _SnesPPUTrackMode34DirectColor(Uint8 *pAttrib8, Uint8 uShift,
 	const Uint32 uFineScroll = uScrollX & 7;
 	const Uint32 uMosaicSize = uMosaic + 1;
 
-	/* AURORA_TOPGEAR_MODE34_DIRECT8_V6_20260917
-	 * With no mosaic and zero fine scroll, each mask byte corresponds
-	 * exactly to one pTiles[] entry. PlaneLookup[1] expands bit N to
-	 * byte N, so eight metadata bytes can be selected at once. */
-	if (!uMosaic && uFineScroll == 0 &&
-	    (uShift == 0 || uShift == 4))
-	{
-		SnesChrLookup64T *pLookup64 =
-			(SnesChrLookup64T *)&_SnesPPU_PlaneLookup[1];
-		Uint64 *pAttrib64 = (Uint64 *)pAttrib8;
-		const Uint32 uNibbleMask = uShift ? 0xF0u : 0x0Fu;
-		Uint32 iByte;
-
-		for (iByte = 0; iByte < 256 / 8; iByte++)
-		{
-			Uint8 uMask8 = pVisible->uMask8[iByte];
-			if (uMask8)
-			{
-				Uint64 uVisible = (*pLookup64)[uMask8];
-				Uint32 uNibble =
-					(0x08u | (pTiles[iByte].uPal & 0x07u)) << uShift;
-				Uint64 uSelect = uVisible * uNibbleMask;
-				Uint64 uData = uVisible * uNibble;
-				pAttrib64[iByte] =
-					(pAttrib64[iByte] & ~uSelect) | uData;
-			}
-		}
-		return;
-	}
-
 	for (iPixel = 0; iPixel < 256; iPixel++)
 	{
 		Uint32 uSourceX;
@@ -1595,47 +1565,17 @@ static void _SnesPPUTrackMode34DirectColor(Uint8 *pAttrib8, Uint8 uShift,
 static void _SnesPPUTrackMode7DirectColor(Uint8 *pAttrib8, Uint8 uShift,
 	const SNMaskT *pVisible)
 {
-	/* AURORA_TOPGEAR_MODE7_DIRECT8_V5_20260917
-	 * _SnesPPU_PlaneLookup[1][mask] is eight bytes containing bit0..bit7 as
-	 * 0/1. Expand eight visibility bits at once, then use a bytewise select
-	 * mask so invisible attribute bytes remain completely untouched. */
-	if (uShift == 0 || uShift == 4)
-	{
-		SnesChrLookup64T *pLookup64 =
-			(SnesChrLookup64T *)&_SnesPPU_PlaneLookup[1];
-		Uint64 *pAttrib64 = (Uint64 *)pAttrib8;
-		const Uint32 uNibbleMask = uShift ? 0xF0u : 0x0Fu;
-		const Uint32 uDirectBit = uShift ? 0x80u : 0x08u;
-		Uint32 iByte;
+	Uint32 iPixel;
+	const Uint8 uKeep = uShift ? 0x0F : 0xF0;
+	const Uint8 uDirect = (Uint8)(0x08 << uShift);
 
-		for (iByte = 0; iByte < 256 / 8; iByte++)
-		{
-			const Uint64 uVisible =
-				(*pLookup64)[pVisible->uMask8[iByte]];
-			const Uint64 uSelect = uVisible * uNibbleMask;
-			const Uint64 uDirect = uVisible * uDirectBit;
-			pAttrib64[iByte] =
-				(pAttrib64[iByte] & ~uSelect) | uDirect;
-		}
-		return;
-	}
-
-	/* Preserve the old helper's semantics for any unexpected private caller. */
+	for (iPixel = 0; iPixel < 256; iPixel++)
 	{
-		Uint32 iPixel;
-		const Uint8 uKeep = uShift ? 0x0F : 0xF0;
-		const Uint8 uDirect = (Uint8)(0x08 << uShift);
-		for (iPixel = 0; iPixel < 256; iPixel++)
-		{
-			if (!(pVisible->uMask8[iPixel >> 3] &
-			      (1u << (iPixel & 7))))
-				continue;
-			pAttrib8[iPixel] =
-				(Uint8)((pAttrib8[iPixel] & uKeep) | uDirect);
-		}
+		if (!(pVisible->uMask8[iPixel >> 3] & (1u << (iPixel & 7))))
+			continue;
+		pAttrib8[iPixel] = (Uint8)((pAttrib8[iPixel] & uKeep) | uDirect);
 	}
 }
-
 
 
 static void _RenderBG8(Uint8 *pLine8, SNMaskT *pLine, SNMaskT *pBGPlane, SNMaskT *pWindow, Uint32 uBitDepth, SNMaskT *pAddSubMask, Uint8 bAddSubMask, SNMaskT *pBGPri, SNMaskT *pExtraMask, Uint32 uPriority, Bool &bRendered, Uint32 uScrollX, SNMaskT *pRenderedMask = NULL)
@@ -2136,12 +2076,6 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 	SNMaskT *pSub = pRenderInfo->Sub;
 	SNMaskT *pBGWindow = pRenderInfo->BGWindow;
     SNMaskT *pMainAddSubMask = &pRenderInfo->MainAddSubMask;
-	/* AURORA_TOPGEAR_NO_COLORMATH_MASKWRITE_V6_20260917
-	 * cgadsub==0 explicitly clears MainAddSubMask below. Every BG/OBJ
-	 * update would only clear subsets of that zero mask, so suppress
-	 * those writes. Nonzero CGADSUB retains the exact original pointer. */
-	SNMaskT *pMainAddSubWriteMask =
-		cgadsub ? pMainAddSubMask : NULL;
 	SNMaskT *pSubAddSubMask = &pRenderInfo->SubAddSubMask;
     Uint8  *pMain8 = pRenderInfo->BlendInfo.uMain8;
     Uint8  *pSub8 = pRenderInfo->BlendInfo.uSub8;
@@ -2479,15 +2413,15 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 
 	// render bg layers to main screen
 	if (tm & SNESPPU_MASK_BG4)
-		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[3], (tmw&SNESPPU_MASK_BG4) ? &pBGWindow[3] : NULL, BGInfo[3].uBitDepth,  pMainAddSubWriteMask, cgadsub & SNESPPU_MASK_BG4, NULL, NULL, BGInfo[3].Priority, bRendered, BGInfo[3].uScrollX );
+		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[3], (tmw&SNESPPU_MASK_BG4) ? &pBGWindow[3] : NULL, BGInfo[3].uBitDepth,  pMainAddSubMask, cgadsub & SNESPPU_MASK_BG4, NULL, NULL, BGInfo[3].Priority, bRendered, BGInfo[3].uScrollX );
 	if (tm & SNESPPU_MASK_BG3)
-		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[2], (tmw&SNESPPU_MASK_BG3) ? &pBGWindow[2] : NULL, BGInfo[2].uBitDepth,  pMainAddSubWriteMask, cgadsub & SNESPPU_MASK_BG3, &BG3Pri, NULL, BGInfo[2].Priority, bRendered, BGInfo[2].uScrollX);
+		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[2], (tmw&SNESPPU_MASK_BG3) ? &pBGWindow[2] : NULL, BGInfo[2].uBitDepth,  pMainAddSubMask, cgadsub & SNESPPU_MASK_BG3, &BG3Pri, NULL, BGInfo[2].Priority, bRendered, BGInfo[2].uScrollX);
 	if (tm & SNESPPU_MASK_BG2)
-		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[1], (tmw&SNESPPU_MASK_BG2) ? &pBGWindow[1] : NULL, BGInfo[1].uBitDepth,  pMainAddSubWriteMask, cgadsub & SNESPPU_MASK_BG2, bMode7ExtBG ? &M7BG2MainPri : NULL, bBG3Pri ? &BG3Pri : NULL, BGInfo[1].Priority, bRendered, BGInfo[1].uScrollX);
+		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[1], (tmw&SNESPPU_MASK_BG2) ? &pBGWindow[1] : NULL, BGInfo[1].uBitDepth,  pMainAddSubMask, cgadsub & SNESPPU_MASK_BG2, bMode7ExtBG ? &M7BG2MainPri : NULL, bBG3Pri ? &BG3Pri : NULL, BGInfo[1].Priority, bRendered, BGInfo[1].uScrollX);
 	if (tm & SNESPPU_MASK_BG1)
 	{
 		SNMaskT DirectBG1Mask;
-		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[0], (tmw&SNESPPU_MASK_BG1) ? &pBGWindow[0] : NULL, BGInfo[0].uBitDepth,  pMainAddSubWriteMask, cgadsub & SNESPPU_MASK_BG1, NULL, (bMode7ExtBG && (tm & SNESPPU_MASK_BG2)) ? &M7BG2MainPri : (bBG3Pri ? &BG3Pri : NULL), BGInfo[0].Priority, bRendered, BGInfo[0].uScrollX, bBG1Direct ? &DirectBG1Mask : NULL);
+		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[0], (tmw&SNESPPU_MASK_BG1) ? &pBGWindow[0] : NULL, BGInfo[0].uBitDepth,  pMainAddSubMask, cgadsub & SNESPPU_MASK_BG1, NULL, (bMode7ExtBG && (tm & SNESPPU_MASK_BG2)) ? &M7BG2MainPri : (bBG3Pri ? &BG3Pri : NULL), BGInfo[0].Priority, bRendered, BGInfo[0].uScrollX, bBG1Direct ? &DirectBG1Mask : NULL);
 		if (bMode34Direct)
 			_SnesPPUTrackMode34DirectColor(pDirectAttrib, 0, &DirectBG1Mask,
 				pRenderInfo->Tiles[0], BGInfo[0].uScrollX, BGInfo[0].uMosaic);
@@ -2505,7 +2439,7 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		Uint32 _tObjB = ProfCtrGetCycle();
 #endif
 		_SnesPPURenderOBJ8(pMain8, pMain, ObjLine, nObjLine,  (tmw&SNESPPU_MASK_OBJ) ? &pBGWindow[4] : NULL, bBG3Pri ? &BG3Pri : NULL,
-			pMainAddSubWriteMask, (cgadsub & 0x10) ? 1 : 0, pDirectAttrib, 0);
+			pMainAddSubMask, (cgadsub & 0x10) ? 1 : 0, pDirectAttrib, 0);
 #if SNDBG_LOG
 		{
 			Uint32 _dObjDraw = ProfCtrGetCycle() - _tObjB;
@@ -2620,66 +2554,23 @@ void RenderLine8Mode7(Int32 iLine,  SnesRender8pInfoT *pRenderInfo)
  * in the same 8x8 map tile. VRAM is stable during synchronous RenderLine(). */
 /* AURORA_TOPGEAR_MODE7_DY0_FETCH_V4_20260917
  * Exact _FetchMode7_Repeat specialization for DY=0. The transformed Y
- * coordinate is constant, so map row and character row are line invariants.
- *
- * AURORA_TOPGEAR_MODE7_UNITX_V5_20260917:
- * DX=0 and DX=+/-256 have exact integer-X recurrences and avoid the per-pixel
- * fixed-point shift/add. DX=DY=0 collapses to one exact VRAM fetch + memset. */
+ * coordinate is constant, so map row and character row are line invariants. */
 static _INLINE void _FetchMode7_RepeatDY0(
 	Uint8 *pLine, Int32 nPixels, Uint8 *pVram,
 	Int32 x, Int32 y, Int32 dx)
 {
+	Int32 x2;
 	const Int32 y2 = (y >> 8) & 0x3FF;
-	const Uint32 uTileRow = ((Uint32)y2 >> 3) << 7;
-	const Uint32 uChrRow = ((Uint32)y2 & 7u) << 3;
+	Uint32 uTileAddr;
 	Uint32 uLastTileAddr = 0xFFFFFFFFu;
 	Uint32 uChrBase = 0;
-
-	if (nPixels <= 0)
-		return;
-
-	if (dx == 0)
-	{
-		const Uint32 x2 = (Uint32)(x >> 8) & 0x3FFu;
-		const Uint32 uTileAddr = uTileRow | (x2 >> 3);
-		const Uint32 uBase = (Uint32)pVram[uTileAddr * 2] << 6;
-		const Uint32 uChrAddr = uBase + uChrRow + (x2 & 7u);
-		const Uint8 uPixel = pVram[uChrAddr * 2 + 1];
-		memset(pLine, uPixel, (size_t)nPixels);
-		return;
-	}
-
-	if (dx == 256 || dx == -256)
-	{
-		Int32 x2 = x >> 8;
-		const Int32 iStep = (dx > 0) ? 1 : -1;
-
-		while (nPixels > 0)
-		{
-			const Uint32 uX = (Uint32)x2 & 0x3FFu;
-			const Uint32 uTileAddr = uTileRow | (uX >> 3);
-			Uint32 uChrAddr;
-
-			x2 += iStep;
-			if (uTileAddr != uLastTileAddr)
-			{
-				uChrBase = (Uint32)pVram[uTileAddr * 2] << 6;
-				uLastTileAddr = uTileAddr;
-			}
-
-			uChrAddr = uChrBase + uChrRow + (uX & 7u);
-			*pLine++ = pVram[uChrAddr * 2 + 1];
-			nPixels--;
-		}
-		return;
-	}
+	Uint32 uChrAddr;
+	const Uint32 uTileRow = ((Uint32)y2 >> 3) << 7;
+	const Uint32 uChrRow = ((Uint32)y2 & 7u) << 3;
 
 	while (nPixels > 0)
 	{
-		Int32 x2 = x >> 8;
-		Uint32 uTileAddr;
-		Uint32 uChrAddr;
-
+		x2 = x >> 8;
 		x += dx;
 		x2 &= 0x3FF;
 
@@ -2691,43 +2582,6 @@ static _INLINE void _FetchMode7_RepeatDY0(
 		}
 
 		uChrAddr = uChrBase + uChrRow + ((Uint32)x2 & 7u);
-		*pLine++ = pVram[uChrAddr * 2 + 1];
-		nPixels--;
-	}
-}
-
-
-/* AURORA_TOPGEAR_MODE7_UNITX_V5_20260917
- * Repeat-mode specialization for DX=-256/0/+256 while DY is nonzero.
- * Integer X is an exact +/-1/0 recurrence; Y retains the original arithmetic. */
-static _INLINE void _FetchMode7_RepeatUnitX(
-	Uint8 *pLine, Int32 nPixels, Uint8 *pVram,
-	Int32 x, Int32 y, Int32 dx, Int32 dy)
-{
-	Int32 x2 = x >> 8;
-	const Int32 iStep = (dx > 0) ? 1 : ((dx < 0) ? -1 : 0);
-	Uint32 uLastTileAddr = 0xFFFFFFFFu;
-	Uint32 uChrBase = 0;
-
-	while (nPixels > 0)
-	{
-		Int32 y2 = y >> 8;
-		const Uint32 uX = (Uint32)x2 & 0x3FFu;
-		Uint32 uTileAddr;
-		Uint32 uChrAddr;
-
-		y += dy;
-		x2 += iStep;
-		y2 &= 0x3FF;
-
-		uTileAddr = (((Uint32)y2 >> 3) << 7) | (uX >> 3);
-		if (uTileAddr != uLastTileAddr)
-		{
-			uChrBase = (Uint32)pVram[uTileAddr * 2] << 6;
-			uLastTileAddr = uTileAddr;
-		}
-
-		uChrAddr = uChrBase + (uX & 7u) + (((Uint32)y2 & 7u) << 3);
 		*pLine++ = pVram[uChrAddr * 2 + 1];
 		nPixels--;
 	}
@@ -2746,12 +2600,6 @@ static void _FetchMode7_Repeat(Uint8 *pLine, Int32 nPixels, Uint8 *pVram, Int32 
 	if (dy == 0)
 	{
 		_FetchMode7_RepeatDY0(pLine, nPixels, pVram, x, y, dx);
-		return;
-	}
-	if (dx == 0 || dx == 256 || dx == -256)
-	{
-		_FetchMode7_RepeatUnitX(
-			pLine, nPixels, pVram, x, y, dx, dy);
 		return;
 	}
 

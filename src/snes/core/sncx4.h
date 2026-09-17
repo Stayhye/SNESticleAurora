@@ -73,8 +73,8 @@ public:
     void  SaveState(SNCX4StateT *pState) const;
     Bool  RestoreState(const SNCX4StateT *pState);
 
-    // uAddr = 16 bits baixos do acesso da CPU ($6000-$7FFF)
-    Uint8 Read (Uint32 uAddr);
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: hardware bus decode includes RAM/mirrors/register holes. */
+    Uint8 Read (Uint32 uAddr, Uint8 uOpenBus = 0);
     void  Write(Uint32 uAddr, Uint8 uData);
 
 #ifdef SNCX4_TESTHOOK
@@ -83,10 +83,9 @@ public:
 #endif
 
 private:
-    // RAM interna (C4RAM), visivel em $6000-$7FFF (0x2000 bytes). Reserva-se
-    // uma folga extra de scratch para que escalas/rotacoes de sprites grandes
-    // nao estourem o buffer no PS2 (o reference emulator usa a folga do FillRAM, 0x8000).
-    enum { CX4_VISIBLE = 0x2000, CX4_RAMSIZE = 0x8000 };
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: 3 KiB work RAM is physical; the larger backing remains HLE scratch.
+     * $7000-$7BFF mirrors the same 3 KiB; $7Fxx has separate decode. */
+    enum { CX4_WORKRAM = 0x0C00, CX4_VISIBLE = 0x2000, CX4_RAMSIZE = 0x8000 };
     Uint8 m_Ram[CX4_RAMSIZE];
 
     CX4ReadMemFn m_pReadMem;

@@ -74,7 +74,8 @@ private:
     Uint8   m_uFsmState;
     Uint8   m_uCommand;        // opcode atual em execucao
     Uint16  m_uDataCounter;    // indice da palavra atual no buffer
-    Uint8   m_bFreeze;         // op1A/2A/3A: trava o chip
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: retained only for raw-state layout compatibility. */
+    Uint8   m_bFreeze;
 
     // -------- buffers de palavras --------
     // 7 entradas e' o max usado por qualquer comando do DSP-1

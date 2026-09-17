@@ -47,30 +47,41 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
 } while (0)
 
 /* AURORA_TOPGEAR_SPC_LAZY_CYCLE_PUBLISH_V2_20260917
- * V3 preserves V2's rule but fuses publication with the helper's existing
- * I/O dispatch test, so ordinary APURAM pays only one range check. */
+ * Publish interpreter time only when an SPC I/O trap can observe it.
+ * Ordinary APURAM accesses remain otherwise identical. */
 #define SNSPC_BUS_IS_IO(_a) (((((_a) & 0xFFFFu) - 0xF0u)) < 0x10u)
 #define SNSPC_BUS_IS_IO16(_a) \
     (SNSPC_BUS_IS_IO((_a)) || SNSPC_BUS_IS_IO(((_a) + 1u)))
-/* AURORA_TOPGEAR_SPC_FUSED_IO_DISPATCH_V3_20260917
- * Predecessor-validator compatibility token only; not executable:
- * if (SNSPC_BUS_IS_IO(_snspc_addr)) pCpu->Cycles = nCycles;
- */
 
-#define SNSPC_WRITE8(_Addr, _Data) \
-    __SNSPCWrite8(pCpu, (_Addr), (_Data), nCycles)
-#define SNSPC_WRITE16(_Addr, _Data) \
-    _SNSPCWrite16(pCpu, (_Addr), (_Data), nCycles)
+#define SNSPC_WRITE8(_Addr, _Data) do { \
+    Uint32 _snspc_addr = (_Addr); \
+    if (SNSPC_BUS_IS_IO(_snspc_addr)) pCpu->Cycles = nCycles; \
+    __SNSPCWrite8(pCpu, _snspc_addr, (_Data)); \
+} while (0)
+#define SNSPC_WRITE16(_Addr, _Data) do { \
+    Uint32 _snspc_addr = (_Addr); \
+    if (SNSPC_BUS_IS_IO16(_snspc_addr)) pCpu->Cycles = nCycles; \
+    _SNSPCWrite16(pCpu, _snspc_addr, (_Data)); \
+} while (0)
 
-#define SNSPC_READ8(_Addr, _x) \
-    (_x) = __SNSPCRead8(pCpu, (_Addr), nCycles)
-#define SNSPC_READ16(_Addr, _x) \
-    (_x) = _SNSPCRead16(pCpu, (_Addr), nCycles)
+#define SNSPC_READ8(_Addr, _x) do { \
+    Uint32 _snspc_addr = (_Addr); \
+    if (SNSPC_BUS_IS_IO(_snspc_addr)) pCpu->Cycles = nCycles; \
+    (_x) = __SNSPCRead8(pCpu, _snspc_addr); \
+} while (0)
+#define SNSPC_READ16(_Addr, _x) do { \
+    Uint32 _snspc_addr = (_Addr); \
+    if (SNSPC_BUS_IS_IO16(_snspc_addr)) pCpu->Cycles = nCycles; \
+    (_x) = _SNSPCRead16(pCpu, _snspc_addr); \
+} while (0)
 
 /* AURORA_SPC700_ACCURACY_BATCH2_V1_20260914: side-effecting bus read without changing the abstract
  * opcode cycle declaration. Used by MOV destination reads and halt bus. */
-#define SNSPC_DUMMYREAD8(_Addr) \
-    (void)__SNSPCRead8(pCpu, (_Addr), nCycles)
+#define SNSPC_DUMMYREAD8(_Addr) do { \
+    Uint32 _snspc_addr = (_Addr); \
+    if (SNSPC_BUS_IS_IO(_snspc_addr)) pCpu->Cycles = nCycles; \
+    (void)__SNSPCRead8(pCpu, _snspc_addr); \
+} while (0)
 
 /*
  * SPC700 direct-page word accesses wrap inside the selected direct page.
@@ -84,18 +95,21 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
 #define SNSPC_READDP16(_Addr, _x) do {                              \
     Uint32 _snspc_dp_addr = (_Addr);                                \
     Uint32 _snspc_dp_hi = r_DP | ((_snspc_dp_addr + 1) & 0xFF);    \
-    (_x)  = __SNSPCRead8(pCpu, _snspc_dp_addr, nCycles);            \
-    (_x) |= ((Uint32)__SNSPCRead8(pCpu, _snspc_dp_hi, nCycles)) << 8; \
+    if (SNSPC_BUS_IS_IO(_snspc_dp_addr) ||                          \
+        SNSPC_BUS_IS_IO(_snspc_dp_hi)) pCpu->Cycles = nCycles;      \
+    (_x)  = __SNSPCRead8(pCpu, _snspc_dp_addr);                      \
+    (_x) |= ((Uint32)__SNSPCRead8(pCpu, _snspc_dp_hi)) << 8;         \
 } while (0)
 
 #define SNSPC_WRITEDP16(_Addr, _Data) do {                           \
     Uint32 _snspc_dp_addr = (_Addr);                                 \
     Uint32 _snspc_dp_hi = r_DP | ((_snspc_dp_addr + 1) & 0xFF);     \
     Uint32 _snspc_dp_data = (_Data);                                 \
-    __SNSPCWrite8(pCpu, _snspc_dp_addr,                              \
-                  (Uint8)_snspc_dp_data, nCycles);                   \
-    __SNSPCWrite8(pCpu, _snspc_dp_hi,                               \
-                  (Uint8)(_snspc_dp_data >> 8), nCycles);           \
+    if (SNSPC_BUS_IS_IO(_snspc_dp_addr) ||                           \
+        SNSPC_BUS_IS_IO(_snspc_dp_hi)) pCpu->Cycles = nCycles;       \
+    __SNSPCWrite8(pCpu, _snspc_dp_addr, (Uint8)_snspc_dp_data);      \
+    __SNSPCWrite8(pCpu, _snspc_dp_hi,                                \
+                 (Uint8)(_snspc_dp_data >> 8));                      \
 } while (0)
 
 
@@ -320,15 +334,11 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
 //
 
 
-static __inline Uint8 __SNSPCRead8(
-	SNSpcT *pCpu, Uint32 uAddr, Int32 nPublishedCycles)
+static __inline Uint8 __SNSPCRead8(SNSpcT *pCpu, Uint32 uAddr)
 {
 	uAddr &= 0xFFFFu;
 	if ((uAddr - 0xF0u) < 0x10u)
 	{
-		/* V2's publication now shares this already-required I/O branch. */
-		pCpu->Cycles = nPublishedCycles;
-
 		/* AURORA_HW_ACCURACY_SMP_CPUIO_BUS_HOLD_V1_20260916
 		 * CPUIO $F4-$F7 is sampled at the midpoint of the access without
 		 * changing the instruction's total cycle budget. */
@@ -346,24 +356,17 @@ static __inline Uint8 __SNSPCRead8(
 	return pCpu->Mem[uAddr];
 }
 
-static __inline Uint16 _SNSPCRead16(
-	SNSpcT *pCpu, Uint32 Addr, Int32 nPublishedCycles)
+static __inline Uint16 _SNSPCRead16(SNSpcT *pCpu, Uint32 Addr)
 {
 	Uint32 uData;
-	uData = __SNSPCRead8(pCpu, Addr, nPublishedCycles);
-	uData|= (__SNSPCRead8(pCpu, Addr+1, nPublishedCycles)<<8);
-	return uData;
+	uData =  __SNSPCRead8(pCpu, Addr);
+	uData|= (__SNSPCRead8(pCpu, Addr+1)<<8);
+	return  uData;
 }
 
-static __inline void __SNSPCWrite8(
-	SNSpcT *pCpu, Uint32 uAddr, Uint8 uData, Int32 nPublishedCycles)
+static __inline void  __SNSPCWrite8(SNSpcT *pCpu, Uint32 uAddr, Uint8 uData)
 {
 	uAddr &= 0xFFFFu;
-	const Bool bIO = ((uAddr - 0xF0u) < 0x10u);
-
-	/* Publish before the memory-side write, preserving V2's exact ordering. */
-	if (bIO)
-		pCpu->Cycles = nPublishedCycles;
 
 	// Ordinary APURAM and disabled-IPL writes have the same destination.
 	if (uAddr < SNSPC_ROM_ADDR || !pCpu->bRomEnable)
@@ -371,15 +374,14 @@ static __inline void __SNSPCWrite8(
 	else
 		pCpu->ShadowMem[uAddr & (SNSPC_ROM_SIZE - 1)] = uData;
 
-	if (bIO)
+	if ((uAddr - 0xF0u) < 0x10u)
 		pCpu->pWriteTrapFunc(pCpu, uAddr, uData);
 }
 
-static __inline void _SNSPCWrite16(
-	SNSpcT *pCpu, Uint32 Addr, Uint16 Data, Int32 nPublishedCycles)
+static __inline void _SNSPCWrite16(SNSpcT *pCpu, Uint32 Addr, Uint16 Data)
 {
-	__SNSPCWrite8(pCpu, Addr, (Uint8)Data, nPublishedCycles);
-	__SNSPCWrite8(pCpu, Addr + 1, Data >> 8, nPublishedCycles);
+	__SNSPCWrite8(pCpu, Addr, (Uint8)Data);
+	__SNSPCWrite8(pCpu, Addr + 1, Data >> 8);
 }
 
 

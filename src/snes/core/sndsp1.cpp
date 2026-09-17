@@ -271,15 +271,15 @@ static const DSP1_CmdInfo g_CmdTable[0x40] = {
     /*0x0C*/ {3, 2},  /*0x0D*/ {3, 3},  /*0x0E*/ {2, 2},  /*0x0F*/ {1, 1},
     /*0x10*/ {2, 2},  /*0x11*/ {4, 0},  /*0x12*/ {7, 4},  /*0x13*/ {3, 3},
     /*0x14*/ {6, 3},  /*0x15*/ {4, 0},  /*0x16*/ {3, 3},  /*0x17*/ {1, 1024},
-    /*0x18*/ {4, 1},  /*0x19*/ {3, 3},  /*0x1A*/ {0, 0},  /*0x1B*/ {3, 1},
+    /*0x18*/ {4, 1},  /*0x19*/ {3, 3},  /*0x1A*/ {1, 4},  /*0x1B*/ {3, 1},
     /*0x1C*/ {6, 3},  /*0x1D*/ {3, 3},  /*0x1E*/ {2, 2},  /*0x1F*/ {1, 1024},
     /*0x20*/ {2, 1},  /*0x21*/ {4, 0},  /*0x22*/ {7, 4},  /*0x23*/ {3, 3},
     /*0x24*/ {2, 2},  /*0x25*/ {4, 0},  /*0x26*/ {3, 3},  /*0x27*/ {1, 1},
-    /*0x28*/ {3, 1},  /*0x29*/ {3, 3},  /*0x2A*/ {0, 0},  /*0x2B*/ {3, 1},
+    /*0x28*/ {3, 1},  /*0x29*/ {3, 3},  /*0x2A*/ {1, 4},  /*0x2B*/ {3, 1},
     /*0x2C*/ {3, 2},  /*0x2D*/ {3, 3},  /*0x2E*/ {2, 2},  /*0x2F*/ {1, 1},
     /*0x30*/ {2, 2},  /*0x31*/ {4, 0},  /*0x32*/ {7, 4},  /*0x33*/ {3, 3},
     /*0x34*/ {6, 3},  /*0x35*/ {4, 0},  /*0x36*/ {3, 3},  /*0x37*/ {1, 1024},
-    /*0x38*/ {4, 1},  /*0x39*/ {3, 3},  /*0x3A*/ {0, 0},  /*0x3B*/ {3, 1},
+    /*0x38*/ {4, 1},  /*0x39*/ {3, 3},  /*0x3A*/ {1, 4},  /*0x3B*/ {3, 1},
     /*0x3C*/ {6, 3},  /*0x3D*/ {3, 3},  /*0x3E*/ {2, 2},  /*0x3F*/ {1, 1024}
 };
 
@@ -730,9 +730,10 @@ void SNDSP1::Execute(Uint8 uCmd)
     case 0x10: case 0x30: DSP1_DoInverse(in, out); break;
 
     // ----- memory tests -----
-    case 0x0F: case 0x2F: DSP1_DoMemoryTest(in, out); break;
-    case 0x27: DSP1_DoMemorySize(in, out); break;
-    case 0x1F: case 0x37: case 0x3F: DSP1_DoMemoryDump(in, out); break;
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: documented aliases. */
+    case 0x07: case 0x0F: DSP1_DoMemoryTest(in, out); break;
+    case 0x27: case 0x2F: DSP1_DoMemorySize(in, out); break;
+    case 0x17: case 0x1F: case 0x37: case 0x3F: DSP1_DoMemoryDump(in, out); break;
 
     // ----- attitude / subjective / objective / scalar -----
     case 0x01: case 0x05: case 0x31: case 0x35:
@@ -962,7 +963,8 @@ void SNDSP1::Execute(Uint8 uCmd)
     }
 
     // ----- Raster (op0A) -- matriz Mode-7 por scanline ----
-    case 0x0A: {
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: 1A/2A/3A are Raster aliases. */
+    case 0x0A: case 0x1A: case 0x2A: case 0x3A: {
         Int16 Vs = in[0];
         Int16 C, E, C1, E1;
 
@@ -1073,18 +1075,14 @@ void SNDSP1::FsmStep(bool bRead, Uint8 &rData)
     case FSM_WAIT_CMD: {
         m_uCommand = (Uint8)m_uDR;
         if (!(m_uCommand & 0xC0)) {
-            switch (m_uCommand & 0x3F) {
-            case 0x1A:
-            case 0x2A:
-            case 0x3A:
-                m_bFreeze = 1;
-                break;
-            default:
-                m_uDataCounter = 0;
-                m_uFsmState    = FSM_READ_DATA;
-                m_uSR         &= (Uint8)~SR_DRC;
-                break;
-            }
+            /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916:
+             * 1A/2A/3A are continuous Raster aliases, not freeze commands. */
+            Uint8 cmd = (Uint8)(m_uCommand & 0x3F);
+            if (cmd == 0x1A || cmd == 0x2A || cmd == 0x3A)
+                m_uCommand = 0x1A;
+            m_uDataCounter = 0;
+            m_uFsmState    = FSM_READ_DATA;
+            m_uSR         &= (Uint8)~SR_DRC;
         }
         break;
     }
@@ -1128,7 +1126,7 @@ void SNDSP1::FsmStep(bool bRead, Uint8 &rData)
                 // LSB 0x00 do 0x8000 como o comando 0x00 (Multiply) e
                 // dessincronizava todo o resto -> pista achatada / travas.
                 Uint8 cmd = (Uint8)(m_uCommand & 0x3F);
-                if (cmd == 0x0A && m_uDR != 0x8000) {
+                if ((cmd == 0x0A || cmd == 0x1A) && m_uDR != 0x8000) {
                     m_InWords[0]++;
                     Execute(m_uCommand);
                     m_uDataCounter = 0;
@@ -1146,7 +1144,7 @@ void SNDSP1::FsmStep(bool bRead, Uint8 &rData)
     }
     }
 
-    if (m_bFreeze) m_uSR &= (Uint8)~SR_RQM;
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: no supported DSP-1 command freezes RQM. */
 }
 
 void SNDSP1::WriteData(Uint32 /*uAddr*/, Uint8 uData)

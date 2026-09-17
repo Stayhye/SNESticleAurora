@@ -1027,7 +1027,7 @@ Int32 SNCPUExecute_C(SNCpuT *pCpu)
 
 			R_X16++;
 			R_Y16++;
-			if (R_A16!=0)R_PC -=3;
+			if (R_A16!=0) R_PC = (R_PC & 0xFF0000) | ((R_PC - 3) & 0xFFFF); /* AURORA_CPU_BLOCKMOVE_PBR_V6 */
 			R_A16--;
 		}
 		SNCPU_SUBCYCLES(2);
@@ -1051,7 +1051,7 @@ Int32 SNCPUExecute_C(SNCpuT *pCpu)
 
 			R_X8++;
 			R_Y8++;
-			if (R_A16!=0)R_PC -=3;
+			if (R_A16!=0) R_PC = (R_PC & 0xFF0000) | ((R_PC - 3) & 0xFFFF); /* AURORA_CPU_BLOCKMOVE_PBR_V6 */
 			R_A16--;
 		}
 		SNCPU_SUBCYCLES(2);
@@ -1076,7 +1076,7 @@ Int32 SNCPUExecute_C(SNCpuT *pCpu)
 
 			R_X16--;
 			R_Y16--;
-			if (R_A16!=0)R_PC -=3;
+			if (R_A16!=0) R_PC = (R_PC & 0xFF0000) | ((R_PC - 3) & 0xFFFF); /* AURORA_CPU_BLOCKMOVE_PBR_V6 */
 			R_A16--;
 		}
 		SNCPU_SUBCYCLES(2);
@@ -1100,7 +1100,7 @@ Int32 SNCPUExecute_C(SNCpuT *pCpu)
 
 			R_X8--;
 			R_Y8--;
-			if (R_A16!=0)R_PC -=3;
+			if (R_A16!=0) R_PC = (R_PC & 0xFF0000) | ((R_PC - 3) & 0xFFFF); /* AURORA_CPU_BLOCKMOVE_PBR_V6 */
 			R_A16--;
 		}
 		SNCPU_SUBCYCLES(2);

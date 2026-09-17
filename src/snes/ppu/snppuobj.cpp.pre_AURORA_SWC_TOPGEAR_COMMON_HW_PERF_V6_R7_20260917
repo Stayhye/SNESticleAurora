@@ -151,76 +151,50 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 		if (iPosX >= 0 && iPosX <= 248)
 		{
 			Uint32 uShift = iPosX & 31;
+			Uint32 uInvShift = 32 - uShift;
 			Uint32 uMask0 = uOpaque << uShift;
+			Uint32 uMask1 = uShift ? (uOpaque >> uInvShift) : 0;
+			Uint32 uBlocked0;
+			Uint32 uBlocked1;
 			Uint32 uVisible;
 			Uint8 *pDest8 = pLine8 + iPosX;
 
 			iWord = iPosX >> 5;
+			uBlocked0 = ObjMask.uMask32[iWord];
+			uBlocked1 = uMask1 ? ObjMask.uMask32[iWord + 1] : 0;
 
-			/* AURORA_TOPGEAR_OBJ_ONEWORD_V6_20260917
-			 * An 8-pixel row crosses a 32-bit mask boundary only for shifts
-			 * 25..31. For shifts 0..24 the second word is mathematically
-			 * absent; keep the old two-word algorithm intact otherwise. */
-			if (uShift <= 24)
+			/* Um OBJ de maior prioridade impede os seguintes mesmo quando o
+			   proprio pixel fica atras de BG, igual ao caminho planar antigo. */
+			ObjMask.uMask32[iWord] |= uMask0;
+			if (uMask1)
+				ObjMask.uMask32[iWord + 1] |= uMask1;
+
+			uBlocked0 |= pPriorityMask->uMask32[iWord];
+			if (uMask1)
+				uBlocked1 |= pPriorityMask->uMask32[iWord + 1];
+
+			uMask0 &= ~uBlocked0;
+			uMask1 &= ~uBlocked1;
+
+			if (pAddSubMask)
 			{
-				Uint32 uBlocked0 =
-					ObjMask.uMask32[iWord] |
-					pPriorityMask->uMask32[iWord];
-
-				ObjMask.uMask32[iWord] |= uMask0;
-				uMask0 &= ~uBlocked0;
-
-				if (pAddSubMask)
+				if ((bAddSubMask & 1) && ((uPal | bAddSubMask) & 0x4))
 				{
-					if ((bAddSubMask & 1) &&
-					    ((uPal | bAddSubMask) & 0x4))
-						pAddSubMask->uMask32[iWord] |= uMask0;
-					else
-						pAddSubMask->uMask32[iWord] &= ~uMask0;
+					pAddSubMask->uMask32[iWord] |= uMask0;
+					if (uMask1)
+						pAddSubMask->uMask32[iWord + 1] |= uMask1;
+				} else
+				{
+					pAddSubMask->uMask32[iWord] &= ~uMask0;
+					if (uMask1)
+						pAddSubMask->uMask32[iWord + 1] &= ~uMask1;
 				}
-
-				uVisible = (uMask0 >> uShift) & 0xFF;
 			}
-			else
-			{
-				Uint32 uInvShift = 32 - uShift;
-				Uint32 uMask1 = uOpaque >> uInvShift;
-				Uint32 uBlocked0 = ObjMask.uMask32[iWord];
-				Uint32 uBlocked1 =
-					uMask1 ? ObjMask.uMask32[iWord + 1] : 0;
 
-				ObjMask.uMask32[iWord] |= uMask0;
-				if (uMask1)
-					ObjMask.uMask32[iWord + 1] |= uMask1;
-
-				uBlocked0 |= pPriorityMask->uMask32[iWord];
-				if (uMask1)
-					uBlocked1 |= pPriorityMask->uMask32[iWord + 1];
-
-				uMask0 &= ~uBlocked0;
-				uMask1 &= ~uBlocked1;
-
-				if (pAddSubMask)
-				{
-					if ((bAddSubMask & 1) &&
-					    ((uPal | bAddSubMask) & 0x4))
-					{
-						pAddSubMask->uMask32[iWord] |= uMask0;
-						if (uMask1)
-							pAddSubMask->uMask32[iWord + 1] |= uMask1;
-					}
-					else
-					{
-						pAddSubMask->uMask32[iWord] &= ~uMask0;
-						if (uMask1)
-							pAddSubMask->uMask32[iWord + 1] &= ~uMask1;
-					}
-				}
-
-				uVisible = uMask0 >> uShift;
+			uVisible = uMask0 >> uShift;
+			if (uShift)
 				uVisible |= uMask1 << uInvShift;
-				uVisible &= 0xFF;
-			}
+			uVisible &= 0xFF;
 
 #if SNDBG_DEEP
 			g_DbgObjDrawnPixels += _ObjCountBits8(uVisible);

@@ -22,6 +22,7 @@ extern "C" {
 
 #include "sndsp1.h"
 #include "sndsp2.h"
+#include "sndsp3.h" /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
 #include "sndsp4.h"
 #include "snobc1.h"
 #include "sncx4.h"
@@ -334,6 +335,7 @@ private:
 #if SNES_DSP1
 	SNDSP1		m_DSP1;
 	SNDSP2		m_DSP2;
+	SNDSP3		m_DSP3; /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
 	// DSP-4 (Top Gear 3000): HLE self-contained, sem firmware.
 	SNDSP4		m_DSP4;
 #endif
@@ -351,6 +353,8 @@ private:
 	SNSRTC		m_SRTC;
 	Bool		m_bSRTC;
 	Bool		m_bSuperFX;   // cartucho usa SuperFX/GSU -> rotear $3000-34FF
+	Bool		m_bSuperFXRomBlocked; /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: transient S-CPU RON map */
+	Bool		m_bSuperFXRamBlocked; /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: transient S-CPU RAN map */
 
 	SNSA1       m_SA1;      /* AURORA_SA1_V1_REFERENCE_LOGIC_20260902 */
 	Bool        m_bSA1IRQ;
@@ -403,12 +407,17 @@ private:
 	static void SNCPU_TRAPFUNC  WriteSRAM(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
 	static Uint8 SNCPU_TRAPFUNC ReadDSP1(SNCpuT *pCpu, Uint32 uAddr);
 	static void SNCPU_TRAPFUNC  WriteDSP1(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
+	Bool DSPAddressIsStatus(Uint32 uAddr) const; /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
 	static Uint8 SNCPU_TRAPFUNC ReadOBC1(SNCpuT *pCpu, Uint32 uAddr);
 	static void SNCPU_TRAPFUNC  WriteOBC1(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
 	static Uint8 SNCPU_TRAPFUNC ReadCX4(SNCpuT *pCpu, Uint32 uAddr);
 	static void SNCPU_TRAPFUNC  WriteCX4(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
 	static Uint8 SNCPU_TRAPFUNC ReadGSU(SNCpuT *pCpu, Uint32 uAddr);
 	static void SNCPU_TRAPFUNC  WriteGSU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
+	static Uint8 SNCPU_TRAPFUNC ReadGSURomBus(SNCpuT *pCpu, Uint32 uAddr);
+	static void SNCPU_TRAPFUNC  WriteGSURomBus(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
+	static Uint8 SNCPU_TRAPFUNC ReadGSURamBus(SNCpuT *pCpu, Uint32 uAddr);
+	static void SNCPU_TRAPFUNC  WriteGSURamBus(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
 	static Uint8 SNCPU_TRAPFUNC ReadSWC(SNCpuT *pCpu, Uint32 uAddr);
 	static void SNCPU_TRAPFUNC  WriteSWC(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData);
     static Uint8 SNCPU_TRAPFUNC ReadSGB(SNCpuT *pCpu, Uint32 uAddr);
@@ -436,6 +445,9 @@ private:
 	void	MapLoRom();
 	void	MapHiRom();
 	void	MapMem(struct SnesMemMapT *pMemMap);
+	Bool UpdateSuperFXBusMap(Bool bForce = FALSE); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
+	Bool ResolveSuperFXRom(Uint32 uAddr, Uint32 *pOffset) const;
+	Bool ResolveSuperFXRam(Uint32 uAddr, Uint32 *pOffset) const;
 	void	MapMem(SNRomMappingE eRomMapping, Uint32 uFlags);
 	void	MapMemExLoRom(void);
 

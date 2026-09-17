@@ -1538,36 +1538,6 @@ static void _SnesPPUTrackMode34DirectColor(Uint8 *pAttrib8, Uint8 uShift,
 	const Uint32 uFineScroll = uScrollX & 7;
 	const Uint32 uMosaicSize = uMosaic + 1;
 
-	/* AURORA_TOPGEAR_MODE34_DIRECT8_V6_20260917
-	 * With no mosaic and zero fine scroll, each mask byte corresponds
-	 * exactly to one pTiles[] entry. PlaneLookup[1] expands bit N to
-	 * byte N, so eight metadata bytes can be selected at once. */
-	if (!uMosaic && uFineScroll == 0 &&
-	    (uShift == 0 || uShift == 4))
-	{
-		SnesChrLookup64T *pLookup64 =
-			(SnesChrLookup64T *)&_SnesPPU_PlaneLookup[1];
-		Uint64 *pAttrib64 = (Uint64 *)pAttrib8;
-		const Uint32 uNibbleMask = uShift ? 0xF0u : 0x0Fu;
-		Uint32 iByte;
-
-		for (iByte = 0; iByte < 256 / 8; iByte++)
-		{
-			Uint8 uMask8 = pVisible->uMask8[iByte];
-			if (uMask8)
-			{
-				Uint64 uVisible = (*pLookup64)[uMask8];
-				Uint32 uNibble =
-					(0x08u | (pTiles[iByte].uPal & 0x07u)) << uShift;
-				Uint64 uSelect = uVisible * uNibbleMask;
-				Uint64 uData = uVisible * uNibble;
-				pAttrib64[iByte] =
-					(pAttrib64[iByte] & ~uSelect) | uData;
-			}
-		}
-		return;
-	}
-
 	for (iPixel = 0; iPixel < 256; iPixel++)
 	{
 		Uint32 uSourceX;
@@ -2136,12 +2106,6 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 	SNMaskT *pSub = pRenderInfo->Sub;
 	SNMaskT *pBGWindow = pRenderInfo->BGWindow;
     SNMaskT *pMainAddSubMask = &pRenderInfo->MainAddSubMask;
-	/* AURORA_TOPGEAR_NO_COLORMATH_MASKWRITE_V6_20260917
-	 * cgadsub==0 explicitly clears MainAddSubMask below. Every BG/OBJ
-	 * update would only clear subsets of that zero mask, so suppress
-	 * those writes. Nonzero CGADSUB retains the exact original pointer. */
-	SNMaskT *pMainAddSubWriteMask =
-		cgadsub ? pMainAddSubMask : NULL;
 	SNMaskT *pSubAddSubMask = &pRenderInfo->SubAddSubMask;
     Uint8  *pMain8 = pRenderInfo->BlendInfo.uMain8;
     Uint8  *pSub8 = pRenderInfo->BlendInfo.uSub8;
@@ -2479,15 +2443,15 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 
 	// render bg layers to main screen
 	if (tm & SNESPPU_MASK_BG4)
-		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[3], (tmw&SNESPPU_MASK_BG4) ? &pBGWindow[3] : NULL, BGInfo[3].uBitDepth,  pMainAddSubWriteMask, cgadsub & SNESPPU_MASK_BG4, NULL, NULL, BGInfo[3].Priority, bRendered, BGInfo[3].uScrollX );
+		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[3], (tmw&SNESPPU_MASK_BG4) ? &pBGWindow[3] : NULL, BGInfo[3].uBitDepth,  pMainAddSubMask, cgadsub & SNESPPU_MASK_BG4, NULL, NULL, BGInfo[3].Priority, bRendered, BGInfo[3].uScrollX );
 	if (tm & SNESPPU_MASK_BG3)
-		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[2], (tmw&SNESPPU_MASK_BG3) ? &pBGWindow[2] : NULL, BGInfo[2].uBitDepth,  pMainAddSubWriteMask, cgadsub & SNESPPU_MASK_BG3, &BG3Pri, NULL, BGInfo[2].Priority, bRendered, BGInfo[2].uScrollX);
+		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[2], (tmw&SNESPPU_MASK_BG3) ? &pBGWindow[2] : NULL, BGInfo[2].uBitDepth,  pMainAddSubMask, cgadsub & SNESPPU_MASK_BG3, &BG3Pri, NULL, BGInfo[2].Priority, bRendered, BGInfo[2].uScrollX);
 	if (tm & SNESPPU_MASK_BG2)
-		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[1], (tmw&SNESPPU_MASK_BG2) ? &pBGWindow[1] : NULL, BGInfo[1].uBitDepth,  pMainAddSubWriteMask, cgadsub & SNESPPU_MASK_BG2, bMode7ExtBG ? &M7BG2MainPri : NULL, bBG3Pri ? &BG3Pri : NULL, BGInfo[1].Priority, bRendered, BGInfo[1].uScrollX);
+		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[1], (tmw&SNESPPU_MASK_BG2) ? &pBGWindow[1] : NULL, BGInfo[1].uBitDepth,  pMainAddSubMask, cgadsub & SNESPPU_MASK_BG2, bMode7ExtBG ? &M7BG2MainPri : NULL, bBG3Pri ? &BG3Pri : NULL, BGInfo[1].Priority, bRendered, BGInfo[1].uScrollX);
 	if (tm & SNESPPU_MASK_BG1)
 	{
 		SNMaskT DirectBG1Mask;
-		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[0], (tmw&SNESPPU_MASK_BG1) ? &pBGWindow[0] : NULL, BGInfo[0].uBitDepth,  pMainAddSubWriteMask, cgadsub & SNESPPU_MASK_BG1, NULL, (bMode7ExtBG && (tm & SNESPPU_MASK_BG2)) ? &M7BG2MainPri : (bBG3Pri ? &BG3Pri : NULL), BGInfo[0].Priority, bRendered, BGInfo[0].uScrollX, bBG1Direct ? &DirectBG1Mask : NULL);
+		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[0], (tmw&SNESPPU_MASK_BG1) ? &pBGWindow[0] : NULL, BGInfo[0].uBitDepth,  pMainAddSubMask, cgadsub & SNESPPU_MASK_BG1, NULL, (bMode7ExtBG && (tm & SNESPPU_MASK_BG2)) ? &M7BG2MainPri : (bBG3Pri ? &BG3Pri : NULL), BGInfo[0].Priority, bRendered, BGInfo[0].uScrollX, bBG1Direct ? &DirectBG1Mask : NULL);
 		if (bMode34Direct)
 			_SnesPPUTrackMode34DirectColor(pDirectAttrib, 0, &DirectBG1Mask,
 				pRenderInfo->Tiles[0], BGInfo[0].uScrollX, BGInfo[0].uMosaic);
@@ -2505,7 +2469,7 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		Uint32 _tObjB = ProfCtrGetCycle();
 #endif
 		_SnesPPURenderOBJ8(pMain8, pMain, ObjLine, nObjLine,  (tmw&SNESPPU_MASK_OBJ) ? &pBGWindow[4] : NULL, bBG3Pri ? &BG3Pri : NULL,
-			pMainAddSubWriteMask, (cgadsub & 0x10) ? 1 : 0, pDirectAttrib, 0);
+			pMainAddSubMask, (cgadsub & 0x10) ? 1 : 0, pDirectAttrib, 0);
 #if SNDBG_LOG
 		{
 			Uint32 _dObjDraw = ProfCtrGetCycle() - _tObjB;

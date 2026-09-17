@@ -207,10 +207,6 @@ private:
      * stop honoring "more split files" once the real cartridge is exhausted. */
     Uint32 m_uSplitSavedBlocks;
     Uint32 m_uSplitBlocksOnMedia;
-    /* AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917
-     * D88 data offset of the most recently seen program header.
-     * Rewrites replace that split; a different offset is a new split. */
-    Uint32 m_uSplitLastHeaderOffset;
 
     Bool m_bD88HeaderDirty;
 

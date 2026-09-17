@@ -549,6 +549,7 @@ LIBS := \
 	-ldebug -lkernel -lc -lm -lstdc++ -lgcc
 
 # AURORA_SWC_FLOPPY_V1_20260831: isolated SWC source
+# AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: cumulative DSP1/2/3/4 accuracy
 SRCS := \
     src/platform/ps2/ps2sdk_stubs.c \
     src/platform/ps2/system/cdda_async_filexio.c \
@@ -641,6 +642,8 @@ SRCS := \
 	src/snes/core/snes.cpp \
 	src/snes/core/sndsp1.cpp \
 	src/snes/core/sndsp2.cpp \
+	src/snes/core/sndsp3.cpp \
+	src/snes/core/dsp3emu.cpp \
 	src/snes/core/sndsp4.cpp \
 	src/snes/core/dsp4emu.cpp \
 	src/snes/core/sngsu.cpp \

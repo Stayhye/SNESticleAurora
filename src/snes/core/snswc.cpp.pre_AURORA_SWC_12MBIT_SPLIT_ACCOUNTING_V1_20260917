@@ -64,7 +64,6 @@ SNSuperWildCard::SNSuperWildCard()
     m_bSplitAwaitingMediaSwap = FALSE;
     m_uSplitSavedBlocks = 0;
     m_uSplitBlocksOnMedia = 0;
-    m_uSplitLastHeaderOffset = ~0u; /* AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917 */
     m_bD88HeaderDirty = FALSE;
     m_DiskPath[0] = 0;
     m_LastError[0] = 0;
@@ -968,7 +967,6 @@ Bool SNSuperWildCard::MountDisk(const Char *pDiskPath)
         m_bSplitNextMediaRequired = FALSE;
         m_bSplitAwaitingMediaSwap = FALSE;
         m_uSplitBlocksOnMedia = 0;
-    m_uSplitLastHeaderOffset = ~0u; /* AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917 */
     }
 
     m_bDiskChanged = TRUE;
@@ -1126,7 +1124,6 @@ void SNSuperWildCard::Shutdown()
     m_bSplitAwaitingMediaSwap = FALSE;
     m_uSplitSavedBlocks = 0;
     m_uSplitBlocksOnMedia = 0;
-    m_uSplitLastHeaderOffset = ~0u; /* AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917 */
     m_bD88HeaderDirty = FALSE;
     m_uD88DiskBytes = 0;
 
@@ -1151,7 +1148,6 @@ void SNSuperWildCard::Reset()
     m_bSplitAwaitingMediaSwap = FALSE;
     m_uSplitSavedBlocks = 0;
     m_uSplitBlocksOnMedia = 0;
-    m_uSplitLastHeaderOffset = ~0u; /* AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917 */
     FdcReset(FALSE);
 }
 
@@ -1345,29 +1341,15 @@ Bool SNSuperWildCard::FdcStoreCurrentSector()
     if (_AuroraSwcProgramSplitHeader(m_Sector, &bNeedsNext, &blocks))
     {
         Uint32 targetBlocks = 0;
-        const Uint32 headerOffset = (Uint32)off;
-        const Bool sameHeader =
-            (m_uSplitLastHeaderOffset == headerOffset) ? TRUE : FALSE;
-
-        /* AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917
-         * A repeated write to the SAME physical D88 sector is a header
-         * rewrite, so replace its previous contribution. A DIFFERENT
-         * header sector is the next logical split and must accumulate.
-         * Thus 064+064+064 becomes 64+64+64 = 192 blocks (12 Mbit). */
-        if (sameHeader)
-        {
-            if (m_uSplitSavedBlocks >= m_uSplitBlocksOnMedia)
-                m_uSplitSavedBlocks -= m_uSplitBlocksOnMedia;
-            else
-                m_uSplitSavedBlocks = 0;
-        }
-
+        if (m_uSplitSavedBlocks >= m_uSplitBlocksOnMedia)
+            m_uSplitSavedBlocks -= m_uSplitBlocksOnMedia;
+        else
+            m_uSplitSavedBlocks = 0;
         m_uSplitBlocksOnMedia = (Uint32)blocks;
         if ((~0u) - m_uSplitSavedBlocks < m_uSplitBlocksOnMedia)
             m_uSplitSavedBlocks = ~0u;
         else
             m_uSplitSavedBlocks += m_uSplitBlocksOnMedia;
-        m_uSplitLastHeaderOffset = headerOffset;
 
         if (m_pCartRom && m_nCartBytes)
         {
@@ -1913,7 +1895,6 @@ Bool SNSuperWildCard::SetExternalCartridge(
     /* AURORA_D88_V1_6_MULTIDISK_1600_20260901 */
     m_uSplitSavedBlocks = 0;
     m_uSplitBlocksOnMedia = 0;
-    m_uSplitLastHeaderOffset = ~0u; /* AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917 */
     m_bSplitNextMediaRequired = FALSE;
     m_bSplitAwaitingMediaSwap = FALSE;
     return TRUE;
@@ -1939,7 +1920,6 @@ void SNSuperWildCard::ClearExternalCartridge()
 
     m_uSplitSavedBlocks = 0;
     m_uSplitBlocksOnMedia = 0;
-    m_uSplitLastHeaderOffset = ~0u; /* AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917 */
     m_bSplitNextMediaRequired = FALSE;
     m_bSplitAwaitingMediaSwap = FALSE;
 }

@@ -267,55 +267,25 @@ void SNPPUBlendGS::UpdatePaletteEntry(SNPPUBlendInfoT *pInfo, Uint32 uAddr, Uint
 void SNPPUBlendGS::UpdatePalette(SNPPUBlendInfoT *pInfo, Uint16 *pCGRam, Uint32 uIntensity)
 {
 	Int32 iEntry;
-	Int32 iBase;
-	PaletteT *pPal = pInfo->Pal;
+    PaletteT *pPal = pInfo->Pal;
 	const Uint32 *pColorLUT = _SNPPUBlend_ColorLUT;
 
 	PROF_ENTER("SNPPUBlendUpdatePalette");
 
-	/* AURORA_TOPGEAR_GS_PAL_SWIZZLE_V5_20260917
-	 * CSM1's address permutation is only swap(bit3, bit4), repeated in every
-	 * 32-entry block. Emit that exact permutation directly instead of
-	 * recomputing it for all 255 nonzero logical entries. */
 	pPal->Color32[0] = pColorLUT[pCGRam[0] & 0x7FFF];
-
-	for (iEntry = 1; iEntry < 8; iEntry++)
-		pPal->Color32[iEntry] =
-			pColorLUT[pCGRam[iEntry] & 0x7FFF] | 0x80000000u;
-
-	for (iEntry = 0; iEntry < 8; iEntry++)
+	for (iEntry=1; iEntry < 256; iEntry++)
 	{
-		pPal->Color32[8 + iEntry] =
-			pColorLUT[pCGRam[16 + iEntry] & 0x7FFF] | 0x80000000u;
-		pPal->Color32[16 + iEntry] =
-			pColorLUT[pCGRam[8 + iEntry] & 0x7FFF] | 0x80000000u;
-		pPal->Color32[24 + iEntry] =
-			pColorLUT[pCGRam[24 + iEntry] & 0x7FFF] | 0x80000000u;
-	}
+		Uint32 uAddr = iEntry;
 
-	for (iBase = 32; iBase < 256; iBase += 32)
-	{
-		for (iEntry = 0; iEntry < 8; iEntry++)
-		{
-			pPal->Color32[iBase + iEntry] =
-				pColorLUT[pCGRam[iBase + iEntry] & 0x7FFF] |
-				0x80000000u;
-			pPal->Color32[iBase + 8 + iEntry] =
-				pColorLUT[pCGRam[iBase + 16 + iEntry] & 0x7FFF] |
-				0x80000000u;
-			pPal->Color32[iBase + 16 + iEntry] =
-				pColorLUT[pCGRam[iBase + 8 + iEntry] & 0x7FFF] |
-				0x80000000u;
-			pPal->Color32[iBase + 24 + iEntry] =
-				pColorLUT[pCGRam[iBase + 24 + iEntry] & 0x7FFF] |
-				0x80000000u;
-		}
+		uAddr = (uAddr & ~0x18) | ((uAddr & 0x10) >> 1) | ((uAddr & 0x08) << 1);
+
+		// set palette entry (with alpha set)
+		pPal->Color32[uAddr] = pColorLUT[pCGRam[iEntry] & 0x7FFF] | 0x80000000;
 	}
 	MarkPaletteAllDirty();
 
 	PROF_LEAVE("SNPPUBlendUpdatePalette");
 }
-
 
 #else
 
