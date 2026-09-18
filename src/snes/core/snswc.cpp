@@ -147,35 +147,80 @@ Bool SNSuperWildCard::LoadFirmware(const Char *pPath)
              * machine exposes a 16-KiB BIOS. Accept only an unambiguous
              * classic 16-KiB payload: exactly one valid quarter, or multiple
              * valid quarters that are byte-identical. */
-            Uint8 firstBlock[SWC_FIRMWARE_BYTES];
-            Uint8 block[SWC_FIRMWARE_BYTES];
+            /* AURORA_PS2_EE_SWC_STACK_V1_20260917
+             * Do not place two 16 KiB firmware images on the PS2 thread
+             * stack. First identify valid quarters from the reset-vector
+             * bytes, then compare multiple candidates in 512-byte chunks.
+             * Peak temporary stack drops from ~32 KiB to ~1 KiB. */
+            Uint8 validMask = 0;
+            Uint8 compareA[512];
+            Uint8 compareB[512];
             Int32 first = -1;
             Int32 nValid = 0;
             Bool identical = TRUE;
 
             for (Int32 q = 0; q < 4; ++q)
             {
-                long off = (long)q * (long)SWC_FIRMWARE_BYTES;
+                Uint8 rvBytes[2];
+                long off = (long)q * (long)SWC_FIRMWARE_BYTES + 0x1FFCL;
+                Uint16 rv;
+
                 if (fseek(pFile, off, SEEK_SET) != 0 ||
-                    fread(block, 1, SWC_FIRMWARE_BYTES, pFile) != SWC_FIRMWARE_BYTES)
+                    fread(rvBytes, 1, sizeof(rvBytes), pFile) != sizeof(rvBytes))
                 {
                     fclose(pFile);
                     SetError("cannot inspect classic SWC 64 KiB overdump");
                     return FALSE;
                 }
 
-                if (_AuroraClassicSwcVectorOK(block, SWC_FIRMWARE_BYTES))
+                rv = (Uint16)rvBytes[0] | ((Uint16)rvBytes[1] << 8);
+                if (rv >= 0xE000u && rv != 0xFFFFu)
                 {
                     if (first < 0)
-                    {
                         first = q;
-                        memcpy(firstBlock, block, SWC_FIRMWARE_BYTES);
-                    }
-                    else if (memcmp(firstBlock, block, SWC_FIRMWARE_BYTES) != 0)
-                    {
-                        identical = FALSE;
-                    }
+                    validMask |= (Uint8)(1u << q);
                     ++nValid;
+                }
+            }
+
+            if (nValid > 1)
+            {
+                for (Int32 q = first + 1; q < 4 && identical; ++q)
+                {
+                    if (!(validMask & (Uint8)(1u << q)))
+                        continue;
+
+                    for (Uint32 pos = 0; pos < SWC_FIRMWARE_BYTES;
+                         pos += (Uint32)sizeof(compareA))
+                    {
+                        Uint32 chunk = SWC_FIRMWARE_BYTES - pos;
+                        if (chunk > (Uint32)sizeof(compareA))
+                            chunk = (Uint32)sizeof(compareA);
+
+                        if (fseek(
+                                pFile,
+                                (long)first * (long)SWC_FIRMWARE_BYTES +
+                                    (long)pos,
+                                SEEK_SET) != 0 ||
+                            fread(compareA, 1, chunk, pFile) != chunk ||
+                            fseek(
+                                pFile,
+                                (long)q * (long)SWC_FIRMWARE_BYTES +
+                                    (long)pos,
+                                SEEK_SET) != 0 ||
+                            fread(compareB, 1, chunk, pFile) != chunk)
+                        {
+                            fclose(pFile);
+                            SetError("cannot compare classic SWC 64 KiB overdump");
+                            return FALSE;
+                        }
+
+                        if (memcmp(compareA, compareB, chunk) != 0)
+                        {
+                            identical = FALSE;
+                            break;
+                        }
+                    }
                 }
             }
 

@@ -12,6 +12,14 @@ SNDSP3::~SNDSP3()
     m_bReady = FALSE;
 }
 
+void SNDSP3::ReleaseWork()
+{
+    /* AURORA_FDC52B8_AUDIT_DSP3_RELEASE_V1_20260917
+     * OP1E scratch belongs only to an attached DSP-3 device. */
+    DSP3ReleaseWork();
+    m_bReady = FALSE;
+}
+
 void SNDSP3::Reset()
 {
     m_bReady = DSP3EnsureWork() ? TRUE : FALSE;

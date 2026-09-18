@@ -99,6 +99,12 @@ static Uint32 s_SafeFrameskipPeriod = 0;
 static Uint32 s_SafeFrameskipSamples[3] = { 0, 0, 0 };
 static Uint32 s_SafeFrameskipSampleCount = 0;
 static Uint32 s_SafeFrameskipSamplePos = 0;
+/* AURORA_V7_1_3_SAFE_FRAMESKIP_FLICKER_PHASE_GUARD_20260917
+ * Level-1 only: periodically swap one skipped/presented pair so intentional
+ * every-other-frame sprite flicker cannot stay phase-locked to the hidden
+ * frame. The compensation skip keeps average presentation work unchanged. */
+static Uint32 s_SafeFrameskipFlickerSkipCount = 0;
+static Bool   s_SafeFrameskipFlickerCompensate = FALSE;
 /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830
  * One-shot request raised only by a CDDA cache/hunk miss. */
 static Bool s_SafeFrameskipCdAudioWindowRequested = FALSE;
@@ -116,6 +122,17 @@ static void _MainLoopSafeFrameskipResetTiming(void)
     s_SafeFrameskipAim = 0;
     s_SafeFrameskipConsecutive = 0;
     s_SafeFrameskipSkipPresentation = FALSE;
+}
+
+/* V7.1.3 phase state is deliberately separate from transient timing reset.
+ * max_skip recovery resets timing frequently at level 1; clearing the phase
+ * counter there would prevent the guard from ever reaching its rotation
+ * interval. Reset it only when the feature becomes ineligible/session-like
+ * state changes. */
+static void _MainLoopSafeFrameskipResetFlickerPhase(void)
+{
+    s_SafeFrameskipFlickerSkipCount = 0;
+    s_SafeFrameskipFlickerCompensate = FALSE;
 }
 
 static void _MainLoopSafeFrameskipLearn(Uint32 delta, Bool gameplay)
@@ -197,6 +214,7 @@ void MainLoopSafeFrameskipSetLevel(Int32 level)
     /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830 */
     s_SafeFrameskipCdAudioWindowRequested = FALSE;
     _MainLoopSafeFrameskipResetTiming();
+    _MainLoopSafeFrameskipResetFlickerPhase();
 }
 
 Bool MainLoopSafeFrameskipGetEnabled(void)
@@ -247,12 +265,16 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
     {
         s_SafeFrameskipCdAudioWindowRequested = FALSE;
         _MainLoopSafeFrameskipResetTiming();
+        _MainLoopSafeFrameskipResetFlickerPhase();
         return FALSE;
     }
 
     if (s_SafeFrameskipCdAudioWindowRequested)
     {
         s_SafeFrameskipCdAudioWindowRequested = FALSE;
+        /* CDDA skip windows are storage policy, not visual cadence.
+         * Do not carry a phase swap through one of those windows. */
+        _MainLoopSafeFrameskipResetFlickerPhase();
 
         /* AURORA_EXTREME_CD_VIDEO_FIRST_V2_20260830
          * CDDA may spend Safe Frameskip, but never bypass max_skip. */
@@ -312,12 +334,52 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
     /* AURORA_V13: tolerate ordinary scheduling jitter; catch up only
      * once host debt exceeds one learned VBlank period. */
     /* AURORA_SAFE_FRAMESKIP_RESTORE_4A350B_V1_20260917: historical 4a350b one-frame trigger. */
-    if (diff < -target)
+
+    /* AURORA_V7_1_3_SAFE_FRAMESKIP_FLICKER_PHASE_GUARD_20260917
+     * Repay a previously presented skip-opportunity by skipping this eligible
+     * tick instead. This is intentionally checked before the normal debt
+     * decision: the pair swap must change phase even if the extra presentation
+     * gave the host enough time to fall just inside the normal threshold.
+     *
+     * Only level 1 uses this. Higher levels already have multi-frame skip
+     * patterns and remain byte-for-byte scheduler-equivalent to V7.1. */
+    if (s_SafeFrameskipLevel == 1 &&
+        s_SafeFrameskipFlickerCompensate)
+    {
+        s_SafeFrameskipFlickerCompensate = FALSE;
+        s_SafeFrameskipConsecutive = 1;
+        skip = TRUE;
+    }
+    else if (diff < -target)
     {
         if (s_SafeFrameskipConsecutive < (Uint32)s_SafeFrameskipLevel)
         {
-            ++s_SafeFrameskipConsecutive;
-            skip = TRUE;
+            if (s_SafeFrameskipLevel == 1)
+            {
+                ++s_SafeFrameskipFlickerSkipCount;
+
+                /* Four ordinary skips are enough to identify a stable phase
+                 * without churning cadence constantly. On the fourth, present
+                 * this phase and repay with one skip on the next eligible tick.
+                 * No extra presentation survives the completed swap. */
+                if (s_SafeFrameskipFlickerSkipCount >= 4u)
+                {
+                    s_SafeFrameskipFlickerSkipCount = 0;
+                    s_SafeFrameskipFlickerCompensate = TRUE;
+                    s_SafeFrameskipConsecutive = 0;
+                    skip = FALSE;
+                }
+                else
+                {
+                    ++s_SafeFrameskipConsecutive;
+                    skip = TRUE;
+                }
+            }
+            else
+            {
+                ++s_SafeFrameskipConsecutive;
+                skip = TRUE;
+            }
         }
         else
         {

@@ -66,7 +66,11 @@ static SnesMemMapT	_SnesMemMap_HiRom[]=
 {
 	// map slow rom
 	{0x00, 0x3F, 0x0000, 0xFFFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_ROM},
-	{0x40, 0x6F, 0x0000, 0xFFFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_ROM},
+	/* AURORA_V7_1_4_HIROM_40_7D_MAP_FIX_20260917
+	 * Standard HiROM full-bank ROM decode is $40-$7D.  The old $40-$6F
+	 * upper limit dropped banks $70-$7D, i.e. part of the large-cart
+	 * address space used by 32-Mbit HiROM boards. $7E-$7F remain WRAM. */
+	{0x40, 0x7D, 0x0000, 0xFFFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_ROM},
 
 	// map fast rom
 	{0x80, 0xBF, 0x0000, 0xFFFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_ROM},
@@ -1398,6 +1402,11 @@ void SnesSystem::MapSuperWildCardCoprocessor(void)
     { m_pDsp = &m_DSP3; MapSuperWildCardDevice(_SnesMemMap_LoRom_DSP3); }
     else if ((uActive & SNROM_FLAG_DSP4) && m_SWC.GetExternalCartridgeMapping() == SNROM_MAPPING_LOROM)
     { m_pDsp = &m_DSP4; MapSuperWildCardDevice(_SnesMemMap_LoRom_DSP4); }
+
+    /* AURORA_FDC52B8_AUDIT_DSP3_RELEASE_V1_20260917
+     * SWC donor/device changes can detach DSP-3 without SetSnesRom(). */
+    if (pOldDsp == &m_DSP3 && m_pDsp != &m_DSP3)
+        m_DSP3.ReleaseWork();
 
     if (m_pDsp && m_pDsp != pOldDsp)
         m_pDsp->Reset();

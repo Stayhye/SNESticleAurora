@@ -122,7 +122,12 @@ extern SnesChrLookupT _SnesPPU_PlaneLookup[2];
  * mutates its contents in place, so this address remains valid. */
 static const Uint32 *_SNPPUBlend_ColorLUT = NULL;
 
-static Uint32 _SNPPUBlend_AttribMainPal[8] _ALIGN(16) =
+/* AURORA_PS2_EE_CLUT_DMA_BOUNDS_V1_20260917
+ * GPPrimUploadTexture sends these as 16x16 PSMCT32 sources (1024 bytes).
+ * Keep the eight logical HSM entries unchanged, but own the entire DMA
+ * source range so the GIF/DMAC never reads beyond the C object. Unspecified
+ * entries are zero-initialized by C/C++. */
+static Uint32 _SNPPUBlend_AttribMainPal[256] _ALIGN(64) =
 {                   // HSM
     0x00000000,     // 000
     0x80000000,     // 001
@@ -135,7 +140,7 @@ static Uint32 _SNPPUBlend_AttribMainPal[8] _ALIGN(16) =
 };
 
 
-static Uint32 _SNPPUBlend_AttribSubPal[8] _ALIGN(16) =
+static Uint32 _SNPPUBlend_AttribSubPal[256] _ALIGN(64) =
 {                   // HSM
     0x00000000,     // 000
     0x00000000,     // 001
@@ -503,13 +508,10 @@ void SNPPUBlendGS::Begin(CRenderSurface *pTarget)
        TBP units, so drop the * 0x100 that converted to bytes for the
        legacy call.
 
-       Note: only 8 Uint32 of source are valid but the upload size is
-       16 x 16 PSMCT32 (1024 bytes). The blender uses CSM1 which
-       expects the palette to be laid out in a 16x16 PSMCT32 tile, so
-       we keep the same dimensions as the legacy upload. The 992
-       bytes past the end of _SNPPUBlend_AttribMainPal are unused by
-       the blender (TEXCLUT only reads the first eight entries) so
-       the over-read is benign and matches pre-Fase-3 behaviour. */
+       AURORA_PS2_EE_CLUT_DMA_BOUNDS_V1_20260917: the source arrays are now full 16 x 16
+       PSMCT32 slabs (1024 bytes each). TEXCLUT still uses the same first
+       eight HSM entries, while the remaining zero padding merely makes the
+       EE->GS DMA source range memory-safe. */
     if (!m_bAttribPalettesUploaded)
     {
         GPPrimUploadTexture(

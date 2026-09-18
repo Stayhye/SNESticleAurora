@@ -2366,6 +2366,18 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::ReadDSP1(SNCpuT *pCpu, Uint32 uAddr)
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 
 #if SNES_DSP1
+	/* AURORA_FDC52B8_AUDIT_DSP2_HOST_PAGE_FIX_V1_20260917
+	 * SNCpuT descriptors are 8 KiB. The upper half of the host page is
+	 * not physically decoded by DSP-2 and must remain unmapped. */
+	if (pSnes->m_pDsp == &pSnes->m_DSP2)
+	{
+		Uint16 a = (Uint16)uAddr;
+		if (a >= 0x7000u && a < 0x8000u)
+			return 0xFF;
+	}
+#endif
+
+#if SNES_DSP1
 	/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V2_DSP2_20260917
 	 * The DSP-2 $6000-$6FFF data window shares Aurora's 8-KiB CPU page with
 	 * physically unmapped $7000-$7FFF.  The map must trap the whole page to
@@ -2375,7 +2387,14 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::ReadDSP1(SNCpuT *pCpu, Uint32 uAddr)
 	{
 		Uint16 a = (Uint16)uAddr;
 		if (a >= 0x7000u && a < 0x8000u)
-			return 0xFF;
+		{
+			/* AURORA_5326ED4_DSP2_OPENBUS_FIX_20260917
+			 * DSP-2 does not decode $7000-$7FFF. The containing 8 KiB
+			 * CPU page must be trapped for Aurora's mapper ABI, but the
+			 * undecoded upper half must preserve ordinary SNES open-bus
+			 * semantics, i.e. the CPU's current MDR value. */
+			return pCpu->uMDR;
+		}
 	}
 #endif
 
@@ -2830,6 +2849,10 @@ void SnesSystem::SetSnesRom(SnesRom *pRom)
 		m_pRom = NULL;
 	}
 #ifdef SNES_DSP1
+	/* AURORA_FDC52B8_AUDIT_DSP3_RELEASE_V1_20260917
+	 * Recover DSP-3's lazy ~48 KiB before discarding the active device. */
+	if (m_pDsp == &m_DSP3)
+		m_DSP3.ReleaseWork();
 	m_pDsp = NULL;
 	/* AURORA_UPSTREAM_20260827_DSP1_OP28_REVISION_V1 */
 	m_DSP1.SetOriginalDistanceBug(FALSE);
