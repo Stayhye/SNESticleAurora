@@ -179,6 +179,10 @@ void SNSpcDspMix::BuildLookupTables(Uint32 nSampleRate)
 void SNSpcDspMix::Reset()
 {
 	memset(m_Channels, 0, sizeof(m_Channels));
+	/* AURORA_DKC_SPC_HOST_SAFETY_V1_RESET_20260917
+	 * Do not depend on SnesSystem/mixer storage having been zero-filled.
+	 * The next Mix() must build the envelope tables for the real rate. */
+	m_nSampleRate = 0;
 }
 
 void SNSpcDspMix::SoftReset()
@@ -202,8 +206,22 @@ void SNSpcDspMix::KeyOn(Int32 iChannel)
 	const SNSpcVoiceRegsT *pRegs = m_pDsp->GetVoiceRegs(iChannel);
 
 	pChannel->eEnvState  = SNSPCDSP_ENVSTATE_ATTACK;
+	pChannel->iEnvelope  = 0;
 	pChannel->nEnvCount  = 0;
+	pChannel->envx       = 0;
+	pChannel->outx       = 0;
 	pChannel->uBlockAddr = m_pDsp->GetSampleDir(pRegs->srcn, 0);
+
+	/* AURORA_DKC_SPC_HOST_SAFETY_V1_KEYON_20260917
+	 * A new KON starts a new BRR/interpolation stream.  Reset the simplified
+	 * interpolation history and place phase at the existing decode threshold:
+	 * the first OutputSample iteration FetchBlock()s the new BRR block, then
+	 * starts from the two zero history samples.  This also prevents a stale
+	 * end-of-batch phase from becoming an out-of-row BlockData subscript. */
+	memset(pChannel->BlockData, 0, sizeof(pChannel->BlockData));
+	pChannel->iPhase = 14 << 16;
+	pChannel->uOldBlockAddr = pChannel->uBlockAddr;
+
     // clear endx
 	pChannel->endx		 = FALSE;
 }
@@ -670,6 +688,36 @@ void SNSpcDspMixFull::FetchBlock(Int32 iChannel)
 }
 
 
+/* AURORA_DKC_SPC_HOST_SAFETY_V1_HISTORY_20260917
+ * BlockData is one 32-sample object arranged as two rows of 16.  Aurora keeps
+ * two previous samples in row 0 and addresses them as phase -2/-1 while row 1
+ * holds the current block.  Keep that physical layout, but never index before
+ * or beyond a C++ row subobject.
+ *
+ * A legacy/restored state may also carry the end-of-batch phase that used to
+ * reach 16..17 (or higher with PMON) before a block-address change.  Clamp the
+ * history source to the last fully decoded pair rather than reading unrelated
+ * channel/object memory. */
+static _INLINE void _SNSpcDspCaptureInterpolationHistory(
+	SNSpcChannelT *pChannel)
+{
+	Int32 iSample = pChannel->iPhase >> 16;
+	Int16 *pAll = &pChannel->BlockData[0][0];
+	Int16 s0, s1;
+
+	if (iSample < -2) iSample = -2;
+	if (iSample > 14) iSample = 14;
+
+	/* row 1 starts at flat index 16; -2/-1 intentionally select row 0's
+	 * final two samples, while 0..14 remain wholly inside row 1. */
+	const Int32 iFlat = 16 + iSample;
+	s0 = pAll[iFlat + 0];
+	s1 = pAll[iFlat + 1];
+	pChannel->BlockData[1][14] = s0;
+	pChannel->BlockData[1][15] = s1;
+}
+
+
 Int32 SNSpcDspMixFull::OutputSample(Int32 iChannel, Int16 *pOut, Uint16 *pFrac, Int32 nSamples, Int32 nSampleRate)
 {
 	SNSpcChannelT *pChannel = GetChannel(iChannel);
@@ -697,8 +745,7 @@ Int32 SNSpcDspMixFull::OutputSample(Int32 iChannel, Int16 *pOut, Uint16 *pFrac, 
 	if (pChannel->uBlockAddr!= pChannel->uOldBlockAddr)
 	{
 		// this is done to ensure interpolation is correct from old sample to new sample
-		pBlockData[14] = pBlockData[(pChannel->iPhase >> 16) + 0];
-		pBlockData[15] = pBlockData[(pChannel->iPhase >> 16) + 1];
+		_SNSpcDspCaptureInterpolationHistory(pChannel);
 
 		// trigger decode, retain fractional component 
 		pChannel->iPhase &= 0xFFFF;
@@ -731,7 +778,10 @@ Int32 SNSpcDspMixFull::OutputSample(Int32 iChannel, Int16 *pOut, Uint16 *pFrac, 
 			iPhase -= (16<<16);
 		}
 
-		pSample = &pBlockData[iPhase>>16];
+		/* AURORA_DKC_SPC_HOST_SAFETY_V1_FLAT_BLOCKDATA_20260917: phase -2/-1 is the previous row, not a
+		 * negative subscript of BlockData[1]. */
+		Int32 iSampleIndex = 16 + (iPhase >> 16);
+		pSample = &pChannel->BlockData[0][0] + iSampleIndex;
 		iSample0 = pSample[0];
 		iSample1 = pSample[1];
 		// write samples to be filtered later
@@ -795,8 +845,7 @@ Int32 SNSpcDspMixFull::OutputSampleModulated(
 
         if (pChannel->uBlockAddr != pChannel->uOldBlockAddr)
         {
-                pBlockData[14] = pBlockData[(pChannel->iPhase >> 16) + 0];
-                pBlockData[15] = pBlockData[(pChannel->iPhase >> 16) + 1];
+                _SNSpcDspCaptureInterpolationHistory(pChannel);
                 pChannel->iPhase &= 0xFFFF;
                 pChannel->iPhase |= 14 << 16;
         }
@@ -817,7 +866,9 @@ Int32 SNSpcDspMixFull::OutputSampleModulated(
                         iPhase -= (16 << 16);
                 }
 
-                pSample = &pBlockData[iPhase >> 16];
+                /* AURORA_DKC_SPC_HOST_SAFETY_V1_FLAT_BLOCKDATA_20260917 */
+                Int32 iSampleIndex = 16 + (iPhase >> 16);
+                pSample = &pChannel->BlockData[0][0] + iSampleIndex;
                 iSample0 = pSample[0];
                 iSample1 = pSample[1];
                 pFrac[0] = (Uint16)iPhase;
