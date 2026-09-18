@@ -51,6 +51,10 @@ public:
 	void                        SetHDMAEnable(Uint8 uData);
 	Uint8                       GetMDMAEnable() {return m_MDMAEnable;}
 	Uint8                       GetHDMAEnable() {return m_HDMAEnable;}
+	/* AURORA_TOPGEAR_HDMA_IDLE_FAST_V2_20260917
+	 * Exact mirror of ProcessHDMA()'s first active-channel test. */
+	Uint8                       GetActiveHDMAMask() const
+		{return (Uint8)(m_HDMAEnable & (Uint8)~m_HDMAEnded);}
 
 private:
 	SnesDMAChT	                m_Channels[SNESDMAC_CHANNEL_NUM];

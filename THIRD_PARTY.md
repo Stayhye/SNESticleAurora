@@ -81,3 +81,16 @@ staged PS2 build caps gpSP's resident ROM page cache at 8 MiB; this is not a ROM
 size limit, because larger cartridges use gpSP's existing file-backed 32 KiB
 LRU paging path. Direct `.gba`/`.agb` path loading therefore also avoids a
 second full-ROM copy in Aurora.
+
+<!-- AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 -->
+### ZSNES DSP-3 HLE
+
+Aurora's DSP-3 HLE (`src/snes/core/dsp3emu.cpp`) is adapted from
+`xyproto/zsnes` `chips/dsp3emu.c`, pinned to commit
+`5d79c3213fcb374f67765a409c8a61a002a79583` and Git blob
+`9df81f9b1e161a088b048e47a9e742005620b63c`. The integration adds the
+Aurora C++/ISNDSP bus adapter and build glue while retaining the upstream HLE
+algorithm and tables.
+
+That code is GNU GPL version 2. The pinned upstream `COPYING` is mirrored at
+`LICENSES/ZSNES-DSP3-GPL-2.0.txt`.

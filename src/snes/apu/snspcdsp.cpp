@@ -16,12 +16,20 @@
 
 SNSpcDsp::SNSpcDsp()
 {
+	/* AURORA_SPC700_MEGA_ACCURACY_V1_20260916 */
+	m_pMem = NULL;
+	m_pShadowMem = NULL;
+	m_pbRomEnable = NULL;
+	m_pMixer[0] = NULL;
+	m_pMixer[1] = NULL;
 }
 
 void SNSpcDsp::Reset()
 {
 	memset(m_Regs, 0, sizeof(m_Regs));
-	m_Regs[SNSPCDSP_REG_FLG] = 0x40;
+	/* AURORA_HW_ACCURACY_SDSP_FLG_RESET_V1_20260916
+	 * Internal S-DSP FLG powers/resets to $E0. */
+	m_Regs[SNSPCDSP_REG_FLG] = 0xE0;
 	m_Queue.Reset();
 }
 
@@ -46,11 +54,13 @@ void SNSpcDsp::Write8(Uint32 uAddr, Uint8 uData)
 	case SNSPCDSP_REG_FLG:
 		if (uData & 0x80)
 		{
-			// soft reset
-			m_Regs[SNSPCDSP_REG_FLG] |= 0x40 | 0x20; // enable mute, disable echo
+			/* Soft reset: mute + echo-write-disable, voices enter Release at zero. */
+			m_Regs[SNSPCDSP_REG_FLG] |= 0x60;
 			m_Regs[SNSPCDSP_REG_KOFF] = 0;
 			m_Regs[SNSPCDSP_REG_KON] = 0;
-	    	m_Regs[SNSPCDSP_REG_ENDX] = 0;
+			m_Regs[SNSPCDSP_REG_ENDX] = 0;
+			if (m_pMixer[0]) m_pMixer[0]->SoftReset();
+			if (m_pMixer[1]) m_pMixer[1]->SoftReset();
 		}
 		break;
     case SNSPCDSP_REG_KON:
@@ -150,9 +160,9 @@ Uint16 SNSpcDsp::GetSampleDir(Uint8 uSrcN, Uint32 uOffset)
 	uSampleDir =  m_Regs[SNSPCDSP_REG_DIR] * 0x100 + uSrcN * 0x04;
 	uSampleDir+= uOffset;
 
-	// read word from sample directory
-	uData = m_pMem[uSampleDir + 0] << 0;
-	uData|= m_pMem[uSampleDir + 1] << 8;
+	// S-DSP reads physical APURAM; 16-bit address bus wraps naturally.
+	uData = ReadRAM((Uint16)(uSampleDir + 0)) << 0;
+	uData|= ReadRAM((Uint16)(uSampleDir + 1)) << 8;
 	return uData;
 }
 

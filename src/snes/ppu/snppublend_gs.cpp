@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include "types.h"
 #include "prof.h"
 #include "snmask.h"
@@ -35,6 +36,16 @@ typedef char SNPPUScratchLayoutCheck[
 	(sizeof(SnesRender8pInfoT) <= SNPPU_DMA_BLENDINFO_OFFSET &&
 	 SNPPU_DMA_BLENDINFO_OFFSET + sizeof(SNPPUBlendInfoT) <= 16 * 1024)
 		? 1 : -1];
+
+/* AURORA_TOPGEAR_GS_LINE_PAYLOAD_COPY_V4_20260917
+ * Compile-time proof required before merging three 256-byte copies. */
+typedef char SNPPUBlendLinePayloadLayoutCheck[
+	(offsetof(SNPPUBlendInfoT, uSub8) ==
+	 offsetof(SNPPUBlendInfoT, uMain8) +
+	 sizeof(((SNPPUBlendInfoT *)0)->uMain8) &&
+	 offsetof(SNPPUBlendInfoT, uAttrib8) ==
+	 offsetof(SNPPUBlendInfoT, uSub8) +
+	 sizeof(((SNPPUBlendInfoT *)0)->uSub8)) ? 1 : -1];
 
 #if SNDBG_LOG
 #define SNPPU_GS_DIAG_SAMPLES 8
@@ -106,7 +117,17 @@ static void _SNPPUGSValidateStage(const SNPPUBlendInfoT *pInfo)
 
 extern SnesChrLookupT _SnesPPU_PlaneLookup[2];
 
-static Uint32 _SNPPUBlend_AttribMainPal[8] _ALIGN(16) =
+/* AURORA_TOPGEAR_GS_COLORLUT_CACHE_V4_20260917
+ * SNPPUColorGetPalette() returns a fixed static array. Calibration
+ * mutates its contents in place, so this address remains valid. */
+static const Uint32 *_SNPPUBlend_ColorLUT = NULL;
+
+/* AURORA_PS2_EE_CLUT_DMA_BOUNDS_V1_20260917
+ * GPPrimUploadTexture sends these as 16x16 PSMCT32 sources (1024 bytes).
+ * Keep the eight logical HSM entries unchanged, but own the entire DMA
+ * source range so the GIF/DMAC never reads beyond the C object. Unspecified
+ * entries are zero-initialized by C/C++. */
+static Uint32 _SNPPUBlend_AttribMainPal[256] _ALIGN(64) =
 {                   // HSM
     0x00000000,     // 000
     0x80000000,     // 001
@@ -119,7 +140,7 @@ static Uint32 _SNPPUBlend_AttribMainPal[8] _ALIGN(16) =
 };
 
 
-static Uint32 _SNPPUBlend_AttribSubPal[8] _ALIGN(16) =
+static Uint32 _SNPPUBlend_AttribSubPal[256] _ALIGN(64) =
 {                   // HSM
     0x00000000,     // 000
     0x00000000,     // 001
@@ -133,32 +154,29 @@ static Uint32 _SNPPUBlend_AttribSubPal[8] _ALIGN(16) =
 
 
 
+/* AURORA_TOPGEAR_GS_PLANAR_PTR_V4_20260917
+ * The old loop advanced SNMaskT pointers one byte through casts. Consume the
+ * exact same 32 mask bytes through byte pointers directly. */
 static void _PlanarTo3(Uint8 *pDest, SNMaskT *pSrc0, SNMaskT *pSrc1, SNMaskT *pSrc2)
 {
 	Uint32 nBytes = 256 / 8;
 	SnesChrLookup64T *pLookup64 = (SnesChrLookup64T *)&_SnesPPU_PlaneLookup[1];
 	Uint64 *pDest64 = (Uint64 *)pDest;
-
+	const Uint8 *pSrc8_0 = pSrc0->uMask8;
+	const Uint8 *pSrc8_1 = pSrc1->uMask8;
+	const Uint8 *pSrc8_2 = pSrc2->uMask8;
 
 	while (nBytes > 0)
 	{
 		Uint64 uData;
 
-		uData  = (*pLookup64)[pSrc0->uMask8[0]] << 0;	
-		uData |= (*pLookup64)[pSrc1->uMask8[0]] << 1;	
-		uData |= (*pLookup64)[pSrc2->uMask8[0]] << 2;	
+		uData  = (*pLookup64)[*pSrc8_0++] << 0;
+		uData |= (*pLookup64)[*pSrc8_1++] << 1;
+		uData |= (*pLookup64)[*pSrc8_2++] << 2;
 
-
-		pSrc0  = (SNMaskT *) (((Uint8 *)pSrc0) + 1);
-		pSrc1  = (SNMaskT *) (((Uint8 *)pSrc1) + 1);
-		pSrc2  = (SNMaskT *) (((Uint8 *)pSrc2) + 1);
-
-		pDest64[0] = uData;
-		pDest64+=1;
-
+		*pDest64++ = uData;
 		nBytes--;
 	}
-
 }
 
 void SNPPUBlendGS::MarkPaletteEntryDirty(Uint32 uAddr)
@@ -234,7 +252,7 @@ void SNPPUBlendGS::UpdatePaletteEntry(SNPPUBlendInfoT *pInfo, Uint32 uAddr, Uint
 {
     PaletteT *pPal = pInfo->Pal;
 
-	uData = SNPPUColorConvert15to32(uData & 0x7FFF);
+	uData = _SNPPUBlend_ColorLUT[uData & 0x7FFF];
 
 	if (uAddr > 0)
 	{
@@ -254,24 +272,55 @@ void SNPPUBlendGS::UpdatePaletteEntry(SNPPUBlendInfoT *pInfo, Uint32 uAddr, Uint
 void SNPPUBlendGS::UpdatePalette(SNPPUBlendInfoT *pInfo, Uint16 *pCGRam, Uint32 uIntensity)
 {
 	Int32 iEntry;
-    PaletteT *pPal = pInfo->Pal;
+	Int32 iBase;
+	PaletteT *pPal = pInfo->Pal;
+	const Uint32 *pColorLUT = _SNPPUBlend_ColorLUT;
 
 	PROF_ENTER("SNPPUBlendUpdatePalette");
 
-	pPal->Color32[0] = SNPPUColorConvert15to32(pCGRam[0]);
-	for (iEntry=1; iEntry < 256; iEntry++)
+	/* AURORA_TOPGEAR_GS_PAL_SWIZZLE_V5_20260917
+	 * CSM1's address permutation is only swap(bit3, bit4), repeated in every
+	 * 32-entry block. Emit that exact permutation directly instead of
+	 * recomputing it for all 255 nonzero logical entries. */
+	pPal->Color32[0] = pColorLUT[pCGRam[0] & 0x7FFF];
+
+	for (iEntry = 1; iEntry < 8; iEntry++)
+		pPal->Color32[iEntry] =
+			pColorLUT[pCGRam[iEntry] & 0x7FFF] | 0x80000000u;
+
+	for (iEntry = 0; iEntry < 8; iEntry++)
 	{
-		Uint32 uAddr = iEntry;
+		pPal->Color32[8 + iEntry] =
+			pColorLUT[pCGRam[16 + iEntry] & 0x7FFF] | 0x80000000u;
+		pPal->Color32[16 + iEntry] =
+			pColorLUT[pCGRam[8 + iEntry] & 0x7FFF] | 0x80000000u;
+		pPal->Color32[24 + iEntry] =
+			pColorLUT[pCGRam[24 + iEntry] & 0x7FFF] | 0x80000000u;
+	}
 
-		uAddr = (uAddr & ~0x18) | ((uAddr & 0x10) >> 1) | ((uAddr & 0x08) << 1);
-
-		// set palette entry (with alpha set)
-		pPal->Color32[uAddr] = SNPPUColorConvert15to32(pCGRam[iEntry]) | 0x80000000;
+	for (iBase = 32; iBase < 256; iBase += 32)
+	{
+		for (iEntry = 0; iEntry < 8; iEntry++)
+		{
+			pPal->Color32[iBase + iEntry] =
+				pColorLUT[pCGRam[iBase + iEntry] & 0x7FFF] |
+				0x80000000u;
+			pPal->Color32[iBase + 8 + iEntry] =
+				pColorLUT[pCGRam[iBase + 16 + iEntry] & 0x7FFF] |
+				0x80000000u;
+			pPal->Color32[iBase + 16 + iEntry] =
+				pColorLUT[pCGRam[iBase + 8 + iEntry] & 0x7FFF] |
+				0x80000000u;
+			pPal->Color32[iBase + 24 + iEntry] =
+				pColorLUT[pCGRam[iBase + 24 + iEntry] & 0x7FFF] |
+				0x80000000u;
+		}
 	}
 	MarkPaletteAllDirty();
 
 	PROF_LEAVE("SNPPUBlendUpdatePalette");
 }
+
 
 #else
 
@@ -459,13 +508,10 @@ void SNPPUBlendGS::Begin(CRenderSurface *pTarget)
        TBP units, so drop the * 0x100 that converted to bytes for the
        legacy call.
 
-       Note: only 8 Uint32 of source are valid but the upload size is
-       16 x 16 PSMCT32 (1024 bytes). The blender uses CSM1 which
-       expects the palette to be laid out in a 16x16 PSMCT32 tile, so
-       we keep the same dimensions as the legacy upload. The 992
-       bytes past the end of _SNPPUBlend_AttribMainPal are unused by
-       the blender (TEXCLUT only reads the first eight entries) so
-       the over-read is benign and matches pre-Fase-3 behaviour. */
+       AURORA_PS2_EE_CLUT_DMA_BOUNDS_V1_20260917: the source arrays are now full 16 x 16
+       PSMCT32 slabs (1024 bytes each). TEXCLUT still uses the same first
+       eight HSM entries, while the remaining zero padding merely makes the
+       EE->GS DMA source range memory-safe. */
     if (!m_bAttribPalettesUploaded)
     {
         GPPrimUploadTexture(
@@ -814,7 +860,11 @@ static void _SNPPUBlendBuildList(SNPPUDmaListT *pList,
     GSGifTagOpenAD();
     GSGifRegAD(GS_REG_ALPHA_1,GS_SET_ALPHA(1,2,0,2, 0x80 ));
     pList->pIntensity = (Uint64 *)GSListGetUncachedPtr();
-    GSGifRegAD(GS_REG_RGBAQ, 0);
+    /* AURORA_TOPGEAR_GS_FULL_INTENSITY_CONST_V4_20260917
+     * With no intensity primitive the caller's only possible normal
+     * value is 15; the old formula equals 0x80000000 exactly. */
+    GSGifRegAD(GS_REG_RGBAQ,
+        bApplyIntensity ? 0 : 0x80000000u);
     GSGifTagCloseAD();
 
     if (bApplyIntensity)
@@ -852,9 +902,10 @@ static void _SNPPUBlendSetParm(SNPPUDmaListT *pList, Int32 iLine,
 		return;
 	}
 
-    *pList->pFixedColor = SNPPUColorConvert15to32(uFixedColor16);
+    *pList->pFixedColor = _SNPPUBlend_ColorLUT[uFixedColor16 & 0x7FFF];
     *pList->pXYOffset   = GS_SET_XYOFFSET(0x8000, 0x8000 - (iLine<<4)  );
-    *pList->pIntensity  = (uIntensity * 0x80 / 15) << 24;
+    if (uIntensity != 15)
+        *pList->pIntensity = (uIntensity * 0x80 / 15) << 24;
     if (!bAddSub)
     {
         // add
@@ -875,6 +926,8 @@ SNPPUBlendGS::SNPPUBlendGS(Uint32 uVramAddr, Uint32 uOutAddr)
 {
     SNPPUDmaListT *pList = &m_DmaList;
     SNPPUDmaListT *pPaletteList = &m_DmaListWithPalette;
+
+    _SNPPUBlend_ColorLUT = SNPPUColorGetPalette();
 
     m_pDmaBlendInfo = NULL;
 	memset(m_uPaletteDirty, 0, sizeof(m_uPaletteDirty));
@@ -1034,13 +1087,23 @@ void SNPPUBlendGS::Exec(SNPPUBlendInfoT *pInfo, Int32 iLine, Uint32 uFixedColor3
 		#endif
 	}
 #else
-	uPaletteCopyBytes = CopyDirtyPalette(pDmaInfo->Pal, pInfo->Pal);
+	/* AURORA_TOPGEAR_GS_CLEAN_PALETTE_GATE_V4_20260917
+	 * bUploadPalette is the exact flag CopyDirtyPalette tests before
+	 * its no-side-effect return-0 path. */
+	uPaletteCopyBytes = bUploadPalette
+		? CopyDirtyPalette(pDmaInfo->Pal, pInfo->Pal) : 0;
 	(void)uPaletteCopyBytes;
-	memcpy(pDmaInfo->uMain8, pInfo->uMain8, sizeof(pDmaInfo->uMain8));
 	if (!bDirectMain)
 	{
-		memcpy(pDmaInfo->uSub8, pInfo->uSub8, sizeof(pDmaInfo->uSub8));
-		memcpy(pDmaInfo->uAttrib8, pInfo->uAttrib8, sizeof(pDmaInfo->uAttrib8));
+		/* AURORA_TOPGEAR_GS_LINE_PAYLOAD_COPY_V4_20260917 */
+		memcpy(pDmaInfo->uMain8, pInfo->uMain8,
+			sizeof(pDmaInfo->uMain8) + sizeof(pDmaInfo->uSub8) +
+			sizeof(pDmaInfo->uAttrib8));
+	}
+	else
+	{
+		memcpy(pDmaInfo->uMain8, pInfo->uMain8,
+			sizeof(pDmaInfo->uMain8));
 	}
 #endif
 	pExecList = bUploadPalette ? &m_DmaListWithPalette : &m_DmaList;

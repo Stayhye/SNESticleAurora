@@ -46,18 +46,31 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
     rPC = (_snspc_pc + 2u) & 0xFFFFu;                                \
 } while (0)
 
-#define SNSPC_WRITE8(_Addr, _Data)  pCpu->Cycles = nCycles; __SNSPCWrite8(pCpu, _Addr, _Data);
-#define SNSPC_WRITE16(_Addr, _Data) pCpu->Cycles = nCycles; _SNSPCWrite16(pCpu, _Addr, _Data);
+/* AURORA_TOPGEAR_SPC_LAZY_CYCLE_PUBLISH_V2_20260917
+ * V3 preserves V2's rule but fuses publication with the helper's existing
+ * I/O dispatch test, so ordinary APURAM pays only one range check. */
+#define SNSPC_BUS_IS_IO(_a) (((((_a) & 0xFFFFu) - 0xF0u)) < 0x10u)
+#define SNSPC_BUS_IS_IO16(_a) \
+    (SNSPC_BUS_IS_IO((_a)) || SNSPC_BUS_IS_IO(((_a) + 1u)))
+/* AURORA_TOPGEAR_SPC_FUSED_IO_DISPATCH_V3_20260917
+ * Predecessor-validator compatibility token only; not executable:
+ * if (SNSPC_BUS_IS_IO(_snspc_addr)) pCpu->Cycles = nCycles;
+ */
 
-#define SNSPC_READ8(_Addr, _x)  pCpu->Cycles = nCycles; _x = __SNSPCRead8(pCpu, _Addr);
-#define SNSPC_READ16(_Addr, _x) pCpu->Cycles = nCycles; _x = _SNSPCRead16(pCpu, _Addr);
+#define SNSPC_WRITE8(_Addr, _Data) \
+    __SNSPCWrite8(pCpu, (_Addr), (_Data), nCycles)
+#define SNSPC_WRITE16(_Addr, _Data) \
+    _SNSPCWrite16(pCpu, (_Addr), (_Data), nCycles)
+
+#define SNSPC_READ8(_Addr, _x) \
+    (_x) = __SNSPCRead8(pCpu, (_Addr), nCycles)
+#define SNSPC_READ16(_Addr, _x) \
+    (_x) = _SNSPCRead16(pCpu, (_Addr), nCycles)
 
 /* AURORA_SPC700_ACCURACY_BATCH2_V1_20260914: side-effecting bus read without changing the abstract
  * opcode cycle declaration. Used by MOV destination reads and halt bus. */
-#define SNSPC_DUMMYREAD8(_Addr) do { \
-	pCpu->Cycles = nCycles; \
-	(void)__SNSPCRead8(pCpu, (_Addr)); \
-} while (0)
+#define SNSPC_DUMMYREAD8(_Addr) \
+    (void)__SNSPCRead8(pCpu, (_Addr), nCycles)
 
 /*
  * SPC700 direct-page word accesses wrap inside the selected direct page.
@@ -71,19 +84,18 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
 #define SNSPC_READDP16(_Addr, _x) do {                              \
     Uint32 _snspc_dp_addr = (_Addr);                                \
     Uint32 _snspc_dp_hi = r_DP | ((_snspc_dp_addr + 1) & 0xFF);    \
-    pCpu->Cycles = nCycles;                                         \
-    (_x)  = __SNSPCRead8(pCpu, _snspc_dp_addr);                      \
-    (_x) |= ((Uint32)__SNSPCRead8(pCpu, _snspc_dp_hi)) << 8;         \
+    (_x)  = __SNSPCRead8(pCpu, _snspc_dp_addr, nCycles);            \
+    (_x) |= ((Uint32)__SNSPCRead8(pCpu, _snspc_dp_hi, nCycles)) << 8; \
 } while (0)
 
 #define SNSPC_WRITEDP16(_Addr, _Data) do {                           \
     Uint32 _snspc_dp_addr = (_Addr);                                 \
     Uint32 _snspc_dp_hi = r_DP | ((_snspc_dp_addr + 1) & 0xFF);     \
     Uint32 _snspc_dp_data = (_Data);                                 \
-    pCpu->Cycles = nCycles;                                          \
-    __SNSPCWrite8(pCpu, _snspc_dp_addr, (Uint8)_snspc_dp_data);      \
-    __SNSPCWrite8(pCpu, _snspc_dp_hi,                                \
-                 (Uint8)(_snspc_dp_data >> 8));                      \
+    __SNSPCWrite8(pCpu, _snspc_dp_addr,                              \
+                  (Uint8)_snspc_dp_data, nCycles);                   \
+    __SNSPCWrite8(pCpu, _snspc_dp_hi,                               \
+                  (Uint8)(_snspc_dp_data >> 8), nCycles);           \
 } while (0)
 
 
@@ -121,31 +133,38 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
 #define SNSPC_SETFLAGI_C(_x)  fC = (_x) & 1;
 #define SNSPC_GETFLAG_C(_x)  _x = fC & 1;
 
-#define SNSPC_SETFLAG_V() r_P |= SNSPC_FLAG_V;
-#define SNSPC_CLRFLAG_V() r_P &= ~SNSPC_FLAG_V;
+#define SNSPC_SETFLAG_V() fHV |= SNSPC_FLAG_V;
+#define SNSPC_CLRFLAG_V() fHV &= ~SNSPC_FLAG_V;
 #define SNSPC_SETFLAG_I() r_P |= SNSPC_FLAG_I;
 #define SNSPC_CLRFLAG_I() r_P &= ~SNSPC_FLAG_I;
 #define SNSPC_SETFLAG_B() r_P |= SNSPC_FLAG_B;
 #define SNSPC_SETFLAG_D() r_P |= SNSPC_FLAG_D;
 #define SNSPC_CLRFLAG_D() r_P &= ~SNSPC_FLAG_D;
-#define SNSPC_SETFLAGI_V(__V) r_P &= ~SNSPC_FLAG_V; r_P |= ((__V) & 1) << 6;
+#define SNSPC_SETFLAGI_V(__V) do { \
+	fHV = (fHV & ~SNSPC_FLAG_V) | (((__V) & 1u) << 6); \
+} while (0)
 #define SNSPC_SETFLAG_H(__H) do { \
-	r_P = (r_P & ~SNSPC_FLAG_H) | (((__H) & 1) << 3); \
+	fHV = (fHV & ~SNSPC_FLAG_H) | (((__H) & 1u) << 3); \
 } while (0)
 
 #define SNSPC_SETFLAG_P() r_P |= SNSPC_FLAG_P; r_DP=0x100;
 #define SNSPC_CLRFLAG_P() r_P &= ~SNSPC_FLAG_P; r_DP=0x000;
 #define SNSPC_SETPC(_Addr)	r_PC= _Addr;
 
+/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V3_SPC_LAZY_HV_20260917
+ * C/Z/N were already lazy. Keep H/V lazy as well and synchronize them only
+ * where the architectural PSW byte is observed or when the interpreter exits. */
 #define SNSPC_UNPACKFLAGS()					\
 	fC = (r_P & SNSPC_FLAG_C);					\
+	fHV = (r_P & (SNSPC_FLAG_H | SNSPC_FLAG_V));		\
 	r_DP = (r_P & SNSPC_FLAG_P) << 3;					\
 	fZ = (r_P & SNSPC_FLAG_Z) ^ SNSPC_FLAG_Z;	\
 	fN = (r_P << 8);							
 
 #define SNSPC_PACKFLAGS()								\
-	r_P &= ~(SNSPC_FLAG_C | SNSPC_FLAG_Z |SNSPC_FLAG_N);	\
+	r_P &= ~(SNSPC_FLAG_C | SNSPC_FLAG_Z | SNSPC_FLAG_N | SNSPC_FLAG_H | SNSPC_FLAG_V);	\
 	r_P |= fC & SNSPC_FLAG_C;												\
+	r_P |= fHV & (SNSPC_FLAG_H | SNSPC_FLAG_V);				\
 	r_P |= (fN >> 8) & SNSPC_FLAG_N;								\
 	if (!(fZ&0xFFFF)) r_P|=SNSPC_FLAG_Z;		
 
@@ -217,11 +236,9 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
     Uint32 _Target = (_Dest) & 0xFFu;                                \
     Uint32 _Source = (_Src) & 0xFFu;                                 \
     Uint32 _Result = _Target + _Source + (fC & 1u);                  \
-    r_P &= ~(SNSPC_FLAG_V | SNSPC_FLAG_H);                           \
-    if ((_Target ^ _Source ^ _Result) & 0x10u)                      \
-        r_P |= SNSPC_FLAG_H;                                         \
-    if ((~(_Target ^ _Source) & (_Target ^ _Result) & 0x80u) != 0) \
-        r_P |= SNSPC_FLAG_V;                                         \
+    Uint32 _H = (_Target ^ _Source ^ _Result) & 0x10u;               \
+    Uint32 _V = (~(_Target ^ _Source) & (_Target ^ _Result)) & 0x80u; \
+    fHV = (_H >> 1) | (_V >> 1);                                    \
     (_Dest) = _Result;                                               \
 } while (0)
 
@@ -231,11 +248,9 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
     Uint32 _Target = (_Dest) & 0xFFFFu;                                   \
     Uint32 _Source = (_Src) & 0xFFFFu;                                    \
     Uint32 _Result = _Target + _Source;                                   \
-    r_P &= ~(SNSPC_FLAG_V | SNSPC_FLAG_H);                                \
-    if ((_Target ^ _Source ^ _Result) & 0x1000u)                         \
-        r_P |= SNSPC_FLAG_H;                                              \
-    if ((~(_Target ^ _Source) & (_Target ^ _Result) & 0x8000u) != 0)    \
-        r_P |= SNSPC_FLAG_V;                                              \
+    Uint32 _H = (_Target ^ _Source ^ _Result) & 0x1000u;                  \
+    Uint32 _V = (~(_Target ^ _Source) & (_Target ^ _Result)) & 0x8000u;  \
+    fHV = (_H >> 9) | (_V >> 9);                                         \
     (_Dest) = _Result;                                                    \
 } while (0)
 
@@ -243,12 +258,10 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
     Uint32 _Target = (_Dest) & 0xFFFFu;                                  \
     Uint32 _Source = (_Src) & 0xFFFFu;                                   \
     Uint32 _Result = _Target + ((~_Source) & 0xFFFFu) + 1u;              \
-    r_P &= ~(SNSPC_FLAG_V | SNSPC_FLAG_H);                               \
-    if ((~(_Target ^ _Source ^ _Result)) & 0x1000u)                     \
-        r_P |= SNSPC_FLAG_H;                                             \
-    if (((_Target ^ _Source) & (_Target ^ _Result) & 0x8000u) != 0)    \
-        r_P |= SNSPC_FLAG_V;                                             \
-    (_Dest) = _Result;                                                   \
+    Uint32 _H = (~(_Target ^ _Source ^ _Result)) & 0x1000u;              \
+    Uint32 _V = ((_Target ^ _Source) & (_Target ^ _Result)) & 0x8000u;   \
+    fHV = (_H >> 9) | (_V >> 9);                                         \
+    (_Dest) = _Result;                                                    \
 } while (0)
 
 
@@ -308,25 +321,50 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
 //
 
 
-static __inline Uint8 __SNSPCRead8(SNSpcT *pCpu, Uint32 uAddr)
+static __inline Uint8 __SNSPCRead8(
+	SNSpcT *pCpu, Uint32 uAddr, Int32 nPublishedCycles)
 {
 	uAddr &= 0xFFFFu;
 	if ((uAddr - 0xF0u) < 0x10u)
+	{
+		/* V2's publication now shares this already-required I/O branch. */
+		pCpu->Cycles = nPublishedCycles;
+
+		/* AURORA_HW_ACCURACY_SMP_CPUIO_BUS_HOLD_V1_20260916
+		 * CPUIO $F4-$F7 is sampled at the midpoint of the access without
+		 * changing the instruction's total cycle budget. */
+		if ((uAddr & 0xFFFCu) == 0x00F4u)
+		{
+			Int32 nSavedCycles = pCpu->Cycles;
+			Uint8 uData;
+			pCpu->Cycles -= (SNSPC_CYCLE >> 1);
+			uData = pCpu->pReadTrapFunc(pCpu, uAddr);
+			pCpu->Cycles = nSavedCycles;
+			return uData;
+		}
 		return pCpu->pReadTrapFunc(pCpu, uAddr);
+	}
 	return pCpu->Mem[uAddr];
 }
 
-static __inline Uint16 _SNSPCRead16(SNSpcT *pCpu, Uint32 Addr)
+static __inline Uint16 _SNSPCRead16(
+	SNSpcT *pCpu, Uint32 Addr, Int32 nPublishedCycles)
 {
 	Uint32 uData;
-	uData =  __SNSPCRead8(pCpu, Addr);
-	uData|= (__SNSPCRead8(pCpu, Addr+1)<<8);
-	return  uData;
+	uData = __SNSPCRead8(pCpu, Addr, nPublishedCycles);
+	uData|= (__SNSPCRead8(pCpu, Addr+1, nPublishedCycles)<<8);
+	return uData;
 }
 
-static __inline void  __SNSPCWrite8(SNSpcT *pCpu, Uint32 uAddr, Uint8 uData)
+static __inline void __SNSPCWrite8(
+	SNSpcT *pCpu, Uint32 uAddr, Uint8 uData, Int32 nPublishedCycles)
 {
 	uAddr &= 0xFFFFu;
+	const Bool bIO = ((uAddr - 0xF0u) < 0x10u);
+
+	/* Publish before the memory-side write, preserving V2's exact ordering. */
+	if (bIO)
+		pCpu->Cycles = nPublishedCycles;
 
 	// Ordinary APURAM and disabled-IPL writes have the same destination.
 	if (uAddr < SNSPC_ROM_ADDR || !pCpu->bRomEnable)
@@ -334,14 +372,15 @@ static __inline void  __SNSPCWrite8(SNSpcT *pCpu, Uint32 uAddr, Uint8 uData)
 	else
 		pCpu->ShadowMem[uAddr & (SNSPC_ROM_SIZE - 1)] = uData;
 
-	if ((uAddr - 0xF0u) < 0x10u)
+	if (bIO)
 		pCpu->pWriteTrapFunc(pCpu, uAddr, uData);
 }
 
-static __inline void _SNSPCWrite16(SNSpcT *pCpu, Uint32 Addr, Uint16 Data)
+static __inline void _SNSPCWrite16(
+	SNSpcT *pCpu, Uint32 Addr, Uint16 Data, Int32 nPublishedCycles)
 {
-	__SNSPCWrite8(pCpu, Addr, (Uint8)Data);
-	__SNSPCWrite8(pCpu, Addr + 1, Data >> 8);
+	__SNSPCWrite8(pCpu, Addr, (Uint8)Data, nPublishedCycles);
+	__SNSPCWrite8(pCpu, Addr + 1, Data >> 8, nPublishedCycles);
 }
 
 
@@ -395,6 +434,7 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 	Uint32 fN; // N??????? ????????
 	Uint32 fZ; // ZZZZZZZZ ZZZZZZZZ
 	Uint32 fC; // 00000000 0000000C
+	Uint32 fHV; /* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V3_SPC_LAZY_HV_20260917: lazy H/V bits, mask 0x48 */
 	Uint32 rDP;
 //	Uint32 bDone = FALSE;
 
@@ -507,12 +547,14 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 
 	SNSPC_OP(0x50, 2);
 		// BVC
-		SNSPC_BRREL(!(r_P&SNSPC_FLAG_V));
+		/* AURORA_V7_1_1_DKC_SPC_VBRANCH_HOTFIX_20260917:
+		 * V3 keeps V in lazy fHV, so control flow must observe fHV too. */
+		SNSPC_BRREL(!(fHV&SNSPC_FLAG_V));
        SNSPC_ENDOP(2);
 
 	SNSPC_OP(0x70, 2);
 		// BVS
-		SNSPC_BRREL((r_P&SNSPC_FLAG_V));
+		SNSPC_BRREL((fHV&SNSPC_FLAG_V));
        SNSPC_ENDOP(2);
 
 	SNSPC_OP(0x2F, 4);
@@ -664,7 +706,7 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 			t0 = (t0 - 0x60u) & 0xFFu;
 			SNSPC_SETFLAGI_C(0);
 		}
-		if (!(r_P & SNSPC_FLAG_H) || (t0 & 0x0Fu) > 0x09u)
+		if (!(fHV & SNSPC_FLAG_H) || (t0 & 0x0Fu) > 0x09u)
 			t0 = (t0 - 0x06u) & 0xFFu;
 		SNSPC_SET_A8(t0);
 		SNSPC_SETFLAG_N8(t0);
@@ -679,7 +721,7 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 			t0 = (t0 + 0x60u) & 0xFFu;
 			SNSPC_SETFLAGI_C(1);
 		}
-		if ((r_P & SNSPC_FLAG_H) || (t0 & 0x0Fu) > 0x09u)
+		if ((fHV & SNSPC_FLAG_H) || (t0 & 0x0Fu) > 0x09u)
 			t0 = (t0 + 0x06u) & 0xFFu;
 		SNSPC_SET_A8(t0);
 		SNSPC_SETFLAG_N8(t0);
@@ -757,11 +799,12 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 		SNSPC_DUMMYREAD8(rPC); /* first read(PC) of the 3-cycle wait entry */
 		SNSPC_ENDOP(3);
 
-	SNSPC_OP(0xFF, 3);
-		// STOP: distinct persistent state, also cleared by reset.
+	SNSPC_OP(0xFF, 2);
+		/* AURORA_SPC700_MEGA_ACCURACY_V1_20260916
+		 * SNESdev: STOP is 2 cycles; halted cadence remains read(PC)+idle. */
 		pCpu->Regs.uPad = SNSPC_HALT_STOP;
-		SNSPC_DUMMYREAD8(rPC); /* first read(PC) of the 3-cycle stop entry */
-		SNSPC_ENDOP(3);
+		SNSPC_DUMMYREAD8(rPC);
+		SNSPC_ENDOP(2);
 
 
 
@@ -785,7 +828,8 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 		}
 
 		SNSPC_WRITE8(t0,t1);
-		SNSPC_ENDOP(5)
+		/* MOV1 abs.bit,C is 6 cycles; inherited ENDOP(5) undercharged it. */
+		SNSPC_ENDOP(6)
 
 
 	SNSPC_OP(0x0F, 8);

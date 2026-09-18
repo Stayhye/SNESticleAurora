@@ -17,6 +17,8 @@ public:
 	virtual Bool	GetChannelState(Int32 iChannel, Uint8 *pEnvX, Uint8 *pOutX) = 0;
 	virtual void	KeyOn(Int32 iChannel) = 0;
 	virtual void	KeyOff(Int32 iChannel) = 0;
+	/* AURORA_SPC700_MEGA_ACCURACY_V1_20260916 */
+	virtual void	SoftReset() = 0;
 	virtual void	Mix(class CMixBuffer *pOutBuffer) = 0;
 };
 
@@ -28,6 +30,7 @@ public:
 	virtual Bool	GetChannelState(Int32 iChannel, Uint8 *pEnvX, Uint8 *pOutX) {*pEnvX = 0; *pOutX = 0; return FALSE;}
 	virtual void	KeyOn(Int32 iChannel) {};
 	virtual void	KeyOff(Int32 iChannel) {};
+	virtual void	SoftReset() {};
 	virtual void	Mix(class CMixBuffer *pOutBuffer) {};
 };
 

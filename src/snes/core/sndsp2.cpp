@@ -92,16 +92,24 @@ void SNDSP2::DoOp06()
 // op0D: escala um bitmap de 4-bit de InLen para OutLen pixels.
 void SNDSP2::DoOp0D()
 {
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: bit-accurate fixed-point scaler. */
+    Uint32 multiplier;
+    Uint32 pixloc = 0;
+    Uint8 pixelarray[512];
     Int32 i;
-    for (i = 0; i < m_Op0DOutLen; i++)
-    {
-        Int32 j = i << 1;
-        Int32 offLo = ((j     * m_Op0DInLen) / m_Op0DOutLen) >> 1;
-        Int32 offHi = (((j+1) * m_Op0DInLen) / m_Op0DOutLen) >> 1;
-        Uint8 pLo = (Uint8)(m_Param[offLo] >> 4);
-        Uint8 pHi = (Uint8)(m_Param[offHi] & 0x0F);
-        m_Out[i] = (Uint8)((pLo << 4) | pHi);
+    if (m_Op0DOutLen <= 0) return;
+    if (m_Op0DInLen <= m_Op0DOutLen) multiplier = 0x10000u;
+    else multiplier = ((Uint32)m_Op0DInLen << 17) /
+                      (((Uint32)m_Op0DOutLen << 1) + 1u);
+    for (i = 0; i < m_Op0DOutLen * 2; ++i) {
+        Uint32 j = pixloc >> 16;
+        Uint8 packed = m_Param[j >> 1];
+        pixelarray[i] = (j & 1u) ? (Uint8)(packed & 0x0Fu)
+                                  : (Uint8)((packed >> 4) & 0x0Fu);
+        pixloc += multiplier;
     }
+    for (i = 0; i < m_Op0DOutLen; ++i)
+        m_Out[i] = (Uint8)((pixelarray[i << 1] << 4) | pixelarray[(i << 1) + 1]);
 }
 
 //==========================================================================

@@ -33,6 +33,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include "dsp4emu.h"
+/* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: reference command set; unverified 0x0014 removed. */
 #include <stdbool.h>
 #include <string.h>
 
@@ -2067,9 +2068,6 @@ void DSP4SetByte()
             case 0x0011:
                 DSP4.in_count = 8;
                 break;
-            case 0x0014: // Test ROM Version (SNESticleRevive): identifies DSP-4
-                DSP4.in_count = 0;
-                break;
             default:
                 DSP4.waiting4command = true;
                 break;
@@ -2204,12 +2202,6 @@ void DSP4SetByte()
 
             break;
         }
-
-        // Test ROM Version (SNESticleRevive addition) -> 0x0400 = DSP-4
-        case 0x0014:
-            DSP4_CLEAR_OUT();
-            DSP4_WRITE_WORD(0x0400);
-            break;
 
         default:
             break;

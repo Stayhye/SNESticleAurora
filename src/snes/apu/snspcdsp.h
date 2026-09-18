@@ -5,6 +5,7 @@
 
 #include "snqueue.h"
 #include "snspcmixi.h"
+#include "snspcdefs.h"
 
 #define SNSPCDSP_WRITEQUEUE (TRUE)
 #define SNSPCDSP_MAXMIXERS (2)
@@ -130,7 +131,9 @@ class    SNSpcDsp
 {
 	Uint8			m_Regs[SNSPCDSP_REG_NUM];
 
-	Uint8			*m_pMem;		// pointer to sample memory
+	Uint8			*m_pMem;       // S-SMP-visible memory view
+	Uint8			*m_pShadowMem; // physical APURAM hidden by IPL at $FFC0-$FFFF
+	Bool			*m_pbRomEnable;
 
 	ISNSpcDspMix	*m_pMixer[SNSPCDSP_MAXMIXERS];;
 
@@ -159,7 +162,53 @@ public:
 	Uint8	Read8(Uint32 uAddr);
 
 	inline Uint8	GetReg(SNSpcDspRegE eReg) {return m_Regs[eReg];}
-	inline void	SetMem(Uint8 *pMem) {m_pMem = pMem;}
+	/* AURORA_SPC700_MEGA_ACCURACY_V1_20260916
+	 * S-DSP accesses physical APURAM, bypassing the S-SMP IPL overlay. */
+	inline void SetMem(Uint8 *pMem, Uint8 *pShadowMem, Bool *pRomEnable)
+	{
+		m_pMem = pMem;
+		m_pShadowMem = pShadowMem;
+		m_pbRomEnable = pRomEnable;
+	}
+	inline Uint8 ReadRAM(Uint16 uAddr) const
+	{
+		if (uAddr >= SNSPC_ROM_ADDR && m_pbRomEnable && *m_pbRomEnable && m_pShadowMem)
+			return m_pShadowMem[uAddr - SNSPC_ROM_ADDR];
+		return m_pMem[uAddr];
+	}
+	inline void WriteRAM(Uint16 uAddr, Uint8 uData)
+	{
+		if (uAddr >= SNSPC_ROM_ADDR && m_pbRomEnable && *m_pbRomEnable && m_pShadowMem)
+			m_pShadowMem[uAddr - SNSPC_ROM_ADDR] = uData;
+		else
+			m_pMem[uAddr] = uData;
+	}
+	/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V1_20260917
+	 * Return an exact contiguous physical-APURAM span when one exists.
+	 * NULL means the caller must use ReadRAM/WriteRAM byte semantics. */
+	inline Uint8 *GetRAMSpan(Uint16 uAddr, Uint32 nBytes)
+	{
+		Uint32 uEnd = (Uint32)uAddr + nBytes;
+		if (!nBytes || uEnd > 0x10000u)
+			return NULL; /* wraps $FFFF */
+
+		if (m_pbRomEnable && *m_pbRomEnable && m_pShadowMem)
+		{
+			if (uAddr >= SNSPC_ROM_ADDR)
+				return m_pShadowMem + (uAddr - SNSPC_ROM_ADDR);
+			if (uEnd > SNSPC_ROM_ADDR)
+				return NULL; /* crosses visible RAM -> hidden physical RAM */
+		}
+		return m_pMem + uAddr;
+	}
+
+	/* Exact only when the IPL overlay is not hiding $FFC0-$FFFF. */
+	inline Uint8 *GetLinearPhysicalRAM()
+	{
+		if (!m_pbRomEnable || !*m_pbRomEnable || !m_pShadowMem)
+			return m_pMem;
+		return NULL;
+	}
 	inline Uint8 *GetMem() {return m_pMem;}
 
 	void	UpdateFlags(ISNSpcDspMix *pMixer);

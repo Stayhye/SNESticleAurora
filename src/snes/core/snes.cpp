@@ -1265,11 +1265,13 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
     }
 #endif */     
 
+    /* AURORA_TOPGEAR_SPC_SYNC_ALGEBRA_V3_20260917
+     * SNSPCGetCounter(FRAME) is Counter[FRAME] - Cycles. The legacy
+     * expression subtracted that getter and then subtracted Cycles
+     * again, so the residual cancels exactly. Use scheduled FRAME
+     * time directly; the resulting nCycles is bit-for-bit identical. */
     Int32 CpuTime = SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME);
-    Int32 SpcTime = SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME);
-
-    // get cycle count 
-    nCycles = CpuTime - SpcTime - m_Spc.Cycles;
+    nCycles = CpuTime - m_Spc.Counter[SNSPC_COUNTER_FRAME];
     nCycles += uExtra;
     if (nCycles > (SNSPC_CYCLE * SNES_SPCMINCYCLES))
     {
@@ -1415,13 +1417,19 @@ void SnesSystem::CatchUpRasterEventsForCpuMMIO(SNCpuT *pCpu)
 	if (pCpu->uSignal & SNCPU_SIGNAL_DMA)
 		return;
 
+	/* AURORA_TOPGEAR_MMIO_CATCHUP_NOOP_FAST_V3_20260917
+	 * When both physical events are already committed this handler has
+	 * no remaining state transition to perform on the current line. */
+	if (m_bRasterHBlankDone && m_bRasterHDMADone)
+		return;
+
 	nClock = SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE);
 	if (nClock < SNES_HBLANK_START_CYCLE)
 		return;
 
 	m_bRasterCatchupActive = TRUE;
 
-	if (!m_bRasterHBlankDone && nClock >= SNES_HBLANK_START_CYCLE)
+	if (!m_bRasterHBlankDone)
 	{
 		m_bRasterHBlankDone = TRUE;
 		m_IO.m_Regs.hvbjoy |= 0x40;
@@ -1430,11 +1438,13 @@ void SnesSystem::CatchUpRasterEventsForCpuMMIO(SNCpuT *pCpu)
 	/* Process HDMA before the triggering CPU MMIO effect.  This preserves
 	 * FIFO order in the line-tagged PPU write queue when an instruction
 	 * straddles the HDMA boundary. */
-	nClock = SNCPUGetCounter(pCpu, SNCPU_COUNTER_LINE);
+	/* No emulated time advances between the HBlank update above and
+	 * this compare, so the first beam sample is still exact here. */
 	if (!m_bRasterHDMADone && nClock >= SNES_HDMA_START_CYCLE)
 	{
 		m_bRasterHDMADone = TRUE;
-		if (!(m_IO.m_Regs.hvbjoy & 0x80))
+		if (!(m_IO.m_Regs.hvbjoy & 0x80) &&
+		    m_DMAC.GetActiveHDMAMask()) /* AURORA_TOPGEAR_HDMA_IDLE_FAST_V2_20260917 */
 		{
 #if SNDBG_LOG
 			Uint32 _tHDMA = ProfCtrGetCycle();
@@ -1468,6 +1478,12 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
 	uAddr &= 0xFFFF;
 
+	/* AURORA_TOPGEAR_COMMON_MMIO_GATE_V2_20260917
+	 * All auxiliary-chip windows routed below start at $2188 or
+	 * above. One address gate keeps ordinary PPU/APUIO traffic out
+	 * of BS-X/SA-1/S-RTC/SuperFX presence checks. */
+	if (uAddr >= 0x2188)
+	{
 	/* AURORA_V4_4_CUMULATIVE_20260908 */
 	if (pSnes->m_BSXBase.IsActive() &&
 	    uAddr >= 0x2188 && uAddr <= 0x219F)
@@ -1496,11 +1512,13 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 	// aproximado com a CPU principal.
 	if (pSnes->m_bSuperFX && uAddr >= 0x3000 && uAddr <= 0x34FF)
 	{
-		Uint8 v = pSnes->m_GSU.ReadReg((Uint16)uAddr);
+		Uint8 v = pSnes->m_GSU.ReadReg((Uint16)uAddr, pCpu->uMDR); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
 		// ler o SFR ($3031) limpa o flag de IRQ do GSU -> baixa a linha de IRQ.
 		if (!pSnes->m_GSU.IrqPending())
 			pSnes->UpdateMainIRQLine();
 		return v;
+	}
+
 	}
 
 	// The four CPU/APU communication ports repeat throughout $2140-$217F
@@ -1717,6 +1735,12 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
 	uAddr &= 0xFFFF;
 
+	/* AURORA_TOPGEAR_COMMON_MMIO_GATE_V2_20260917
+	 * All auxiliary-chip windows routed below start at $2188 or
+	 * above. One address gate keeps ordinary PPU/APUIO traffic out
+	 * of BS-X/SA-1/S-RTC/SuperFX presence checks. */
+	if (uAddr >= 0x2188)
+	{
 	/* AURORA_V4_4_CUMULATIVE_20260908 */
 	if (pSnes->m_BSXBase.IsActive() &&
 	    uAddr >= 0x2188 && uAddr <= 0x219F)
@@ -1753,7 +1777,10 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 	if (pSnes->m_bSuperFX && uAddr >= 0x3000 && uAddr <= 0x34FF)
 	{
 		pSnes->m_GSU.WriteReg((Uint16)uAddr, uData);
+		if (pSnes->UpdateSuperFXBusMap()) SNCPUAbort(pCpu); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
 		return;
+	}
+
 	}
 
 	// APUIO0-3 are mirrored every four bytes through $217F.  Route every
@@ -1878,29 +1905,38 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read4000(SNCpuT *pCpu, Uint32 uAddr)
 
 	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
 
-	/* AURORA_V4_4_CUMULATIVE_20260908 */
-	if (pSnes->m_BSXBase.IsActive())
+	/* AURORA_TOPGEAR_CPU_IO_LOW_FAST_GATE_V3_20260917
+	 * Common CPU I/O ($4016/$4017/$4200-$421f) is below every auxiliary
+	 * window handled here. Preserve the full bus address for MCC and the
+	 * old MCC -> DMA -> S-DD1 priority on the >=$4300 path. */
+	const Uint32 uBusAddr = uAddr;
+	uAddr &= 0xFFFF;
+
+	if (uAddr >= 0x4300)
 	{
-		Uint8 v;
-		if (pSnes->m_BSXBase.ReadMCCRegister(uAddr, pCpu->uMDR, &v))
+		/* AURORA_V4_4_CUMULATIVE_20260908 */
+		if (pSnes->m_BSXBase.IsActive())
 		{
-			pCpu->uMDR = v;
-			return v;
+			Uint8 v;
+			if (pSnes->m_BSXBase.ReadMCCRegister(uBusAddr, pCpu->uMDR, &v))
+			{
+				pCpu->uMDR = v;
+				return v;
+			}
+		}
+
+		if (uAddr < 0x4380)
+		{
+			// read from DMA controller
+			return pSnes->m_DMAC.Read8((uAddr>>4) & 7, uAddr & 0xF);
+		}
+		if (pSnes->m_bSDD1 && uAddr >= 0x4800 && uAddr <= 0x4807)
+		{
+			// S-DD1 registradores
+			return pSnes->m_SDD1.ReadReg(uAddr);
 		}
 	}
 
-	uAddr &= 0xFFFF;
-
-	if (uAddr >= 0x4300 && uAddr < 0x4380)
-	{
-		// read from DMA controller
-		return pSnes->m_DMAC.Read8((uAddr>>4) & 7, uAddr & 0xF);
-	} else
-	if (pSnes->m_bSDD1 && uAddr >= 0x4800 && uAddr <= 0x4807)
-	{
-		// S-DD1 registradores
-		return pSnes->m_SDD1.ReadReg(uAddr);
-	} else
 	switch (uAddr)
 	{
     //
@@ -2027,42 +2063,51 @@ void SNCPU_TRAPFUNC SnesSystem::Write4000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 
 	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
 
-	/* AURORA_V4_4_CUMULATIVE_20260908
-	 * Shadow writes change the physical map only on bank-E commit. */
-	if (pSnes->m_BSXBase.IsActive())
+	/* AURORA_TOPGEAR_CPU_IO_LOW_FAST_GATE_V3_20260917
+	 * See Read4000(): common low CPU-I/O cannot hit MCC/DMA/S-DD1. */
+	const Uint32 uBusAddr = uAddr;
+	uAddr &= 0xFFFF;
+
+	if (uAddr >= 0x4300)
 	{
-		Bool committed = FALSE;
-		if (pSnes->m_BSXBase.WriteMCCRegister(uAddr, uData, &committed))
+		/* AURORA_V4_4_CUMULATIVE_20260908
+		 * Shadow writes change the physical map only on bank-E commit. */
+		if (pSnes->m_BSXBase.IsActive())
 		{
-			pCpu->uMDR = uData;
-			if (committed)
+			Bool committed = FALSE;
+			if (pSnes->m_BSXBase.WriteMCCRegister(uBusAddr, uData, &committed))
 			{
-				pSnes->MapBSXBase();
-				/* Same reason as the existing SWC mode-switch abort: the MIPS
-				 * executor may hold a stale direct fetch pointer. */
-				SNCPUAbort(pCpu);
+				pCpu->uMDR = uData;
+				if (committed)
+				{
+					pSnes->MapBSXBase();
+					/* Same reason as the existing SWC mode-switch abort: the MIPS
+					 * executor may hold a stale direct fetch pointer. */
+					SNCPUAbort(pCpu);
+				}
+				return;
+			}
+		}
+
+		if (uAddr < 0x4380)
+		{
+			// write to DMA controller
+			pSnes->m_DMAC.Write8((uAddr>>4) & 7, uAddr & 0xF, uData);
+			return;
+		}
+		if (pSnes->m_bSDD1 && uAddr >= 0x4800 && uAddr <= 0x4807)
+		{
+			// S-DD1 registradores; $4804-$4807 mudam o mapa de bancos $C0-$FF
+			pSnes->m_SDD1.WriteReg(uAddr, uData);
+			if (pSnes->m_SDD1.MapDirty())
+			{
+				pSnes->RemapSDD1();
+				pSnes->m_SDD1.ClearMapDirty();
 			}
 			return;
 		}
 	}
 
-	uAddr &= 0xFFFF;
-
-	if (uAddr >= 0x4300 && uAddr < 0x4380)
-	{
-		// write to DMA controller
-		pSnes->m_DMAC.Write8((uAddr>>4) & 7, uAddr & 0xF, uData);
-	} else
-	if (pSnes->m_bSDD1 && uAddr >= 0x4800 && uAddr <= 0x4807)
-	{
-		// S-DD1 registradores; $4804-$4807 mudam o mapa de bancos $C0-$FF
-		pSnes->m_SDD1.WriteReg(uAddr, uData);
-		if (pSnes->m_SDD1.MapDirty())
-		{
-			pSnes->RemapSDD1();
-			pSnes->m_SDD1.ClearMapDirty();
-		}
-	} else
 	{
 		SnesIO *pIO = &pSnes->m_IO;
 
@@ -2293,26 +2338,65 @@ void SNCPU_TRAPFUNC SnesSystem::WriteSRAM(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 
 #ifdef SNES_DSP1
 
-// Decodifica se o endereco do DSP-1 e' o Status Register (SR) ou o Data
-// Register (DR).  O bit de selecao DR/SR DEPENDE do mapeamento:
-//   - HiROM/$6000:  DR=$6000-$6FFF, SR=$7000-$7FFF  (bit 0x1000)
-//   - LoROM/$8000:  DR=$8000-$BFFF, SR=$C000-$FFFF  (bit 0x4000)
-// O decode antigo usava (uAddr & 0xE000), que mascara o bit 0x1000 e
-// portanto fazia $7000 (SR) cair no caso do DR -> as leituras de status
-// do jogo eram servidas como DADOS e AVANCAVAM a FSM do DSP, perdendo
-// sincronia (matriz Mode-7 lixo / pista achatada).
-static inline Bool _SnesDsp1IsStatus(Uint32 uAddr)
+/* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: board-specific DR/SR decode. */
+Bool SnesSystem::DSPAddressIsStatus(Uint32 uAddr) const
 {
-	Uint16 a = (Uint16)(uAddr & 0xFFFF);
-	if (a < 0x8000)
-		return (a & 0x1000) ? TRUE : FALSE;   // $6000=DR  $7000=SR
-	else
-		return (a & 0x4000) ? TRUE : FALSE;   // $8000=DR  $C000=SR
+    Uint16 a = (Uint16)(uAddr & 0xFFFFu);
+#if SNES_DSP1
+    if (m_pDsp == &m_DSP1)
+    {
+        Bool largeLo = FALSE;
+        if (m_bSuperWildCard && m_SWC.HasExternalCartridge())
+            largeLo = m_SWC.GetExternalCartridgeMapping() == SNROM_MAPPING_LOROM &&
+                      m_SWC.GetExternalCartridgeBytes() > 0x100000u;
+        else if (m_pRom)
+            largeLo = m_pRom->m_eMapping == SNROM_MAPPING_LOROM &&
+                      m_pRom->GetBytes() > 0x100000u;
+        if (largeLo) return (a >= 0x4000u && a < 0x8000u) ? TRUE : FALSE;
+    }
+    if (m_pDsp == &m_DSP2) return FALSE;
+#endif
+    if (a >= 0x6000u && a < 0x8000u) return (a >= 0x7000u) ? TRUE : FALSE;
+    if (a >= 0x8000u) return (a >= 0xC000u) ? TRUE : FALSE;
+    return FALSE;
 }
 
 Uint8 SNCPU_TRAPFUNC SnesSystem::ReadDSP1(SNCpuT *pCpu, Uint32 uAddr)
 {
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+
+#if SNES_DSP1
+	/* AURORA_FDC52B8_AUDIT_DSP2_HOST_PAGE_FIX_V1_20260917
+	 * SNCpuT descriptors are 8 KiB. The upper half of the host page is
+	 * not physically decoded by DSP-2 and must remain unmapped. */
+	if (pSnes->m_pDsp == &pSnes->m_DSP2)
+	{
+		Uint16 a = (Uint16)uAddr;
+		if (a >= 0x7000u && a < 0x8000u)
+			return 0xFF;
+	}
+#endif
+
+#if SNES_DSP1
+	/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V2_DSP2_20260917
+	 * The DSP-2 $6000-$6FFF data window shares Aurora's 8-KiB CPU page with
+	 * physically unmapped $7000-$7FFF.  The map must trap the whole page to
+	 * satisfy SNCpuT's descriptor ABI, but the upper half must not clock the
+	 * DSP HLE.  Preserve the core's ordinary unmapped read value (0xFF). */
+	if (pSnes->m_pDsp == &pSnes->m_DSP2)
+	{
+		Uint16 a = (Uint16)uAddr;
+		if (a >= 0x7000u && a < 0x8000u)
+		{
+			/* AURORA_5326ED4_DSP2_OPENBUS_FIX_20260917
+			 * DSP-2 does not decode $7000-$7FFF. The containing 8 KiB
+			 * CPU page must be trapped for Aurora's mapper ABI, but the
+			 * undecoded upper half must preserve ordinary SNES open-bus
+			 * semantics, i.e. the CPU's current MDR value. */
+			return pCpu->uMDR;
+		}
+	}
+#endif
 
 	// Guarda anti-crash: se o chip nao esta ligado (ex.: jogo de
 	// DSP-3/DSP-4 sem o firmware correspondente), nao ha objeto DSP.
@@ -2321,9 +2405,9 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::ReadDSP1(SNCpuT *pCpu, Uint32 uAddr)
 	// nem mapeia a regiao quando nao ha chip, mas isto e' a rede de
 	// seguranca para qualquer caminho residual.)
 	if (!pSnes->m_pDsp)
-		return _SnesDsp1IsStatus(uAddr) ? 0x80 : 0x00;
+		return pSnes->DSPAddressIsStatus(uAddr) ? 0x80 : 0x00;
 
-	if (_SnesDsp1IsStatus(uAddr))
+	if (pSnes->DSPAddressIsStatus(uAddr))
 	{
 		Uint8 s = pSnes->m_pDsp->ReadStatus(uAddr);
 #if SNDBG_LOG
@@ -2346,12 +2430,22 @@ void SNCPU_TRAPFUNC SnesSystem::WriteDSP1(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 {
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 
+#if SNES_DSP1
+	/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V2_DSP2_20260917: companion write guard for the widened host descriptor page. */
+	if (pSnes->m_pDsp == &pSnes->m_DSP2)
+	{
+		Uint16 a = (Uint16)uAddr;
+		if (a >= 0x7000u && a < 0x8000u)
+			return;
+	}
+#endif
+
 	// Guarda anti-crash: sem chip DSP ligado, ignora a escrita.
 	if (!pSnes->m_pDsp)
 		return;
 
 	// Escritas vao para o DR; o SR e' somente leitura.
-	if (!_SnesDsp1IsStatus(uAddr))
+	if (!pSnes->DSPAddressIsStatus(uAddr))
 	{
 #if SNDBG_LOG
 		g_TmgDspWr++;
@@ -2366,13 +2460,14 @@ void SNCPU_TRAPFUNC SnesSystem::WriteDSP1(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 Uint8 SNCPU_TRAPFUNC SnesSystem::ReadGSU(SNCpuT *pCpu, Uint32 uAddr)
 {
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
-	return pSnes->m_GSU.ReadReg((Uint16)(uAddr & 0xFFFF));
+	return pSnes->m_GSU.ReadReg((Uint16)(uAddr & 0xFFFF), pCpu->uMDR); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
 }
 
 void SNCPU_TRAPFUNC SnesSystem::WriteGSU(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
 {
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 	pSnes->m_GSU.WriteReg((Uint16)(uAddr & 0xFFFF), uData);
+	if (pSnes->UpdateSuperFXBusMap()) SNCPUAbort(pCpu); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
 }
 
 
@@ -2399,7 +2494,7 @@ Uint8 SnesSystem::CX4ReadMem(void *pCtx, Uint32 uAddr)
 Uint8 SNCPU_TRAPFUNC SnesSystem::ReadCX4(SNCpuT *pCpu, Uint32 uAddr)
 {
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
-	return pSnes->m_CX4.Read(uAddr & 0xFFFF);
+	return pSnes->m_CX4.Read(uAddr & 0xFFFF, pCpu->uMDR); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
 }
 
 void SNCPU_TRAPFUNC SnesSystem::WriteCX4(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
@@ -2460,7 +2555,9 @@ SnesSystem::SnesSystem()
 	m_SpcDsp.SetMixer(1,&m_SpcDspSilentMixer);
 	m_SpcDspMixer.SetDsp(&m_SpcDsp);
 	m_SpcDspSilentMixer.SetDsp(&m_SpcDsp);
-	m_SpcDsp.SetMem(m_Spc.Mem);
+	/* AURORA_SPC700_MEGA_ACCURACY_V1_20260916
+	 * Wire both IPL-visible memory and underlying physical APURAM. */
+	m_SpcDsp.SetMem(m_Spc.Mem, m_Spc.ShadowMem, &m_Spc.bRomEnable);
 
 	// setup dma controller
 	m_DMAC.SetCPU(&m_Cpu);
@@ -2468,6 +2565,8 @@ SnesSystem::SnesSystem()
 	m_DMAC.SetSDD1(&m_SDD1);
 
 	m_bSDD1 = FALSE;
+	m_bSuperFXRomBlocked = FALSE; /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
+	m_bSuperFXRamBlocked = FALSE;
 	m_bSA1IRQ = FALSE; /* AURORA_SA1_V1_REFERENCE_LOGIC_20260902 */
 	m_bSuperWildCard = FALSE; /* AURORA_SWC_FLOPPY_V1_20260831 */
 	m_uSGBSyncClock = 0; /* AURORA_SGB_RUNTIME_V0_4_20260904 */
@@ -2532,6 +2631,7 @@ void SnesSystem::Reset()
 	m_CX4.Reset();
 
 	m_GSU.Reset();
+	UpdateSuperFXBusMap(TRUE); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
 
 	m_SDD1.Reset();
 
@@ -2663,6 +2763,7 @@ void SnesSystem::SoftReset()
     m_OBC1.Reset();
     m_CX4.Reset();
     m_GSU.Reset();
+    UpdateSuperFXBusMap(TRUE); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
     m_SDD1.Reset();
     if (m_SA1.IsActive())
     {
@@ -2748,6 +2849,10 @@ void SnesSystem::SetSnesRom(SnesRom *pRom)
 		m_pRom = NULL;
 	}
 #ifdef SNES_DSP1
+	/* AURORA_FDC52B8_AUDIT_DSP3_RELEASE_V1_20260917
+	 * Recover DSP-3's lazy ~48 KiB before discarding the active device. */
+	if (m_pDsp == &m_DSP3)
+		m_DSP3.ReleaseWork();
 	m_pDsp = NULL;
 	/* AURORA_UPSTREAM_20260827_DSP1_OP28_REVISION_V1 */
 	m_DSP1.SetOriginalDistanceBug(FALSE);
@@ -2837,11 +2942,15 @@ void SnesSystem::SetSnesRom(SnesRom *pRom)
 
 /* AURORA_SWC_FLOPPY_V1_20260831 */
 Bool SnesSystem::LoadSuperWildCard(const Char *pFirmwarePath,
-                                   const Char *pDiskPath)
+                                   const Char *pDiskPath,
+                                   Uint8 *pExternalDRAM,
+                                   Uint32 nExternalDRAMBytes) /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916 */
 {
     SetSnesRom(NULL);
 
-    if (!m_SWC.Load(pFirmwarePath, pDiskPath, SNSuperWildCard::MODEL_SWC))
+    if (!m_SWC.Load(pFirmwarePath, pDiskPath,
+                    SNSuperWildCard::MODEL_SWC,
+                    pExternalDRAM, nExternalDRAMBytes)) /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916 */
         return FALSE;
 
     m_bSuperWildCard = TRUE;
@@ -3041,6 +3150,12 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
     // increment cycle counter
     SNCPUAddCycles( &m_Cpu, nCycles );
     Int32 nSA1Synced = 0; /* AURORA_SA1_INTERLEAVED_CHUNK_SCHEDULER_V7_2_20260903 */
+    /* AURORA_TOPGEAR_COMMON_CART_SCHED_FAST_V1_20260917
+     * Cartridge topology cannot change during one CPU slice. Cache
+     * these attachment predicates once so ordinary carts do not pay
+     * SA-1/SGB method calls repeatedly inside the execution loop. */
+    const Bool bSA1Active = m_SA1.IsActive();
+    const Bool bSGBActive = m_SGB.IsActive();
 
     while (m_Cpu.Cycles > 0)
     {
@@ -3152,7 +3267,7 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
 					}
 				}
 
-                if (!m_SA1.EnterMainNMIOverride(&m_Cpu))
+                if (!bSA1Active || !m_SA1.EnterMainNMIOverride(&m_Cpu))
                     SNCPUNMI(&m_Cpu);
                 // clear NMI edge signal
                 m_Cpu.uSignal&= ~SNCPU_SIGNAL_NMIEDGE;
@@ -3161,7 +3276,7 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
             {
                 // attempt irq
                 // irqs will always be attempted until signal has been cleared
-                if (!m_SA1.EnterMainIRQOverride(&m_Cpu))
+                if (!bSA1Active || !m_SA1.EnterMainIRQOverride(&m_Cpu))
                     SNCPUIRQ(&m_Cpu);
             } else
             if (m_Cpu.uSignal & SNCPU_SIGNAL_RESET)
@@ -3184,7 +3299,7 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
         {
             Int32 nWait = m_Cpu.Cycles;
 
-            if (m_SA1.IsActive() &&
+            if (bSA1Active &&
                 nWait > SNSA1::MAIN_INTERLEAVE_QUANTUM)
                 nWait = SNSA1::MAIN_INTERLEAVE_QUANTUM;
 
@@ -3192,7 +3307,7 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
             {
                 SNCPUConsumeCycles(&m_Cpu, nWait);
 
-                if (m_SA1.IsActive())
+                if (bSA1Active)
                 {
                     m_SA1.Run(nWait);
                     nSA1Synced += nWait;
@@ -3202,7 +3317,7 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
         }
 
         // run CPU!
-        if (m_SA1.IsActive())
+        if (bSA1Active)
         {
             /* AURORA_SA1_BOUNDED_CHUNK_EXECUTOR_V7_20260903
              * AURORA_SA1_INTERLEAVED_CHUNK_SCHEDULER_V7_2_20260903 */
@@ -3240,7 +3355,7 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
 #endif
     }
 
-    if (m_SA1.IsActive())
+    if (bSA1Active)
     {
         Int32 nElapsed = nCycles;
 #if SNES_HVIRQ_RESCHEDULE
@@ -3254,7 +3369,8 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
             m_SA1.Run(nElapsed);
     }
 
-    SyncSuperGameBoy();
+    if (bSGBActive)
+        SyncSuperGameBoy();
 }
 
 
@@ -3273,6 +3389,46 @@ void SnesSystem::ExecuteWithIRQ(Int32 nCycles, Int32 &nIRQCycles)
 		 * counters before looping, so the replacement schedule does not double
 		 * count physical time. */
 		Int32 nRemaining = nCycles;
+
+		/* AURORA_TOPGEAR_IRQ_IDLE_FAST_V2_20260917
+		 * No H/V event is armed on the common path. Execute the same
+		 * slice directly, but keep the line live so a mid-slice write to
+		 * $4200/$4207-$420A can still SNCPUAbort() and reschedule.
+		 * On such a write, reproduce the existing unspent-budget rollback
+		 * exactly before falling into the normal event loop below. */
+		if (m_nLineIRQCycle < 0 && !m_bLineIRQReschedule)
+		{
+			Int32 nRun = nRemaining;
+			m_bLineIRQReschedule = FALSE;
+			ExecuteCPU(nRun);
+
+			if (!m_bLineIRQReschedule)
+			{
+				m_nLineIRQClock += nRun;
+				nIRQCycles -= nCycles;
+				return;
+			}
+
+			Int32 nUnspent = m_Cpu.Cycles;
+			if (nUnspent < 0)
+				nUnspent = 0;
+			if (nUnspent > nRun)
+				nUnspent = nRun;
+
+			if (nUnspent > 0)
+			{
+				m_Cpu.Cycles -= nUnspent;
+				for (Int32 i = 0; i < SNCPU_COUNTER_NUM; ++i)
+					m_Cpu.Counter[i] -= nUnspent;
+			}
+
+			Int32 nSpent = nRun - nUnspent;
+			if (nSpent < 0)
+				nSpent = 0;
+			m_nLineIRQClock += nSpent;
+			nRemaining -= nSpent;
+			m_bLineIRQReschedule = FALSE;
+		}
 
 		while (nRemaining > 0)
 		{
@@ -3401,11 +3557,14 @@ static _INLINE Uint32 SnesRasterFieldLineCount(const SnesPPU &ppu, Bool bPAL)
     return uLines;
 }
 
+/* AURORA_TOPGEAR_RASTER_RARELINE_FAST_V3_20260917
+ * Same conjunctions, ordered by the rare physical line first so the
+ * common 1364-clock line does not load interlace/field state. */
 static _INLINE Int32 SnesRasterLineClocks(const SnesPPU &ppu, Uint32 uLine, Bool bPAL)
 {
-    if (!bPAL && !ppu.IsTimingInterlace() && ppu.GetField() && uLine == 240u)
+    if (!bPAL && uLine == 240u && !ppu.IsTimingInterlace() && ppu.GetField())
         return SNES_CYCLESPERLINE_SHORT;
-    if (bPAL && ppu.IsTimingInterlace() && ppu.GetField() && uLine == 311u)
+    if (bPAL && uLine == 311u && ppu.IsTimingInterlace() && ppu.GetField())
         return SNES_CYCLESPERLINE_LONG;
     return SNES_CYCLESPERLINE_NORMAL;
 }
@@ -3607,7 +3766,8 @@ void SnesSystem::ExecuteLine()
 	if (!m_bRasterHDMADone)
 	{
 		m_bRasterHDMADone = TRUE;
-		if (!(m_IO.m_Regs.hvbjoy & 0x80) && nHClock < nLineClocks)
+		if (!(m_IO.m_Regs.hvbjoy & 0x80) && nHClock < nLineClocks &&
+		    m_DMAC.GetActiveHDMAMask()) /* AURORA_TOPGEAR_HDMA_IDLE_FAST_V2_20260917 */
 		{
 			Int32 nBefore = m_Cpu.Cycles;
 #if SNDBG_LOG
@@ -3644,6 +3804,7 @@ void SnesSystem::ExecuteLine()
 		 * Give it one 21.47-MHz master-clock scanline (1364 clocks) rather
 		 * than an arbitrary instruction count; CLSR is accounted in the core. */
 		m_GSU.Run(m_GSU.GetLineClockBudget());
+		UpdateSuperFXBusMap(); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: STOP releases RON/RAN immediately. */
 #if SNDBG_LOG
 		g_TmgCycGSU += ProfCtrGetCycle() - _tGSU;
 #endif
@@ -3830,9 +3991,13 @@ m_PPU.SetRegionPAL(bPAL);
 	SyncSPC();
 
 	// update spc timers
-	SNSpcTimerSync(&m_SpcIO.m_Regs.spc_timer[0], SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_TOTAL));
-	SNSpcTimerSync(&m_SpcIO.m_Regs.spc_timer[1], SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_TOTAL));
-	SNSpcTimerSync(&m_SpcIO.m_Regs.spc_timer[2], SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_TOTAL));
+	/* AURORA_TOPGEAR_SPC_TIMER_CACHE_V3_20260917
+	 * No SPC execution occurs between these three calls. Reuse the exact
+	 * same TOTAL timestamp instead of loading/subtracting it three times. */
+	const Int32 nSPCTotal = SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_TOTAL);
+	SNSpcTimerSync(&m_SpcIO.m_Regs.spc_timer[0], nSPCTotal);
+	SNSpcTimerSync(&m_SpcIO.m_Regs.spc_timer[1], nSPCTotal);
+	SNSpcTimerSync(&m_SpcIO.m_Regs.spc_timer[2], nSPCTotal);
 
 	// mix non-deterministic mixer
 	PROF_ENTER("SNSpcDspUpdate");

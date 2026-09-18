@@ -221,6 +221,10 @@ Bool SnesSystem::SaveStateChecked(void *pState, Int32 nStateBytes)
 {
     if (!pState)
         return FALSE;
+#if SNES_DSP1
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: DSP3 state is >12 KiB; never save partially. */
+    if (m_pDsp == &m_DSP3) return FALSE;
+#endif
 
     if (!m_bSuperWildCard && !m_SGB.IsActive())
     {
@@ -271,6 +275,10 @@ Bool SnesSystem::RestoreStateChecked(void *pState, Int32 nStateBytes)
 {
     if (!pState)
         return FALSE;
+#if SNES_DSP1
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: reject partial DSP3 restores. */
+    if (m_pDsp == &m_DSP3) return FALSE;
+#endif
 
     if (!m_bSuperWildCard && !m_SGB.IsActive())
     {
@@ -319,6 +327,10 @@ Bool SnesSystem::RestoreStateChecked(void *pState, Int32 nStateBytes)
 
 Int32 SnesSystem::GetStateSize()
 {
+#if SNES_DSP1
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: savestate unavailable while DSP3 is active. */
+    if (m_pDsp == &m_DSP3) return 0;
+#endif
     if (m_SGB.IsActive())
     {
         Uint32 n = (Uint32)sizeof(SnesStateT) + m_SGB.GetStateBytes();
@@ -404,7 +416,8 @@ void SnesSystem::SaveState(SnesStateT *pState)
 
         memset(pSpecial, 0, sizeof(*pSpecial));
         memcpy(pSpecial->Tag, _SNSpecialStateTag, sizeof(pSpecial->Tag));
-        pSpecial->Version = 1;
+        /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: SuperFX state v2 includes the real S-CPU register latch. */
+        pSpecial->Version = (uChip == SNROM_FLAG_SUPERFX) ? 2u : 1u;
         pSpecial->ChipFlag = uChip;
 
         switch (uChip)
@@ -540,7 +553,7 @@ Bool SnesSystem::RestoreState(SnesStateT *pState)
         if (!CanSerializeSpecialChipState() ||
             memcmp(pSpecial->Tag, _SNSpecialStateTag,
                    sizeof(pSpecial->Tag)) != 0 ||
-            pSpecial->Version != 1 ||
+            pSpecial->Version != ((uChip == SNROM_FLAG_SUPERFX) ? 2u : 1u) ||
             pSpecial->ChipFlag != uChip)
         {
             return FALSE;
@@ -756,6 +769,10 @@ Bool SnesSystem::RestoreState(SnesStateT *pState)
      * the restored SA-1 cartridge windows last, using live host pointers. */
     if (m_pRom && (m_pRom->m_Flags & SNROM_FLAG_SA1))
         m_SA1.MapMainCPU(&m_Cpu);
+
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: SuperFX bus ownership is transient materialized map state. */
+    if (m_pRom && (m_pRom->m_Flags & SNROM_FLAG_SUPERFX))
+        UpdateSuperFXBusMap(TRUE);
 
     return TRUE;
 }
