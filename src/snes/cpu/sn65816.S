@@ -3,6 +3,10 @@
 #include "sncpudefs.h"
 #include "ps2reg.h"
 
+#ifndef AURORA_RUNTIME_TRACE
+#define AURORA_RUNTIME_TRACE 0
+#endif
+
 
 		.file		1 "sn65816.S"
     	.text	
@@ -122,6 +126,53 @@
 #define R_DPMASK		$25
 
 #define R_PCCycles		$30
+
+/* AURORA_SNES_BINARY_TRACE_V6_20260918_MACRO: pre-dispatch context ring, runtime gated. */
+#if AURORA_RUNTIME_TRACE
+#define AURORA_TRACE_SCPU_INSN() \
+        la      t0,g_AuroraTraceEnabled       ;\
+        lw      t1,0(t0)                      ;\
+        beqz    t1,9f                         ;\
+        nop                                   ;\
+        la      t0,g_AuroraTraceSeq           ;\
+        lw      t1,0(t0)                      ;\
+        addiu   t1,t1,1                       ;\
+        sw      t1,0(t0)                      ;\
+        la      t0,g_AuroraTraceSCPUWrite     ;\
+        lw      t2,0(t0)                      ;\
+        addiu   t2,t2,1                       ;\
+        sw      t2,0(t0)                      ;\
+        addiu   t2,t2,-1                      ;\
+        andi    t2,t2,0x07FF                  ;\
+        sll     t2,t2,5                       ;\
+        la      t0,g_AuroraTraceSCPU          ;\
+        addu    t0,t0,t2                      ;\
+        sw      t1,0(t0)                      ;\
+        lwu     t2,SP_PCBank                  ;\
+        subu    t2,R_PC,t2                    ;\
+        addiu   t2,t2,-1                      ;\
+        sw      t2,4(t0)                      ;\
+        lw      t2,SNCPU_Counter1             ;\
+        subu    t2,t2,R_Cycles                ;\
+        sw      t2,8(t0)                      ;\
+        lw      t2,SNCPU_Counter2             ;\
+        subu    t2,t2,R_Cycles                ;\
+        sw      t2,12(t0)                     ;\
+        sw      R_Cycles,16(t0)               ;\
+        sh      R_A,20(t0)                    ;\
+        sh      R_X,22(t0)                    ;\
+        sh      R_Y,24(t0)                    ;\
+        sh      R_S,26(t0)                    ;\
+        sb      R_Data,28(t0)                 ;\
+        sb      R_P,29(t0)                    ;\
+        lbu     t2,SNCPU_uSignal              ;\
+        sb      t2,30(t0)                     ;\
+        lbu     t2,SNCPU_rE                   ;\
+        sb      t2,31(t0)                     ;\
+9:
+#else
+#define AURORA_TRACE_SCPU_INSN()
+#endif
 
 
 
@@ -1787,6 +1838,8 @@ bltz	R_PCCount,_SNCPU_ExecuteFetchUpdate
 		addiu	R_PCCount,R_PCCount,-1
 
 lbu		R_Data,-1(R_PC)
+        /* AURORA_SNES_BINARY_TRACE_V6_20260918_FAST */
+        AURORA_TRACE_SCPU_INSN()
 
 
 		sll		t0, R_Data, 2							// R_Data = opcode * 4
@@ -1806,6 +1859,8 @@ _SNCPU_ExecuteFetchUpdate:
 
 		jal		_SNCPU_Fetch8Update				// reads data, pc+=1
         addiu	R_PC,R_PC,-1
+        /* AURORA_SNES_BINARY_TRACE_V6_20260918_REMAP */
+        AURORA_TRACE_SCPU_INSN()
         
 
 		sll		t0, R_Data, 2							// R_Data = opcode * 4

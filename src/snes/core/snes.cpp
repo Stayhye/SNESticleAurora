@@ -13,6 +13,8 @@
 #include "sntiming.h"
 #include "sndebug.h"
 #include "sndbglog.h"
+#include "platform/ps2/system/aurora_runtime_trace.h"
+#include "platform/ps2/system/aurora_ee_crash_diag.h"
 
 /* AURORA_SNES_NATIVE_32K_V1_20260822
  *
@@ -1254,6 +1256,10 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
 {
 	Int32 nCycles;
 
+	/* AURORA_EE_CRASH_DIAG_DKC_V1_20260918: host progress only; never touches trace storage. */
+	AuroraEECrashDiagBreadcrumb(
+	    AED_SYNCSPC_ENTER, m_uFrame, m_uLine);
+
 /*#if SNES_DEBUG
     if (g_bStateDebug)
     {
@@ -1273,6 +1279,8 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
     Int32 CpuTime = SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME);
     nCycles = CpuTime - m_Spc.Counter[SNSPC_COUNTER_FRAME];
     nCycles += uExtra;
+    AuroraEECrashDiagBreadcrumb(
+        AED_SYNCSPC_TIMING, (Uint32)CpuTime, (Uint32)nCycles);
     if (nCycles > (SNSPC_CYCLE * SNES_SPCMINCYCLES))
     {
         //SnesDebug("SNSPCExec: %d\n", nCycles);
@@ -1281,7 +1289,14 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
 #if SNDBG_LOG
         Uint32 _tAPU = ProfCtrGetCycle();
 #endif
+        AuroraEECrashDiagBreadcrumb(
+            AED_SPC_EXEC_ENTER, (Uint32)nCycles,
+            (Uint32)SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
         SNSPCExecute(&m_Spc, nCycles);
+        AuroraEECrashDiagBreadcrumb(
+            AED_SPC_EXEC_RETURN,
+            (Uint32)SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME),
+            (Uint32)m_Spc.Cycles);
 #if SNDBG_LOG
         g_TmgCycAPU += ProfCtrGetCycle() - _tAPU;
 #endif
@@ -1298,12 +1313,23 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
          *
          * Frame rollover and queue-full recovery deliberately retain the old
          * full flush through bFlushAll=TRUE. */
+        AuroraEECrashDiagBreadcrumb(
+            AED_APUIO_QUEUE_ENTER,
+            bFlushAll ? 1u : 0u,
+            (Uint32)SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
         if (bFlushAll)
             m_SpcIO.SyncQueueAll();
         else
             m_SpcIO.SyncQueue(SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
+        AuroraEECrashDiagBreadcrumb(
+            AED_APUIO_QUEUE_RETURN,
+            bFlushAll ? 1u : 0u,
+            (Uint32)SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
 #endif
     }
+
+    AuroraEECrashDiagBreadcrumb(
+        AED_SYNCSPC_RETURN, m_uFrame, m_uLine);
 
 //#if SNES_DEBUG
 //    if (g_bStateDebug)
@@ -1530,8 +1556,18 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 		/* AURORA_BLIZZARD_APUIO_QUEUE_ORDER_V1_20260914
 		 * Do not flush writes newer than the SPC's consumed timestamp merely
 		 * because the S-CPU is polling the response ports. */
+		/* AURORA_SNES_BINARY_TRACE_V6_20260918_APUIO_R */
+		AuroraTraceRecord(
+		    ATR_APUIO_R, ATR_F_PRE, (Uint16)uAddr,
+		    (Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_FRAME),
+		    (Uint32)SNSPCGetCounter(&pSnes->m_Spc, SNSPC_COUNTER_FRAME),
+		    ATR_P_NONE);
 		pSnes->SyncSPC(0, FALSE);
-		return pSnes->m_SpcIO.m_Regs.apu_r[uAddr & 3];
+		Uint8 uApuValue = pSnes->m_SpcIO.m_Regs.apu_r[uAddr & 3];
+		AuroraTraceRecord(
+		    ATR_APUIO_R, ATR_F_POST, (Uint16)uAddr,
+		    (Uint32)uApuValue, 0, ATR_P_NONE);
+		return uApuValue;
 	}
 
 	/* AURORA_MEGA_V2_PPU_READ_MDR
@@ -1787,6 +1823,30 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 	// mirror through the same SPC write queue and timing path as $2140-43.
 	if (uAddr >= 0x2140 && uAddr <= 0x217F)
 	{
+		/* AURORA_APUIO_EDGE_VISIBILITY_V1_20260918
+		 * The SPC runs continuously on hardware, so an older CPU->SPC port
+		 * transition must get an execution window before a later CPU write can
+		 * supersede it.  Aurora queues these writes; without a write-side sync,
+		 * sequences such as 02 -> 00 -> 01 can collapse to 01 before the SPC
+		 * executes, deadlocking handshakes such as The Lost Vikings.
+		 *
+		 * Only pay this synchronization cost when an older APUIO write is
+		 * actually pending.  SyncSPC(0,FALSE) advances the SPC to the current
+		 * S-CPU time and publishes only writes whose SPC timestamp is due.
+		 * The newer write is queued only after that window has been created. */
+		#if SNSPCIO_WRITEQUEUE
+		if (!pSnes->m_SpcIO.m_Queue.IsEmpty())
+			pSnes->SyncSPC(0, FALSE);
+		#endif
+		/* AURORA_SNES_BINARY_TRACE_V7_VISUAL_BREADCRUMBS_20260918_APUIO_W */
+		AuroraTraceBreadcrumb(
+		    ATR_SNAP_APUIO,
+		    (Uint16)(((uAddr & 3u) << 8) | (Uint16)uData));
+		AuroraTraceRecord(
+		    ATR_APUIO_W, ATR_F_PRE, (Uint16)uAddr,
+		    (Uint32)uData,
+		    (Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_FRAME),
+		    ATR_P_FLUSH);
 		#if SNSPCIO_WRITEQUEUE
 		if (!pSnes->m_SpcIO.EnqueueWrite(
 		        SNCPUGetCounter(pCpu, SNCPU_COUNTER_FRAME) + SNES_SPCWRITE_LATENCY,
@@ -3610,6 +3670,10 @@ static _INLINE Int32 SnesAutoJoyEndCycle(const SnesPPU &ppu,
 
 void SnesSystem::ExecuteLine()
 {
+	/* AURORA_SNES_BINARY_TRACE_V7_R9_DKC_PHASEPROBE_20260918_LINE */
+	AuroraTraceLinePhase(
+	    m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 	/* AURORA_V7_HORIZONTAL_SCHEDULER
 	 * Keep the existing scanline-oriented renderer, but put the major
 	 * S-CPU bus events at their real horizontal positions instead of
@@ -3830,6 +3894,11 @@ void SnesSystem::ExecuteFrame(Emu::SysInputT  *pInput, CRenderSurface *pTarget, 
 {
 Bool bPAL = FALSE;
 
+/* AURORA_SNES_BINARY_TRACE_V7_R9_DKC_PHASEPROBE_20260918_FRAME */
+/* AURORA_SNES_BINARY_TRACE_V7_R10_RETURN_BOUNDARY_20260918 */
+	AuroraTracePhase(ATR_PHASE_FRAME_ENTER, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
+
 if (g_SnesForceRegion == SNES_FORCE_REGION_PAL)
 {
     bPAL = TRUE;
@@ -3847,6 +3916,8 @@ if (m_pRom)
 }
 
 m_PPU.SetRegionPAL(bPAL);
+	AuroraTracePhase(ATR_PHASE_REGION_READY, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
     m_uLine = 0;
     /* AURORA_FCEUMM_FDS_V8_1_COMPAT_REVIEW_20260827: line zero is never part of VBlank. */
     m_IO.m_Regs.hvbjoy &= (Uint8)~0x81;
@@ -3903,11 +3974,15 @@ m_PPU.SetRegionPAL(bPAL);
 #endif
 
 	m_IO.LatchInput(pInput);
+	AuroraTracePhase(ATR_PHASE_INPUT_LATCHED, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 
 	// reset frame cycle counter
 	SNCPUResetCounter(&m_Cpu, SNCPU_COUNTER_FRAME);
     SNCPUResetCounter(&m_Cpu, SNCPU_COUNTER_LINE);
 	SNSPCResetCounter(&m_Spc, SNCPU_COUNTER_FRAME);
+	AuroraTracePhase(ATR_PHASE_COUNTERS_RESET, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 
 #if SNES_DEBUG
     if (Snes_bDebugFrame)
@@ -3915,20 +3990,30 @@ m_PPU.SetRegionPAL(bPAL);
 #endif
 
 	/* AURORA_V7_HDMA_SETUP_MOVED: BeginHDMA() agora ocorre em H=12..19 (fase DMA) da linha 0. */
+	AuroraTracePhase(ATR_PHASE_RENDER_BEGIN, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 	m_PPURender.BeginRender(pTarget);
 	m_PPU.BeginFrame();
+	AuroraTracePhase(ATR_PHASE_PPU_BEGIN, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 
 	/* AURORA_SETINI_DISPLAY_V1_SCHED_20260915
 	 * Overscan is sampled at V=0 by SnesPPU::BeginFrame(). Keep this local
 	 * copy fixed for the whole frame: a later $2133 write belongs to the next
 	 * frame's vertical geometry, matching the hardware latch. */
+	AuroraTracePhase(ATR_PHASE_VISIBLE_BEGIN, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 	const Uint32 uVisibleLines = m_PPU.GetFrameVisibleLineCount();
 	for (m_uLine=0; m_uLine < (uVisibleLines + 1u); m_uLine++)
 	{
 		if (m_uLine == 128u)
 		{
+			AuroraTracePhase(ATR_PHASE_MID_SYNC_BEGIN, m_uLine,
+			    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 			SyncPPU();
 			m_PPU.LatchTimingInterlace();
+			AuroraTracePhase(ATR_PHASE_MID_SYNC_END, m_uLine,
+			    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 		}
 		#if SNES_SYNCPPUEVERYLINE
 		SyncPPU();
@@ -3937,15 +4022,25 @@ m_PPU.SetRegionPAL(bPAL);
 		ExecuteLine();
 	}
 
+	AuroraTracePhase(ATR_PHASE_VISIBLE_END, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 	/* VBlank begins after this frame's latched 224/239-line display.
 	 * Auto-joy derives that edge directly from PPU geometry in ExecuteLine(). */
 	const Uint32 uFrameLines = SnesRasterFieldLineCount(m_PPU, bPAL);
 
 	// sync ppu at end of frame (this ensures all rendering has been completed)
+	AuroraTracePhase(ATR_PHASE_RENDER_SYNC_BEGIN, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 	SyncPPU();
+	AuroraTracePhase(ATR_PHASE_RENDER_SYNC_END, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 
 	m_PPU.EndFrame();
+	AuroraTracePhase(ATR_PHASE_PPU_END, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 	m_PPURender.EndRender();
+	AuroraTracePhase(ATR_PHASE_RENDER_END, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 
     //ExecuteLine();
     //ExecuteLine();
@@ -3957,6 +4052,8 @@ m_PPU.SetRegionPAL(bPAL);
 	// rdnmi flag is cleared on rdnmi read
 	// nmi will trigger immediately if nmitimen flag is set while rdnmi flag is set
 
+	AuroraTracePhase(ATR_PHASE_VBLANK_BEGIN, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
     PROF_ENTER("ExecVBLANK");
     // set vbl flag at start of vblank
     m_IO.m_Regs.hvbjoy|= 0x80;
@@ -3967,6 +4064,8 @@ m_PPU.SetRegionPAL(bPAL);
     // set 'BLANK NMI' flag at beginning of v-blank
     m_IO.m_Regs.rdnmi |= 0x80;
     SNCPUSignalNMI(&m_Cpu, m_IO.m_Regs.rdnmi & m_IO.m_Regs.nmitimen & 0x80);
+	AuroraTracePhase(ATR_PHASE_NMI_SIGNALED, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 
     for ( ; m_uLine < uFrameLines; m_uLine++)
 	{
@@ -3974,6 +4073,8 @@ m_PPU.SetRegionPAL(bPAL);
 
 	}
 
+	AuroraTracePhase(ATR_PHASE_VBLANK_END, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
     // clear 'BLANK NMI' flag at end of v-blank
     m_IO.m_Regs.rdnmi &= ~0x80;
     SNCPUSignalNMI(&m_Cpu, m_IO.m_Regs.rdnmi & m_IO.m_Regs.nmitimen & 0x80);
@@ -3985,10 +4086,20 @@ m_PPU.SetRegionPAL(bPAL);
 	//SNCPUConsumeCycles(&m_Cpu, SNES_CYCLESPERLINE);
 	//SNCPUExecute(&m_Cpu, SNES_CYCLESPERLINE);
 
+	AuroraTracePhase(ATR_PHASE_FINAL_PPU_BEGIN, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 	SyncPPU();
+	AuroraTracePhase(ATR_PHASE_FINAL_PPU_END, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 	/* Field changes at V-counter wrap, not when VBlank begins. */
 	m_PPU.AdvanceField();
+	AuroraTracePhase(ATR_PHASE_FIELD_ADVANCED, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
+	AuroraTracePhase(ATR_PHASE_SPC_SYNC_BEGIN, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 	SyncSPC();
+	AuroraTracePhase(ATR_PHASE_SPC_SYNC_END, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 
 	// update spc timers
 	/* AURORA_TOPGEAR_SPC_TIMER_CACHE_V3_20260917
@@ -3998,7 +4109,11 @@ m_PPU.SetRegionPAL(bPAL);
 	SNSpcTimerSync(&m_SpcIO.m_Regs.spc_timer[0], nSPCTotal);
 	SNSpcTimerSync(&m_SpcIO.m_Regs.spc_timer[1], nSPCTotal);
 	SNSpcTimerSync(&m_SpcIO.m_Regs.spc_timer[2], nSPCTotal);
+	AuroraTracePhase(ATR_PHASE_SPC_TIMERS_DONE, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 
+	AuroraTracePhase(ATR_PHASE_MIX_BEGIN, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 	// mix non-deterministic mixer
 	PROF_ENTER("SNSpcDspUpdate");
 #if SNDBG_LOG
@@ -4017,6 +4132,8 @@ m_PPU.SetRegionPAL(bPAL);
 	g_TmgCycMix += ProfCtrGetCycle() - _tMix;
 #endif
 	PROF_LEAVE("SNSpcDspUpdate");
+	AuroraTracePhase(ATR_PHASE_MIX_END, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 
 	// ensure that all queued registers have been committed 
 	m_SpcDsp.Sync();
@@ -4404,7 +4521,14 @@ m_PPU.SetRegionPAL(bPAL);
 	}
 #endif
 
+	AuroraTracePhase(ATR_PHASE_FRAME_EXIT, m_uLine,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 	m_uFrame++;
+	/* R10: if this durable marker survives, m_uFrame++ completed and
+	   execution reached the final C++ statement before the function
+	   epilogue/return to the PS2 frontend. */
+	AuroraTracePhase(ATR_PHASE_FRAME_INCREMENTED, m_uFrame,
+	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 }
 
 

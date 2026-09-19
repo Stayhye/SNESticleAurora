@@ -20,6 +20,7 @@ void Aud_Enqueue(short *left, short *right, int size, int wait);
 void Aud_Play();
 void Aud_Pause();
 void Aud_Setvol(unsigned int volume);
+void Aud_SetRuntimeTraceMute(int enabled);
 void Aud_Clearbuff();
 int  Aud_Available();
 int  Aud_Buffered();

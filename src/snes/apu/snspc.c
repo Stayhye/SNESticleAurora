@@ -280,9 +280,19 @@ Int32 SNSPCExecute(SNSpcT *pCpu, Int32 nExecCycles)
 }
 
 
+/* AURORA_SPC_FRAME_COUNTER_REBASE_FIX_V1_20260919
+ *
+ * SNSPCGetCounter() is Counter[i] - Cycles.  The SPC interpreter may carry
+ * a positive residual Cycles budget across scheduler boundaries, so setting
+ * only Counter[i] to zero can make a freshly reset logical counter negative.
+ *
+ * Rebase the selected logical counter to the current residual budget:
+ * SNSPCGetCounter(pCpu, iCounter) becomes exactly zero without discarding
+ * or inventing SPC execution cycles.
+ */
 void SNSPCResetCounter(SNSpcT *pCpu, Int32 iCounter)
 {
-	pCpu->Counter[iCounter] = 0;
+	pCpu->Counter[iCounter] = pCpu->Cycles;
 }
 
 #if 0

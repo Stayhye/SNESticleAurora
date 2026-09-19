@@ -10,6 +10,8 @@ extern "C" {
 #include "snspc.h"
 };
 #include "snspcdsp.h"
+#include "platform/ps2/system/aurora_runtime_trace.h"
+/* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918 */
 
 #define SNES_DEBUGSPCIO (CODE_DEBUG && FALSE)
 
@@ -106,6 +108,7 @@ extern "C" Bool g_bStateDebug;
 Uint8 SNSpcIO::Read8Trap(SNSpcT *pSpc, Uint32 uAddr)
 {
 	SNSpcIO *pIO = (SNSpcIO *)pSpc->pUserData;
+	/* AURORA_SNES_BINARY_TRACE_V7_VISUAL_BREADCRUMBS_20260918_SPCIO_READ: no USB event; SPC ring is sampled by frame/critical breadcrumbs. */
 
 #if SNES_STATEDEBUG
 	if (g_bStateDebug)
@@ -122,7 +125,13 @@ Uint8 SNSpcIO::Read8Trap(SNSpcT *pSpc, Uint32 uAddr)
 		return 0x00;
 
 	case 0xF2:
-		return (Uint8)(pSpc->Mem[uAddr] & 0x7F);
+		/* AURORA_SPC_DSPADDR_F2_READBACK_FIX_V1_20260919
+		 * DSPADDR is an 8-bit S-SMP latch.  Bit 7 controls whether
+		 * a write through DSPDATA ($F3) is accepted, but it must not
+		 * be discarded from the DSPADDR value stored/read at $F2.
+		 * The S-DSP register index itself remains 7-bit at $F3.
+		 */
+		return pSpc->Mem[uAddr];
 
 	case 0xF3:
 		/* AURORA_HW_ACCURACY_DSPDATA_ORDER_V1_20260916
@@ -162,7 +171,14 @@ Uint8 SNSpcIO::Read8Trap(SNSpcT *pSpc, Uint32 uAddr)
 void SNSpcIO::Write8Trap(SNSpcT *pSpc, Uint32 uAddr, Uint8 uData)
 {
 	SNSpcIO *pIO = (SNSpcIO *)pSpc->pUserData;
-	/* AURORA_TOPGEAR_SPCIO_TIMESTAMP_V3_20260917
+	/* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918_SPCIO_W */
+	if (uAddr >= 0xF4 && uAddr <= 0xF7)
+	{
+		AuroraTraceRecord(
+		    ATR_SPCIO_W, ATR_F_PRE, (Uint16)uAddr,
+		    (Uint32)uData, (Uint32)pSpc->Regs.rPC,
+		    ATR_P_NONE);
+	}/* AURORA_TOPGEAR_SPCIO_TIMESTAMP_V3_20260917
 	 * TOTAL time is observable here only by timer-control/target writes.
 	 * DSP and CPU/APU port writes do not consume this timestamp. */
 
@@ -192,8 +208,24 @@ void SNSpcIO::Write8Trap(SNSpcT *pSpc, Uint32 uAddr, Uint8 uData)
 		if (!(pSpc->Mem[0xF2] & 0x80))
 		{
 			Uint32 uDspCycle = (Uint32)SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME);
+			/* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918_DSPQ */
+			{
+				const Uint8 r = (Uint8)(pSpc->Mem[0xF2] & 0x7Fu);
+				if (r == 0x4C || r == 0x5C || r == 0x5D ||
+				    r == 0x6C || r == 0x6D || r == 0x7C ||
+				    r == 0x7D)
+				{
+					AuroraTraceRecord(
+					    ATR_DSP_Q, ATR_F_PRE, (Uint16)r,
+					    (Uint32)uData,
+					    ((Uint32)(Uint16)pSpc->Regs.rPC << 16) |
+					        (uDspCycle & 0xFFFFu),
+					    ATR_P_NONE);
+				}
+			}
 			while (!pIO->m_pSpcDsp->EnqueueWrite(uDspCycle, pSpc->Mem[0xF2] & 0x7F, uData))
-				pIO->m_pSpcDsp->Sync(uDspCycle);
+				/* AURORA_SPC_DSP_QUEUE_FULL_DEADLOCK_FIX_V2_20260918: queue-full retry must guarantee progress. */
+				pIO->m_pSpcDsp->Sync();
 		}
 		break;
 

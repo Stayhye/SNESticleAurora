@@ -4,6 +4,8 @@
 #include "prof.h"
 #include "snspcdsp.h"
 #include "console.h"
+#include "platform/ps2/system/aurora_runtime_trace.h"
+/* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918 */
 
 #define SNSPCDSP_DETERMINISMSAFE (0)
 #define SNSPCDSP_DEBUGPRINT (CODE_DEBUG && FALSE)
@@ -38,6 +40,15 @@ void SNSpcDsp::Write8(Uint32 uAddr, Uint8 uData)
 	Int32 iChannel;
 
 	uAddr &= 0x7F;
+	/* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918_DSPW */
+	if (uAddr == 0x4C || uAddr == 0x5C || uAddr == 0x5D ||
+	    uAddr == 0x6C || uAddr == 0x6D || uAddr == 0x7C ||
+	    uAddr == 0x7D)
+	{
+		AuroraTraceRecord(
+		    ATR_DSP_W, ATR_F_PRE, (Uint16)uAddr,
+		    (Uint32)uData, (Uint32)m_Regs[uAddr], ATR_P_NONE);
+	}
 
 //	if (uAddr==SNSPCDSP_REG_FLG) // && uData != m_Regs[uAddr])
 //		ConDebug("flg %02X\n", uData);
@@ -169,6 +180,11 @@ Uint16 SNSpcDsp::GetSampleDir(Uint8 uSrcN, Uint32 uOffset)
 
 void SNSpcDsp::KeyOn(Int32 iChannel)
 {
+	/* AURORA_SNES_BINARY_TRACE_V6_20260918_KON */
+	AuroraTraceRecord(
+	    ATR_KON, ATR_F_PRE, (Uint16)iChannel,
+	    (Uint32)m_Regs[SNSPCDSP_REG_ENDX], 0, ATR_P_FLUSH);
+	AuroraTraceArmVoice(iChannel);
 	// clear endx
 	m_Regs[SNSPCDSP_REG_ENDX] &=  ~(1 << iChannel);
 
@@ -182,6 +198,10 @@ void SNSpcDsp::KeyOn(Int32 iChannel)
 
 void SNSpcDsp::KeyOff(Int32 iChannel)
 {
+	/* AURORA_SNES_BINARY_TRACE_V6_20260918_KOFF */
+	AuroraTraceRecord(
+	    ATR_KOFF, ATR_F_PRE, (Uint16)iChannel,
+	    0, 0, ATR_P_FLUSH);
 	// tell mixer(s) to key off
 	if (m_pMixer[0])
 		m_pMixer[0]->KeyOff(iChannel);

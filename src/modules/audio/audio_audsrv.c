@@ -215,6 +215,9 @@ static inline void Aud_StoreStereoFrame(int index, short left, short right)
 
 static int sjpcm_inited = 0;
 static int sjpcm_playing = 0;
+/* AURORA_SNES_BINARY_TRACE_V6_20260918_MUTE_STATE */
+static int aud_runtime_trace_mute = 0;
+static int aud_user_volume = MAX_VOLUME;
 
 /* AURORA_V7_AUDSRV_GUARD
  * PS2SDK audsrv uses a pointer-only ring buffer and cannot distinguish a
@@ -614,8 +617,10 @@ int Aud_Init(int sync, int numsamples, int maxenqueuesamples)
         return -1;
     }
 
-    /* Default to full volume. Aud_Setvol() may override. */
-    ret = audsrv_set_volume(MAX_VOLUME);
+    /* AURORA_SNES_BINARY_TRACE_V6_20260918_MUTE_INIT */
+    aud_user_volume = MAX_VOLUME;
+    ret = audsrv_set_volume(
+        aud_runtime_trace_mute ? 0 : aud_user_volume);
     // DLog("[snes-aud] set_volume(%d) = %d", MAX_VOLUME, ret);
 
     /* Prime audsrv before a producer asks queued()/available(). */
@@ -674,6 +679,15 @@ void Aud_Clearbuff(void)
 }
 
 
+/* AURORA_SNES_BINARY_TRACE_V6_20260918_MUTE_API */
+void Aud_SetRuntimeTraceMute(int enabled)
+{
+    aud_runtime_trace_mute = enabled ? 1 : 0;
+    if (sjpcm_inited)
+        audsrv_set_volume(
+            aud_runtime_trace_mute ? 0 : aud_user_volume);
+}
+
 /*
     Aud_Setvol took a 14-bit hardware-style volume (0..0x3FFF) where
     0x3FFF was full scale. audsrv's volume is 0..MAX_VOLUME (100), so
@@ -683,14 +697,14 @@ void Aud_Setvol(unsigned int volume)
 {
     int v;
 
-    if (!sjpcm_inited) return;
-
     volume &= 0x3FFF;
     v = (int)((volume * MAX_VOLUME) / 0x3FFF);
     if (v < MIN_VOLUME) v = MIN_VOLUME;
     if (v > MAX_VOLUME) v = MAX_VOLUME;
+    aud_user_volume = v;
 
-    audsrv_set_volume(v);
+    if (!sjpcm_inited) return;
+    audsrv_set_volume(aud_runtime_trace_mute ? 0 : aud_user_volume);
 }
 
 
