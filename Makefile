@@ -438,6 +438,34 @@ ifeq ($(PROFILE),1)
   CXXFLAGS += -DCODE_PROFILE=1
 endif
 
+# AURORA_SNES_BINARY_TRACE_V6_20260918
+# Build capability only. Runtime starts OFF; L2+R2+L3+R3 toggles it.
+AURORA_RUNTIME_TRACE ?= 0
+CFLAGS   += -DAURORA_RUNTIME_TRACE=$(AURORA_RUNTIME_TRACE)
+CXXFLAGS += -DAURORA_RUNTIME_TRACE=$(AURORA_RUNTIME_TRACE)
+
+# AURORA_EE_CRASH_DIAG_DKC_V1_20260918
+# EE exception capture follows the runtime trace switch by default.
+# AURORA_TRACE_LOST_VIKINGS_LOG_ONLY_V2_20260918
+# Runtime Trace is intentionally log-only by default.
+# EE exception screen / hang watchdog remain compiled out unless
+# AURORA_EE_CRASH_DIAG=1 is explicitly requested for a future test.
+AURORA_EE_CRASH_DIAG ?= 0
+CFLAGS   += -DAURORA_EE_CRASH_DIAG=$(AURORA_EE_CRASH_DIAG)
+CXXFLAGS += -DAURORA_EE_CRASH_DIAG=$(AURORA_EE_CRASH_DIAG)
+
+# AURORA_EE_WATCHDOG_SELFTEST_V1_20260918
+# One-shot validation of watchdog scheduling + emergency screen.
+# 0 = normal; 1 = force the hang card after ~2 seconds while armed.
+AURORA_EE_WATCHDOG_SELFTEST ?= 0
+CFLAGS   += -DAURORA_EE_WATCHDOG_SELFTEST=$(AURORA_EE_WATCHDOG_SELFTEST)
+CXXFLAGS += -DAURORA_EE_WATCHDOG_SELFTEST=$(AURORA_EE_WATCHDOG_SELFTEST)
+
+AURORA_TRACE_EXTRA_LIBS :=
+ifeq ($(AURORA_EE_CRASH_DIAG),1)
+AURORA_TRACE_EXTRA_LIBS += -leedebug
+endif
+
 # Captura de protocolo do DSP-4 (diagnostico).  Com DSP4_CAPTURE=1 o HLE
 # do DSP-4 registra a sequencia de comandos/params que o jogo envia e
 # despeja no log (logs.txt no emulador), pra reconstruir o protocolo a
@@ -546,13 +574,15 @@ LIBS := \
 	-lelf-loader \
 	-lpatches \
 	-lcglue \
-	-ldebug -lkernel -lc -lm -lstdc++ -lgcc
+	$(AURORA_TRACE_EXTRA_LIBS) -ldebug -lkernel -lc -lm -lstdc++ -lgcc
 
 # AURORA_SWC_FLOPPY_V1_20260831: isolated SWC source
 # AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: cumulative DSP1/2/3/4 accuracy
 SRCS := \
     src/platform/ps2/ps2sdk_stubs.c \
     src/platform/ps2/system/cdda_async_filexio.c \
+	src/platform/ps2/system/aurora_runtime_trace.c \
+	src/platform/ps2/system/aurora_ee_crash_diag.c \
 	src/common/media/bmpfile.cpp \
 	src/platform/ps2/cdvd/cd.c \
 	src/modules/cdvd/cdvd_rpc.c \
@@ -892,7 +922,7 @@ FORCE_COMPILE_MODE:
 
 $(BUILD_CONFIG_FILE): FORCE_COMPILE_MODE | $(OBJ_DIR)
 	@mkdir -p "$(BUILD_META_DIR)"; \
-	mode='SNES_DIAGNOSTICS=$(SNES_DIAGNOSTICS) SNES_OBJ_CACHE=$(SNES_OBJ_CACHE) SNES_BG_CACHE=$(SNES_BG_CACHE) SNES_CHR_HFLIP_CACHE=$(SNES_CHR_HFLIP_CACHE) PROFILE=$(PROFILE) DSP4_CAPTURE=$(DSP4_CAPTURE) DSP4_STUB=$(DSP4_STUB)'; \
+	mode='SNES_DIAGNOSTICS=$(SNES_DIAGNOSTICS) SNES_OBJ_CACHE=$(SNES_OBJ_CACHE) SNES_BG_CACHE=$(SNES_BG_CACHE) SNES_CHR_HFLIP_CACHE=$(SNES_CHR_HFLIP_CACHE) PROFILE=$(PROFILE) DSP4_CAPTURE=$(DSP4_CAPTURE) DSP4_STUB=$(DSP4_STUB) AURORA_RUNTIME_TRACE=$(AURORA_RUNTIME_TRACE) AURORA_EE_CRASH_DIAG=$(AURORA_EE_CRASH_DIAG) AURORA_EE_WATCHDOG_SELFTEST=$(AURORA_EE_WATCHDOG_SELFTEST)'; \
 	if [ ! -f "$@" ] || [ "$$(cat "$@")" != "$$mode" ]; then \
 		printf '%s\n' "$$mode" > "$@"; \
 	fi

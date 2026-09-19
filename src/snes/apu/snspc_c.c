@@ -19,6 +19,7 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
 #include "snspc_c.h"
 #include "snspcdisasm.h"
 #include "sndebug.h"
+#include "platform/ps2/system/aurora_runtime_trace.h"
 
 
 #define SNSPC_STATEDEBUG (SNES_DEBUG && 1)
@@ -508,7 +509,15 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 		}
 #endif
 
+		/* AURORA_SNES_BINARY_TRACE_V6_20260918_SPC700 */
+#if AURORA_RUNTIME_TRACE
+		const Uint16 uAuroraTracePC = (Uint16)rPC;
+#endif
 		SNSPC_FETCH8(uOpcode);
+#if AURORA_RUNTIME_TRACE
+		if (g_AuroraTraceEnabled)
+			AuroraRuntimeTraceSPC(pCpu, uAuroraTracePC, (Uint8)uOpcode);
+#endif
 
 		switch (uOpcode)
 		{

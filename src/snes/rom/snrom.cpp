@@ -7,6 +7,18 @@
 #include "snio.h"
 #include "dataio.h"
 #include "sndbglog.h"
+
+/* AURORA_SNES_32MBIT_HOST_GUARD_FIX_V1_20260918
+ *
+ * R5900 SNES fast read/fetch uses an unaligned 32-bit lwr/lwl pair even for
+ * logical 16/24-bit reads. Unused high bytes are discarded, but the host
+ * still physically touches the complete aligned word. Keep a tiny readable
+ * tail after owned ROM data so a final-page access on a 32-Mbit cartridge
+ * cannot cross the malloc boundary.
+ *
+ * m_uRomBytes remains the exact emulated cartridge size.
+ */
+enum { SNROM_HOST_READ_GUARD_BYTES = 16 };
 Uint32 g_FakeSRAMSize = 0;
 SnesForceRegionE g_SnesForceRegion = SNES_FORCE_REGION_OFF;
 
@@ -1336,38 +1348,41 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 
 	if (m_pRomData == NULL)
 	{
-		if (pBuffer)
-		{
-			/* AURORA_SWC_32MBIT_CART_BACKING_V1_20260914
-			 * A caller-provided backing of exactly ROM size is sufficient. */
-			if (m_uRomBytes <= nBufferBytes)
-			{	// use provided buffer space
-				m_pRomMem = NULL;
-				m_pRomData = pBuffer;
-			} else
-			{
-				// not enough buffer space provided
-				return LOADERROR_OUTOFSPACE;
-			}
-		} else
-		{
+		const size_t uGuardedBytes =
+			(size_t)m_uRomBytes + (size_t)SNROM_HOST_READ_GUARD_BYTES;
 
-			// allocate memory for rom
-			m_pRomMem = 
-			m_pRomData = (Uint8 *)malloc(m_uRomBytes);
+		if (uGuardedBytes < (size_t)m_uRomBytes)
+			return LOADERROR_OUTOFSPACE;
+
+		if (pBuffer &&
+		    m_uRomBytes <= nBufferBytes &&
+		    (Uint32)(nBufferBytes - m_uRomBytes) >=
+		        (Uint32)SNROM_HOST_READ_GUARD_BYTES)
+		{
+			/* AURORA_SNES_32MBIT_HOST_GUARD_FIX_V1_20260918
+			 * Borrow caller storage only when its readable tail exists too.
+			 * Exact-size callers fall back to one owned guarded copy. */
+			m_pRomMem = NULL;
+			m_pRomData = pBuffer;
+		}
+		else
+		{
+			m_pRomMem =
+			m_pRomData = (Uint8 *)malloc(uGuardedBytes);
 			if (!m_pRomData)
-			{
 				return LOADERROR_OUTOFSPACE;
-			}
 		}
 
-		// read rom data
+		// Read only the logical cartridge payload; tail is host-only padding.
 		nBytesRead = pFileIO->Read(m_pRomData, m_uRomBytes);
 		if (nBytesRead != m_uRomBytes)
 		{
 			Unload();
 			return LOADERROR_READFILE;
 		}
+
+		memset(m_pRomData + m_uRomBytes, 0,
+		       (size_t)SNROM_HOST_READ_GUARD_BYTES);
 	}
 
 	/* AURORA_SNES_SINGLE_IO_IDENTITY_V1_20260915

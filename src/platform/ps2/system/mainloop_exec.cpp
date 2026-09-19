@@ -7,6 +7,8 @@
 #include "file.h"
 #include "mainloop_exec.h"
 #include "mainloop_shared.h"
+#include "platform/ps2/system/aurora_runtime_trace.h"
+#include "platform/ps2/system/aurora_ee_crash_diag.h"
 
 /* MAINLOOP_SNESSTATEDEBUG lives in mainloop_shared.h (included above). */
 
@@ -35,6 +37,7 @@ Bool _ExecuteSnes(CRenderSurface *pSurface, CMixBuffer *pMixBuffer, Emu::SysInpu
             static Bool s_bAuroraExecutorsConfigured = FALSE;
             if (!s_bAuroraExecutorsConfigured)
             {
+                /* AURORA_SNES_BINARY_TRACE_V6_20260918_EXECUTOR: keep production 65816 ASM. */
                 SNCPUSetExecuteFunc(SNCPUExecute_ASM);
                 SNSPCSetExecuteFunc(SNSPCExecute_C);
                 s_bAuroraExecutorsConfigured = TRUE;
@@ -43,7 +46,37 @@ Bool _ExecuteSnes(CRenderSurface *pSurface, CMixBuffer *pMixBuffer, Emu::SysInpu
 		    PROF_ENTER("SnesExecuteFrame");
 			/* AURORA_SAFE_FRAMESKIP_GG_ZOOM_V2_2: caller owns the one-shot
 			 * NULL surface decision; CPU/SPC still execute every frame. */
+			/* AURORA_SNES_BINARY_TRACE_V7_VISUAL_BREADCRUMBS_20260918_FRAME */
+			AuroraTraceBeginGame(_RomName, "SNES");
+			/* AURORA_EE_HANG_WATCHDOG_DKC_V2_20260918: watchdog covers trace I/O + core execution. */
+			AuroraEECrashDiagWatchdogArm((Uint32)_pSystem->GetFrame());
+			AuroraEECrashDiagBreadcrumb(
+			    AED_TRACE_FRAME_BEGIN_ENTER,
+			    (Uint32)_pSystem->GetFrame(), 0u);
+			AuroraTraceFrameBegin((Uint32)_pSystem->GetFrame());
+			AuroraEECrashDiagBreadcrumb(
+			    AED_TRACE_FRAME_BEGIN_RETURN,
+			    (Uint32)_pSystem->GetFrame(), 0u);
+			/* AURORA_EE_CRASH_DIAG_DKC_V1_20260918: RAM-only EE host boundary; no trace I/O. */
+			AuroraEECrashDiagBreadcrumb(
+			    AED_HOST_FRAME_CALL_ENTER,
+			    (Uint32)_pSystem->GetFrame(), 0u);
 		    _pSystem->ExecuteFrame(pInput, pSurface, pMixBuffer, eMode);
+			AuroraEECrashDiagBreadcrumb(
+			    AED_HOST_FRAME_CALL_RETURN,
+			    (Uint32)_pSystem->GetFrame(), 0u);
+			/* AURORA_SNES_BINARY_TRACE_V7_R10_RETURN_BOUNDARY_20260918: proves the virtual call returned to the frontend. */
+			AuroraTracePhase(
+			    ATR_PHASE_HOST_RETURNED,
+			    (Uint32)_pSystem->GetFrame(), 0u);
+			AuroraEECrashDiagBreadcrumb(
+			    AED_TRACE_FRAME_END_ENTER,
+			    (Uint32)_pSystem->GetFrame(), 0u);
+			AuroraTraceFrameEnd((Uint32)_pSystem->GetFrame());
+			AuroraEECrashDiagBreadcrumb(
+			    AED_TRACE_FRAME_END_RETURN,
+			    (Uint32)_pSystem->GetFrame(), 0u);
+			AuroraEECrashDiagWatchdogDisarm();
 		    PROF_LEAVE("SnesExecuteFrame");
             #else
 

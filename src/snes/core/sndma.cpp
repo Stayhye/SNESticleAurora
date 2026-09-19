@@ -14,6 +14,7 @@ extern "C" {
 #include "snsdd1.h"
 #include "sndbglog.h"
 #include "sntiming.h"
+#include "platform/ps2/system/aurora_runtime_trace.h"
 
 #define SNESDMA_DEBUG 0
 
@@ -393,6 +394,8 @@ void SnesDMAC::Write8(Uint32 uChan, Uint32 uAddr, Uint8 uData)
 
 void SnesDMAC::SetMDMAEnable(Uint8 uData)
 {
+	/* AURORA_SNES_BINARY_TRACE_V7_VISUAL_BREADCRUMBS_20260918_MDMA */
+	AuroraTraceBreadcrumb(ATR_SNAP_MDMA, (Uint16)uData);
 #if SNDBG_LOG
 	Uint32 uChan;
 
@@ -517,6 +520,8 @@ void SnesDMAC::SetMDMAEnable(Uint8 uData)
 
 void SnesDMAC::SetHDMAEnable(Uint8 uData)
 {
+	/* AURORA_SNES_BINARY_TRACE_V7_VISUAL_BREADCRUMBS_20260918_HDMA */
+	AuroraTraceBreadcrumb(ATR_SNAP_HDMA, (Uint16)uData);
 	// confirm:
 	// ghouls and ghosts enabled hdma mid-frame
 	/* $420C keeps the programmed enable bits.  A channel that already read

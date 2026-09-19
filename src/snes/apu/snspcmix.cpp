@@ -10,6 +10,8 @@
 #include "sntiming.h"
 #include "snspcdefs.h"
 #include "sndbglog.h"
+#include "platform/ps2/system/aurora_runtime_trace.h"
+/* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918 */
 extern "C" {
 #include "snspcbrr.h"
 };
@@ -645,6 +647,11 @@ void SNSpcDspMixFull::FetchBlock(Int32 iChannel)
 	{
 		PROF_ENTER("SNSpcBRRDecode");
 		Uint16 uBrrAddr = (Uint16)pChannel->uBlockAddr;
+		/* AURORA_SNES_BINARY_TRACE_V6_20260918_BRR_PRE */
+		AuroraTraceBrrPre(
+		    iChannel, uBrrAddr,
+		    (Int32)pChannel->BlockData[0][14],
+		    (Int32)pChannel->BlockData[0][15]);
 		Uint8 *pBrrBlock = m_pDsp->GetRAMSpan(uBrrAddr, 9);
 
 		/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V1_20260917: almost every BRR block is contiguous physical APURAM.
@@ -669,6 +676,13 @@ void SNSpcDspMixFull::FetchBlock(Int32 iChannel)
 				pChannel->BlockData[0][15], pChannel->BlockData[0][14]);
 		}
 		PROF_LEAVE("SNSpcBRRDecode");
+		/* AURORA_SNES_BINARY_TRACE_V6_20260918_BRR_POST */
+		AuroraTraceBrrPost(
+		    iChannel, uBrrAddr, uFlags,
+		    (Int32)pChannel->BlockData[1][0],
+		    (Int32)pChannel->BlockData[1][1],
+		    (Int32)pChannel->BlockData[1][14],
+		    (Int32)pChannel->BlockData[1][15]);
 		pChannel->uBlockAddr += 9;
 	}
 	else
@@ -1576,6 +1590,7 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 
 	// get number of samples needed to mix
 	nTotalSamples = pMixBuf->GetOutputSamples();
+	/* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918_MIX: routine MIX event suppressed. */
 #if SNDBG_LOG
 	g_DbgAudioSamples += (Uint32)nTotalSamples;
 #endif
@@ -1762,6 +1777,7 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 	}
 
 	// flush sample data to output
+	/* V6D: no routine MIX completion record. */
 	pMixBuf->Flush();
 }
 

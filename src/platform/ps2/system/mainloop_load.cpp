@@ -1255,7 +1255,13 @@ enum
     MAINLOOP_SWC_CART_32MBIT_BYTES = 4 * 1024 * 1024,
     MAINLOOP_SWC_CART_RESERVE_BYTES = 8 * 1024 * 1024,
     MAINLOOP_SWC_DRAM_BYTES = 4 * 1024 * 1024, /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916 */
-    MAINLOOP_SWC_ARENA_BYTES = 8 * 1024 * 1024 /* AURORA_SWC_32MBIT_ARENA_V1_2_20260916 */
+    /* AURORA_SNES_32MBIT_HOST_GUARD_FIX_V1_20260918 */
+    /* AURORA_SNES_32MBIT_HOST_GUARD_NEWLINE_HOTFIX_V2_20260918: literal \\n tokens repaired/validated. */
+    MAINLOOP_SNES_HOST_READ_GUARD_BYTES = 16,
+    MAINLOOP_SWC_ARENA_BYTES =
+        MAINLOOP_SWC_DRAM_BYTES +
+        MAINLOOP_SWC_CART_32MBIT_BYTES +
+        MAINLOOP_SNES_HOST_READ_GUARD_BYTES
 };
 
 static Uint8 *s_pSwcCartReserve = NULL;
@@ -1338,7 +1344,9 @@ static Bool _MainLoopSwcEnsureArena()
         s_pSwcDramReserve = s_pSwcArena;
         s_uSwcDramReserveBytes = MAINLOOP_SWC_DRAM_BYTES;
         s_pSwcCartReserve = s_pSwcArena + MAINLOOP_SWC_DRAM_BYTES;
-        s_uSwcCartReserveBytes = MAINLOOP_SWC_CART_32MBIT_BYTES;
+        s_uSwcCartReserveBytes =
+            MAINLOOP_SWC_CART_32MBIT_BYTES +
+            MAINLOOP_SNES_HOST_READ_GUARD_BYTES;
         return TRUE;
     }
 
@@ -1353,7 +1361,9 @@ static Bool _MainLoopSwcEnsureArena()
     s_pSwcDramReserve = s_pSwcArena;
     s_uSwcDramReserveBytes = MAINLOOP_SWC_DRAM_BYTES;
     s_pSwcCartReserve = s_pSwcArena + MAINLOOP_SWC_DRAM_BYTES;
-    s_uSwcCartReserveBytes = MAINLOOP_SWC_CART_32MBIT_BYTES;
+    s_uSwcCartReserveBytes =
+            MAINLOOP_SWC_CART_32MBIT_BYTES +
+            MAINLOOP_SNES_HOST_READ_GUARD_BYTES;
     printf("[SWC] reserved one %u-byte arena (4 MiB DRAM + 4 MiB cart)\n",
            (unsigned)s_uSwcArenaBytes);
     return TRUE;
@@ -1386,31 +1396,40 @@ static Bool _MainLoopSwcEnsureDramReserve()
 
 static Bool _MainLoopSwcEnsureCartReserve(Uint32 nBytes)
 {
+    Uint32 nHostBytes;
+
     if (!nBytes || nBytes > MAINLOOP_SWC_CART_RESERVE_BYTES)
         return FALSE;
+    if (nBytes > 0xffffffffu - MAINLOOP_SNES_HOST_READ_GUARD_BYTES)
+        return FALSE;
 
-    if (s_pSwcCartReserve && s_uSwcCartReserveBytes >= nBytes)
+    nHostBytes = nBytes + MAINLOOP_SNES_HOST_READ_GUARD_BYTES;
+
+    if (s_pSwcCartReserve && s_uSwcCartReserveBytes >= nHostBytes)
         return TRUE;
 
-    /* The arena cart slice is exactly 4 MiB. Reuse it for every <=32-Mbit
-     * Game Pak without reallocating or moving either physical memory. */
+    /* AURORA_SNES_32MBIT_HOST_GUARD_FIX_V1_20260918
+     * Logical cart remains <=32 Mbit; the host slice gets only the tiny
+     * readable tail required by the R5900 direct-read fast path. */
     if (nBytes <= MAINLOOP_SWC_CART_32MBIT_BYTES &&
         s_pSwcArena && s_uSwcArenaBytes >= MAINLOOP_SWC_ARENA_BYTES)
     {
         s_pSwcCartReserve = s_pSwcArena + MAINLOOP_SWC_DRAM_BYTES;
-        s_uSwcCartReserveBytes = MAINLOOP_SWC_CART_32MBIT_BYTES;
+        s_uSwcCartReserveBytes =
+            MAINLOOP_SWC_CART_32MBIT_BYTES +
+            MAINLOOP_SNES_HOST_READ_GUARD_BYTES;
         return TRUE;
     }
 
     _MainLoopSwcReleaseCartReserve();
-    s_pSwcCartReserve = (Uint8 *)malloc((size_t)nBytes);
+    s_pSwcCartReserve = (Uint8 *)malloc((size_t)nHostBytes);
     if (!s_pSwcCartReserve)
     {
-        printf("[SWC] %u-byte cart backing unavailable; using normal fallback\n",
-               (unsigned)nBytes);
+        printf("[SWC] %u-byte cart backing (+guard) unavailable; "
+               "using normal fallback\n", (unsigned)nBytes);
         return FALSE;
     }
-    s_uSwcCartReserveBytes = nBytes;
+    s_uSwcCartReserveBytes = nHostBytes;
     return TRUE;
 }
 
