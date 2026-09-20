@@ -110,6 +110,18 @@ static void DrawPercentLine(Int32 y, const Char *label, Uint32 pct10)
     DrawCentered(y, line);
 }
 
+/* AURORA_SNES_PROFILER_DEEP_V5_20260920: compact diagnostic pair; presentation only. */
+static void DrawPairPercentLine(Int32 y,
+                                const Char *a, Uint32 pa,
+                                const Char *b, Uint32 pb)
+{
+    Char line[64];
+    snprintf(line, sizeof(line), "%-6s %2u.%u%%  %-6s %2u.%u%%",
+             a, (unsigned)(pa / 10u), (unsigned)(pa % 10u),
+             b, (unsigned)(pb / 10u), (unsigned)(pb % 10u));
+    DrawCentered(y, line);
+}
+
 static void AppendPct(Char *dst, Uint32 dstSize, const Char *label, Uint32 pct10)
 {
     const Uint32 used = (Uint32)strlen(dst);
@@ -375,31 +387,62 @@ void AuroraSnesCostProfilerDrawOverlay(void)
         DrawCentered(60, line);
     }
 
-    DrawCentered(75, "BG + COLOR FOCUS / FRAME %");
-    DrawPercentLine(86,  "BG MAP",    s_ppuPct10[AURORA_SNES_PPU_DETAIL_BG_MAP]);
-    DrawPercentLine(96,  "BG CHR",    s_ppuPct10[AURORA_SNES_PPU_DETAIL_BG_CHR]);
-    DrawPercentLine(106, "BG MAIN",   s_ppuPct10[AURORA_SNES_PPU_DETAIL_BG_MAIN]);
-    DrawPercentLine(116, "BG SUB",    s_ppuPct10[AURORA_SNES_PPU_DETAIL_BG_SUB]);
-    DrawPercentLine(126, "BG OTHER",  s_ppuPct10[AURORA_SNES_PPU_DETAIL_BG_OTHER]);
-    DrawPercentLine(136, "COLOR MASK",s_ppuPct10[AURORA_SNES_PPU_DETAIL_COLOR_MASK]);
-    DrawPercentLine(146, "BLEND/GS",  s_ppuPct10[AURORA_SNES_PPU_DETAIL_BLEND]);
-    DrawPercentLine(156, "COLOR OTH", s_ppuPct10[AURORA_SNES_PPU_DETAIL_COLOR_OTHER]);
-    DrawPercentLine(168, "BG+COLOR",  s_focusPct10);
-    DrawPercentLine(178, "PPU SPLIT", s_ppuSplitPct10);
+    /* AURORA_SNES_PROFILER_DEEP_V5_20260920
+     * Deep PPU view. Existing V2/V3 timers only; OBJ scopes were relabeled,
+     * not added, so profiler call count is unchanged. */
+    const Uint32 objPct10 =
+        s_ppuPct10[AURORA_SNES_PPU_DETAIL_OBJ_UPDATE] +
+        s_ppuPct10[AURORA_SNES_PPU_DETAIL_OBJ_FETCH] +
+        s_ppuPct10[AURORA_SNES_PPU_DETAIL_OBJ_MAIN] +
+        s_ppuPct10[AURORA_SNES_PPU_DETAIL_OBJ_SUB];
+
+    DrawCentered(75, "PPU DEEP / FRAME %");
+    DrawPairPercentLine(86,
+        "SYNC", s_ppuPct10[AURORA_SNES_PPU_DETAIL_SYNC],
+        "REND", s_ppuPct10[AURORA_SNES_PPU_DETAIL_RENDER]);
+    DrawPairPercentLine(97,
+        "PREP", s_ppuPct10[AURORA_SNES_PPU_DETAIL_PREP],
+        "RASTER", s_ppuPct10[AURORA_SNES_PPU_DETAIL_RASTER]);
+
+    DrawPercentLine(108, "OBJ TOT", objPct10);
+    DrawPairPercentLine(119,
+        "UPD", s_ppuPct10[AURORA_SNES_PPU_DETAIL_OBJ_UPDATE],
+        "FETCH", s_ppuPct10[AURORA_SNES_PPU_DETAIL_OBJ_FETCH]);
+    DrawPairPercentLine(130,
+        "MAIN", s_ppuPct10[AURORA_SNES_PPU_DETAIL_OBJ_MAIN],
+        "SUB", s_ppuPct10[AURORA_SNES_PPU_DETAIL_OBJ_SUB]);
+
+    DrawPairPercentLine(141,
+        "MODE7", s_ppuPct10[AURORA_SNES_PPU_DETAIL_MODE7],
+        "BGCHR", s_ppuPct10[AURORA_SNES_PPU_DETAIL_BG_CHR]);
+    DrawPairPercentLine(152,
+        "BGMAP", s_ppuPct10[AURORA_SNES_PPU_DETAIL_BG_MAP],
+        "BGMAIN", s_ppuPct10[AURORA_SNES_PPU_DETAIL_BG_MAIN]);
+    DrawPairPercentLine(163,
+        "BGSUB", s_ppuPct10[AURORA_SNES_PPU_DETAIL_BG_SUB],
+        "BGOTH", s_ppuPct10[AURORA_SNES_PPU_DETAIL_BG_OTHER]);
+
+    DrawPairPercentLine(174,
+        "CMASK", s_ppuPct10[AURORA_SNES_PPU_DETAIL_COLOR_MASK],
+        "BLEND", s_ppuPct10[AURORA_SNES_PPU_DETAIL_BLEND]);
+    DrawPairPercentLine(185,
+        "COTH", s_ppuPct10[AURORA_SNES_PPU_DETAIL_COLOR_OTHER],
+        "BG+COL", s_focusPct10);
+    DrawPercentLine(196, "PPU SPLIT", s_ppuSplitPct10);
 
     {
         Char line[64];
         snprintf(line, sizeof(line), "WORK/F MAP %u  CHR %u",
                  (unsigned)s_workPerFrame[AURORA_SNES_PPU_WORK_MAP],
                  (unsigned)s_workPerFrame[AURORA_SNES_PPU_WORK_CHR]);
-        DrawCentered(192, line);
+        DrawCentered(207, line);
     }
     {
         Char line[64];
         snprintf(line, sizeof(line), "LAY/F MAIN %u  SUB %u",
                  (unsigned)s_workPerFrame[AURORA_SNES_PPU_WORK_MAIN],
                  (unsigned)s_workPerFrame[AURORA_SNES_PPU_WORK_SUB]);
-        DrawCentered(203, line);
+        DrawCentered(218, line);
     }
 }
 

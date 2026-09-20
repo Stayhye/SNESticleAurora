@@ -1668,6 +1668,13 @@ struct SNSpcDspDataT
     SNSpcEchoSampleT Echo[2][SNSPCDSP_BUFFERSIZE] _ALIGN(16);
 };
 
+#if CODE_PLATFORM == CODE_PS2
+/* AURORA_SNES_BG_LOOKUP_SCRATCHPAD_V2_20260920: the SPC transient workspace begins at scratchpad+0 and must
+ * remain below the PlaneLookup[0] reservation at 14 KiB. */
+typedef char SNSpcScratchLookupLayoutCheck[
+	(sizeof(SNSpcDspDataT) <= PS2MEM_SNES_LOOKUP_OFFSET) ? 1 : -1];
+#endif
+
 
 static void _SNSpcBuildPitchModOutput(
         Int16 *pOut, const Int16 *pIn, const Uint8 *pEnvelope,
