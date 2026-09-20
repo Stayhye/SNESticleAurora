@@ -90,10 +90,8 @@ User interface:
 * Pilotwings (SNES) and Secret of Mana (SNES) mode 7 rendering, also fixes other games that rely on it
 * Secret of Mana (SNES) mode 5 rendering, also fixes other games that rely on it
 * Addams Family (SNES) graphical glitches and timing issues fixed
-* The Lost Vikings 1 and 2 (SNES) black screen fixed
 * J.R.R. Tolkien's The Lord of the Rings (SNES) black screen fixed
 * Blackthorne (SNES) black screen fixed
-* Kishin Douji Zenki: Tenchi Meidou (SNES) black screen fixed
 * Magical Pop'n (SNES) freeze fixed
 * Accele Brid (SNES) freeze fixed
 * Speedy Gonzales in Los Gatos Banditos (SNES) performance fixed *(with special safe frameskip)*
@@ -102,6 +100,8 @@ User interface:
 
 **TO BE FIXED:**
 
+* Kishin Douji Zenki: Tenchi Meidou (SNES) black screen *(in progress)*
+* The Lost Vikings 1 and 2 (SNES) black screen *(in progress)*
 * SNES SA-1 Emulation (experimental state)
 * SNES FX1 and FX2 emulation (experimental state)
 * PC Engine CD and Sega CD performance (experimental state)
