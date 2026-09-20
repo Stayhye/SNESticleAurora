@@ -439,7 +439,10 @@ ifeq ($(PROFILE),1)
 endif
 
 # AURORA_SNES_BINARY_TRACE_V6_20260918
-# Build capability only. Runtime starts OFF; L2+R2+L3+R3 toggles it.
+# AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919
+# Build capability only. Runtime still starts OFF. When this is 1, the
+# Video Settings -> Performance page exposes Debugger Off/On. The runtime
+# selection is intentionally not persisted in video.cfg.
 AURORA_RUNTIME_TRACE ?= 0
 CFLAGS   += -DAURORA_RUNTIME_TRACE=$(AURORA_RUNTIME_TRACE)
 CXXFLAGS += -DAURORA_RUNTIME_TRACE=$(AURORA_RUNTIME_TRACE)

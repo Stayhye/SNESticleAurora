@@ -575,6 +575,21 @@ Bool AuroraTraceToggleRuntime(void)
     return TRUE;
 }
 
+/* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919
+ * Idempotent runtime setter for menu/UI callers. Preserve the existing
+ * toggle's durable close/open ownership and do nothing when already in the
+ * requested state. */
+Bool AuroraTraceSetEnabled(Bool enabled)
+{
+    const Bool want = enabled ? TRUE : FALSE;
+    const Bool have = g_AuroraTraceEnabled ? TRUE : FALSE;
+
+    if (have == want)
+        return have;
+
+    return AuroraTraceToggleRuntime();
+}
+
 void AuroraTraceBeginGame(const char *game, const char *core)
 {
     static const char *roots[] = {

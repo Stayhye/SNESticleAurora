@@ -1830,12 +1830,21 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 		 * sequences such as 02 -> 00 -> 01 can collapse to 01 before the SPC
 		 * executes, deadlocking handshakes such as The Lost Vikings.
 		 *
-		 * Only pay this synchronization cost when an older APUIO write is
-		 * actually pending.  SyncSPC(0,FALSE) advances the SPC to the current
-		 * S-CPU time and publishes only writes whose SPC timestamp is due.
-		 * The newer write is queued only after that window has been created. */
+		 * AURORA_BLACKTHORNE_APUIO_SAMECYCLE_V1_WRITE_20260919
+		 * Blackthorne's IPL uploader uses 16-bit STA.l $2140. Because Aurora's
+		 * S-CPU trap timestamp is instruction-granular, the $2140 and $2141
+		 * byte callbacks have the SAME timestamp. They are one timestamp group,
+		 * not an older transition followed by a later one.
+		 *
+		 * Preserve the Lost Vikings protection only when the oldest queued
+		 * transition is genuinely older. Never run the SPC between two bytes
+		 * which Aurora itself timestamps identically. */
+		const Uint32 uAPUIOWriteCycle =
+			(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_FRAME) +
+			(Uint32)SNES_SPCWRITE_LATENCY;
 		#if SNSPCIO_WRITEQUEUE
-		if (!pSnes->m_SpcIO.m_Queue.IsEmpty())
+		SNQueueElementT *pPendingAPUIO = pSnes->m_SpcIO.m_Queue.Peek();
+		if (pPendingAPUIO && pPendingAPUIO->uCycle < uAPUIOWriteCycle)
 			pSnes->SyncSPC(0, FALSE);
 		#endif
 		/* AURORA_SNES_BINARY_TRACE_V7_VISUAL_BREADCRUMBS_20260918_APUIO_W */
@@ -1849,7 +1858,7 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 		    ATR_P_FLUSH);
 		#if SNSPCIO_WRITEQUEUE
 		if (!pSnes->m_SpcIO.EnqueueWrite(
-		        SNCPUGetCounter(pCpu, SNCPU_COUNTER_FRAME) + SNES_SPCWRITE_LATENCY,
+		        uAPUIOWriteCycle,
 		        uAddr & 3, uData))
 		#endif
 		{

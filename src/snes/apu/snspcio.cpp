@@ -79,8 +79,11 @@ void SNSpcIO::SyncQueue(Uint32 uCycle)
 {
 	SNQueueElementT *pElement;
 
-	// dequeue all pending writes  up to cycle time
-	while ( (pElement=m_Queue.Dequeue(uCycle)) != NULL)
+	/* AURORA_BLACKTHORNE_APUIO_SAMECYCLE_V1_SYNC_20260919
+	 * A CPU->SPC port write is due when the SPC has REACHED its timestamp,
+	 * not only one master clock later.  This inclusive rule is deliberately
+	 * local to SNSpcIO; SNPPUQueue keeps the legacy strict Dequeue(). */
+	while ( (pElement=m_Queue.DequeueAtOrBefore(uCycle)) != NULL)
 	{
 		// perform write
 		m_Regs.apu_w[pElement->uAddr] = pElement->uData;

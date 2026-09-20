@@ -43,7 +43,7 @@ If the repository was cloned without `--recurse-submodules`, run
 
 Emulation:
 
-* Support added for more NES mappers: 13, 16, 18, 27, 48, 64, 65, 67, 68, 72, 77, 80, 82, 92, 96, 99, 101, 105, 118, 119, 151, 153, 155, 157, 158, 159, 185, 188, 210, 216, and 552. Every licensed NES and Famicom game and most of the bootleg and unlicensed games will boot now.
+* Support added for more NES mappers: 13, 16, 18, 27, 48, 64, 65, 67, 68, 72, 77, 80, 82, 92, 96, 99, 101, 105, 118, 119, 151, 153, 155, 157, 158, 159, 162, 163, 164, 185, 188, 210, 216, and 552. Every licensed NES and Famicom game and most of the bootleg and unlicensed games will boot now.
 * Famicom Disk System (firmware not included), press L2+TRIANGLE to change the disk side.
 * Famiclone audio option for NES games (swap duty cycles, a known hardware bug in some Famiclones you can intentionally turn on)
 * Changed SRAM and RAM initialization for both NES and SNES. This will fix all the very few games that rely on specific initial values to work properly.
@@ -86,14 +86,16 @@ User interface:
 
 **FIXED:**
 
-* PC Engine alternative video modes (Ninja Spirits, Aoi Blink, Toumaden, Puyo Puyo and more)
+* PC Engine alternative video modes (Ninja Spirits, Aoi Blink, Toumaden, Puyo Puyo and more) implemented
 * Pilotwings (SNES) and Secret of Mana (SNES) mode 7 rendering, also fixes other games that rely on it
 * Secret of Mana (SNES) mode 5 rendering, also fixes other games that rely on it
-* Addams Family (SNES) graphical glitches and timing issues
-* Accele Brid (SNES) freeze fix
-* Speedy Gonzales in Los Gatos Banditos (SNES) performance *(with special safe frameskip)*
-* Top Gear (SNES) performance *(with special safe frameskip)*
-* Many other graphical glitches and inaccuracies on many games and emulated systems
+* Addams Family (SNES) graphical glitches and timing issues fixed
+* The Lost Vikings 1 and 2 (SNES) black screen fixed
+* Blackthorne (SNES) black screen fixed
+* Accele Brid (SNES) freeze fixed
+* Speedy Gonzales in Los Gatos Banditos (SNES) performance fixed *(with special safe frameskip)*
+* Top Gear (SNES) performance fixed *(with special safe frameskip)*
+* Many other graphical glitches and inaccuracies on many games and emulated systems were fixed
 
 **TO BE FIXED:**
 
@@ -105,7 +107,7 @@ User interface:
 * Krazy Creatures (NES) minor graphical glitches
 * Super Mario World 2 (SNES) performance (Super FX2)
 * Magical Pop'n (SNES) black screen
-* The Lost Vikings 1 and 2 (SNES) black screen
+* Kishin Douji Zenki: Tenchi Meidou black screen
 * Sunset Riders (SNES) graphical glitches
 * Sonic Blast Man (SNES) wrong colors
 * Any other games with performance or graphical issues

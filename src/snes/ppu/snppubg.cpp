@@ -32,6 +32,7 @@ static Uint8 _SNPPUBg_Tile16Pos[4][4] =
 };
 
 // BG Fetch 
+/* AURORA_SNES_SAFE_PERF_V4_20260919: invariant-hoisting only; no BG addressing/timing rule changes. */
 
 /*
  * Move one tile row down in the renderer's abstract SNES tilemap address.
@@ -249,6 +250,8 @@ static void _FetchBG8x8Offset(Uint32 uScrollX, Uint32 uScrollY, Int32 iLine, Sne
 
 	Uint32 uTileX, uTileY;
 	Uint32 uX = 0;
+	/* AURORA_SNES_SAFE_PERF_V4_20260919: fine X scroll is invariant for this helper call. */
+	const Uint32 uScrollXFine = uScrollX & 7;
 
 	PROF_ENTER("_FetchBG8x8Offset");
 
@@ -262,7 +265,7 @@ static void _FetchBG8x8Offset(Uint32 uScrollX, Uint32 uScrollY, Int32 iLine, Sne
 		if (uOffsetX & uOffsetMask)
 		{
 			uTileScrollX =
-				(uScrollX & 7) | (uOffsetX & 0x3F8);
+				uScrollXFine | (uOffsetX & 0x3F8);
 		} else
 		{
 			uTileScrollX = uScrollX;
@@ -313,6 +316,8 @@ static void _FetchBG8x8Offset2(Uint32 uScrollX, Uint32 uScrollY, Int32 iLine, Sn
 
 	Uint32 uTileX, uTileY;
 	Uint32 uX = 0;
+	/* AURORA_SNES_SAFE_PERF_V4_20260919: fine X scroll is invariant for this helper call. */
+	const Uint32 uScrollXFine = uScrollX & 7;
 
 	PROF_ENTER("_FetchBG8x8Offset2");
 
@@ -333,7 +338,7 @@ static void _FetchBG8x8Offset2(Uint32 uScrollX, Uint32 uScrollY, Int32 iLine, Sn
 			} else
 			{
 				uTileScrollX =
-				(uScrollX & 7) | (uOffset & 0x3F8);
+				uScrollXFine | (uOffset & 0x3F8);
 			}
 		} 
 
@@ -437,24 +442,32 @@ Uint32 SnesPPURender::FetchBG(SnesBGInfoT *pBGInfo, struct SnesRenderTileT *pTil
 		return uResult;
 	}
 
-	if (pBGInfo->uMosaic > 0)
+	/* AURORA_SNES_SAFE_PERF_V4_20260919: all are invariant for this synchronous BG fetch. */
+	const SnesPPURegsT *pRegs = m_pPPU->GetRegs();
+	const Uint8 uBGMode = (Uint8)(pRegs->bgmode & 7);
+	const Uint32 uMosaic = pBGInfo->uMosaic;
+	const Uint32 uMosaicSize = uMosaic + 1;
+
+	if (uMosaic > 0)
 	{
-		iLine /= pBGInfo->uMosaic + 1;
-		iLine *= pBGInfo->uMosaic + 1;
+		iLine /= uMosaicSize;
+		iLine *= uMosaicSize;
 	}
 
 	uScrollX = pBGInfo->uScrollX;
 	uScrollY = pBGInfo->uScrollY + iLine;
+	const Uint32 uFineX = uScrollX & 7;
+	const Uint32 uFineY = uScrollY & 7;
 
 	// determine if fine scrollX has changed
-	if (((uOldVramAddr>>16)&7)!=(uScrollX&7))
+	if (((uOldVramAddr>>16)&7)!=uFineX)
 	{
 		// force palette fetch
 		uResult |= SNPPU_BGFLAGS_FETCHPAL;
 	}
 
 	// determine if fine scrollY has changed
-	if (((uOldVramAddr>>24)&7)!=(uScrollY&7))
+	if (((uOldVramAddr>>24)&7)!=uFineY)
 	{
 		// force chr fetch
 		uResult |= SNPPU_BGFLAGS_FETCHCHR;
@@ -475,8 +488,7 @@ Uint32 SnesPPURender::FetchBG(SnesBGInfoT *pBGInfo, struct SnesRenderTileT *pTil
 	 * The paired-character horizontal expansion itself is handled later by
 	 * the Mode 5 CHR decimator in snppurender8.cpp.
 	 */
-	if ((((m_pPPU->GetRegs()->bgmode & 7) == 5) ||
-	     ((m_pPPU->GetRegs()->bgmode & 7) == 6)) && pBGInfo->uChrSize)
+	if (((uBGMode == 5) || (uBGMode == 6)) && pBGInfo->uChrSize)
 	{
 		Uint32 uVHalf;
 		Int32 iTile;
@@ -526,8 +538,8 @@ Uint32 SnesPPURender::FetchBG(SnesBGInfoT *pBGInfo, struct SnesRenderTileT *pTil
 			uResult |= SNPPU_BGFLAGS_FETCHCHR | SNPPU_BGFLAGS_FETCHPAL;
 		}
 
-		uVramAddr|= (uScrollX & 7) << 16;
-		uVramAddr|= (uScrollY & 7) << 24;
+		uVramAddr|= uFineX << 16;
+		uVramAddr|= uFineY << 24;
 		uOldVramAddr = uVramAddr;
 		return uResult;
 	}
@@ -600,8 +612,8 @@ Uint32 SnesPPURender::FetchBG(SnesBGInfoT *pBGInfo, struct SnesRenderTileT *pTil
 
 	}
 
-	uVramAddr|= (uScrollX&7)<<16;
-	uVramAddr|= (uScrollY&7)<<24;
+	uVramAddr|= uFineX<<16;
+	uVramAddr|= uFineY<<24;
 
 	// set vram addr
 	uOldVramAddr = uVramAddr;
@@ -630,6 +642,8 @@ static void _FetchBG16x16Offset(
     Bool bMode4)
 {
     Uint32 uX = 0;
+    /* AURORA_SNES_SAFE_PERF_V4_20260919: fine X scroll is invariant for this helper call. */
+    const Uint32 uScrollXFine = uScrollX & 7;
 
     PROF_ENTER("_FetchBG16x16Offset");
 
@@ -677,7 +691,7 @@ static void _FetchBG16x16Offset(
                 else
                 {
                     uTileScrollX =
-                        (uScrollX & 7) |
+                        uScrollXFine |
                         (pOpt[0] & 0x3F8);
                 }
             }
@@ -689,7 +703,7 @@ static void _FetchBG16x16Offset(
             if (pOpt[0] & uOffsetMask)
             {
                 uTileScrollX =
-                    (uScrollX & 7) |
+                    uScrollXFine |
                     (pOpt[0] & 0x3F8);
             }
 
@@ -790,6 +804,8 @@ static void _FetchBGMode6LargeOffset(
 	Uint32 uOffsetMask)
 {
 	Uint32 uX = 0;
+	/* AURORA_SNES_SAFE_PERF_V4_20260919: fine X scroll is invariant for this helper call. */
+	const Uint32 uScrollXFine = uScrollX & 7;
 
 	while (nTiles > 0)
 	{
@@ -801,7 +817,7 @@ static void _FetchBGMode6LargeOffset(
 		const Uint16 uOffsetY = pOffset[1];
 
 		if (uOffsetX & uOffsetMask)
-			uTileScrollX = (uScrollX & 7) | (uOffsetX & 0x3F8);
+			uTileScrollX = uScrollXFine | (uOffsetX & 0x3F8);
 		if (uOffsetY & uOffsetMask)
 			uTileScrollY = uOffsetY & 0x3FF;
 

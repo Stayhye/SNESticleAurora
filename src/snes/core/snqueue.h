@@ -37,6 +37,31 @@ public:
 		return m_nCount == 0;
 	}
 
+	/* AURORA_BLACKTHORNE_APUIO_SAMECYCLE_V1_QUEUE_20260919
+	 * Read-only inspection for clients which need to distinguish an older
+	 * queued event from another byte at the exact same emulated timestamp. */
+	inline SNQueueElementT *Peek()
+	{
+		return (m_nCount > 0) ? &m_Elements[m_iHead] : NULL;
+	}
+
+	/* CPU->SPC communication ports become visible once the SPC has reached
+	 * their timestamp, including equality.  Keep legacy Dequeue(uCycle)
+	 * untouched because SNPPUQueue shares this template and has independent
+	 * raster timing semantics. */
+	inline SNQueueElementT *DequeueAtOrBefore(Uint32 uCycle)
+	{
+		if (m_nCount > 0 && uCycle >= m_Elements[m_iHead].uCycle)
+		{
+			SNQueueElementT *pElement = &m_Elements[m_iHead];
+			if (++m_iHead == t_nSize)
+				m_iHead = 0;
+			m_nCount--;
+			return pElement;
+		}
+		return NULL;
+	}
+
 	/* AURORA_PPU_MEMORY_V3_QUEUE_20260915
 	 * SNQueueElementT already has one padding byte. PPU writes reuse it for
 	 * memory-bus phase metadata, so the 4096-entry queue stays exactly the

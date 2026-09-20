@@ -65,12 +65,14 @@ static _INLINE Uint16 _SnesPPUOBJCountPhysicalSlivers(
 	Int32 iObjectX;
 	Int32 iFirstTile;
 	Int32 nTiles;
+	/* AURORA_SNES_SAFE_PERF_V4_20260919: SNES OBJ X is nine bits; reuse the same masked value. */
+	const Uint16 uPosX = (Uint16)(pObj->uPosX & 0x1FF);
 
-	iObjectX = (pObj->uPosX & 0x100)
-		? ((Int32)(pObj->uPosX & 0x1FF) - 512)
-		: (Int32)(pObj->uPosX & 0x1FF);
+	iObjectX = (uPosX & 0x100)
+		? ((Int32)uPosX - 512)
+		: (Int32)uPosX;
 	_SnesPPUOBJCountedTileRange(
-		pObj->uPosX, iObjectX, pObj->uWidth, &iFirstTile, &nTiles);
+		uPosX, iObjectX, pObj->uWidth, &iFirstTile, &nTiles);
 	(void)iFirstTile;
 	return (Uint16)nTiles;
 }
@@ -99,6 +101,11 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 
 	if (nObjLine <= 0)
 		return;
+
+	/* AURORA_SNES_SAFE_PERF_V3_20260919
+	 * uDirectShift is invariant for this compositor call. Keep the exact
+	 * original nibble mask, but do not rebuild it per tile/pixel. */
+	const Uint8 uDirectKeep = uDirectShift ? 0x0F : 0xF0;
 
 	PROF_ENTER("_RenderOBJPlanar");
 
@@ -179,7 +186,8 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 						pAddSubMask->uMask32[iWord] &= ~uMask0;
 				}
 
-				uVisible = (uMask0 >> uShift) & 0xFF;
+				/* AURORA_SNES_SAFE_PERF_V3_20260919: uOpaque is 8-bit; the mask can only clear bits. */
+				uVisible = uMask0 >> uShift;
 			}
 			else
 			{
@@ -219,7 +227,7 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 
 				uVisible = uMask0 >> uShift;
 				uVisible |= uMask1 << uInvShift;
-				uVisible &= 0xFF;
+				/* AURORA_SNES_SAFE_PERF_V3_20260919: recomposed value is still a subset of 8-bit uOpaque. */
 			}
 
 #if SNDBG_DEEP
@@ -238,11 +246,10 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 			 * for OBJ pixels that survived window and priority masking. */
 			if (pDirectAttrib)
 			{
-				const Uint8 uKeep = uDirectShift ? 0x0F : 0xF0;
 				Int32 iDirect;
 				for (iDirect = 0; iDirect < 8; iDirect++)
 					if (uVisible & (1u << iDirect))
-						pDirectAttrib[iPosX + iDirect] &= uKeep;
+						pDirectAttrib[iPosX + iDirect] &= uDirectKeep;
 			}
 
 			if (uVisible == 0xFF)
@@ -263,6 +270,9 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 		} else
 		{
 			Int32 iPixel;
+			/* AURORA_SNES_SAFE_PERF_V3_20260919: invariant for all pixels of this clipped OBJ row. */
+			const Bool bClippedAddSub =
+				(bAddSubMask & 1) && ((uPal | bAddSubMask) & 0x4);
 #if SNDBG_DEEP
 			g_DbgObjClippedTiles++;
 #endif
@@ -281,17 +291,20 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 
 				iWord = iX >> 5;
 				uBit = 1u << (iX & 31);
-				uBlocked = ObjMask.uMask32[iWord] & uBit;
+				/* AURORA_SNES_SAFE_PERF_V3_20260919
+				 * (A&bit)|(B&bit) == (A|B)&bit. Read both old masks before
+				 * publishing this OBJ bit to ObjMask. */
+				uBlocked =
+					(ObjMask.uMask32[iWord] |
+					 pPriorityMask->uMask32[iWord]) & uBit;
 				ObjMask.uMask32[iWord] |= uBit;
-
-				uBlocked |= pPriorityMask->uMask32[iWord] & uBit;
 
 				if (uBlocked)
 					continue;
 
 				if (pAddSubMask)
 				{
-					if ((bAddSubMask & 1) && ((uPal | bAddSubMask) & 0x4))
+					if (bClippedAddSub)
 						pAddSubMask->uMask32[iWord] |= uBit;
 					else
 						pAddSubMask->uMask32[iWord] &= ~uBit;
@@ -299,7 +312,7 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 
 				pLine8[iX] = pObjData[iPixel];
 				if (pDirectAttrib)
-					pDirectAttrib[iX] &= uDirectShift ? 0x0F : 0xF0;
+					pDirectAttrib[iX] &= uDirectKeep;
 #if SNDBG_DEEP
 				g_DbgObjDrawnPixels++;
 #endif
@@ -314,6 +327,9 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 void _DecodeOBJEX(Uint8 *pObjEx, SnesRenderObjT *pObjs, Int32 nObjs, Uint32 uBaseSize)
 {
 	uBaseSize &= 7;
+	/* AURORA_SNES_SAFE_PERF_V4_20260919: base-size row is invariant for the whole packed OAM decode. */
+	const Uint8 *pWidthRow = _SnesPPU_OAMWidth[uBaseSize];
+	const Uint8 *pHeightRow = _SnesPPU_OAMHeight[uBaseSize];
 	while (nObjs > 0)
 	{
 		Uint8	uObjEx;
@@ -327,32 +343,32 @@ void _DecodeOBJEX(Uint8 *pObjEx, SnesRenderObjT *pObjs, Int32 nObjs, Uint32 uBas
 		pObjs->uPosX	   = (uObjEx & 1) << 8;
 		uObjEx>>=1;
 		uLarge = uObjEx & 1;
-		pObjs->uWidth  = _SnesPPU_OAMWidth [uBaseSize][uLarge];
-		pObjs->uHeight = _SnesPPU_OAMHeight[uBaseSize][uLarge];
+		pObjs->uWidth  = pWidthRow[uLarge];
+		pObjs->uHeight = pHeightRow[uLarge];
 		uObjEx>>=1;
 		pObjs++;
 
 		pObjs->uPosX	   = (uObjEx & 1) << 8;
 		uObjEx>>=1;
 		uLarge = uObjEx & 1;
-		pObjs->uWidth  = _SnesPPU_OAMWidth [uBaseSize][uLarge];
-		pObjs->uHeight = _SnesPPU_OAMHeight[uBaseSize][uLarge];
+		pObjs->uWidth  = pWidthRow[uLarge];
+		pObjs->uHeight = pHeightRow[uLarge];
 		uObjEx>>=1;
 		pObjs++;
 
 		pObjs->uPosX	   = (uObjEx & 1) << 8;
 		uObjEx>>=1;
 		uLarge = uObjEx & 1;
-		pObjs->uWidth  = _SnesPPU_OAMWidth [uBaseSize][uLarge];
-		pObjs->uHeight = _SnesPPU_OAMHeight[uBaseSize][uLarge];
+		pObjs->uWidth  = pWidthRow[uLarge];
+		pObjs->uHeight = pHeightRow[uLarge];
 		uObjEx>>=1;
 		pObjs++;
 
 		pObjs->uPosX	   = (uObjEx & 1) << 8;
 		uObjEx>>=1;
 		uLarge = uObjEx & 1;
-		pObjs->uWidth  = _SnesPPU_OAMWidth [uBaseSize][uLarge];
-		pObjs->uHeight = _SnesPPU_OAMHeight[uBaseSize][uLarge];
+		pObjs->uWidth  = pWidthRow[uLarge];
+		pObjs->uHeight = pHeightRow[uLarge];
 		uObjEx>>=1;
 		pObjs++;
 

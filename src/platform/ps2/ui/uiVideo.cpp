@@ -33,6 +33,7 @@ extern "C" {
 #include "sega/picodrive/picodrive_bridge.h"
 #include "pce/beetle/pce_bridge.h" /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
 #include "mainloop_safe_frameskip.h" /* AURORA_SAFE_FRAMESKIP_GG_ZOOM_V2_2 */
+#include "platform/ps2/system/aurora_runtime_trace.h" /* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919 */
 
 /* mc0:/SNESticle (defined in mainloop_globals.cpp). */
 extern Char _SramPath[256];
@@ -1415,6 +1416,11 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 			_VideoCompatAudioQueueStatus()); vy += 12;
 		_VideoRow(vy, 37, m_iSelect, "MD rendering",
 			_VideoMdRenderingStatus()); vy += 12;
+#if AURORA_RUNTIME_TRACE
+		/* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919: runtime-only; deliberately absent from VideoCfgT. */
+		_VideoRow(vy, 38, m_iSelect, "Debugger",
+			AuroraTraceIsEnabled() ? "On" : "Off"); vy += 12;
+#endif
 
 	}
 	else if (iPage == 3)
@@ -1456,6 +1462,12 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 {
 	int dir = 0;
+#if AURORA_RUNTIME_TRACE
+	/* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919: only trace-capable builds gain the extra Performance row. */
+	const int perfHi = 38;
+#else
+	const int perfHi = 37;
+#endif
 
 	/* AURORA_PD_MEGA_FIX_20260820: Screen -> Audio -> Performance -> Controller -> Hacks -> Devices. */
 	if (trigger & PAD_CIRCLE)
@@ -1488,7 +1500,7 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 		if (m_iSelect < 10)       { lo = 0;  hi = 8;  }
 		else if (m_iSelect < 20)  { lo = 10; hi = 19; }
 		else if (m_iSelect <= 30) { lo = 20; hi = 27; } /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910 */
-		else if (m_iSelect < 40)  { lo = 31; hi = 37; }
+		else if (m_iSelect < 40)  { lo = 31; hi = perfHi; }
 		else                      { lo = 40; hi = 45; }
 		if (trigger & PAD_UP)
 		{
@@ -1782,6 +1794,17 @@ case 17: /* Famiclone Audio */
 		case 37:
 			{ int v = PicoDriveBridge_GetRenderingMode() + dir; if (v < 0) v = 2; if (v > 2) v = 0; PicoDriveBridge_SetRenderingMode(v); }
 			break;
+#if AURORA_RUNTIME_TRACE
+		case 38:
+		{
+			/* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919
+			 * Binary setting: LEFT=Off, RIGHT=On. No VideoSettingsSave()
+			 * and no VideoCfgT field: every process start returns to Off. */
+			const Bool on = AuroraTraceSetEnabled(dir > 0 ? TRUE : FALSE);
+			Aud_SetRuntimeTraceMute(on ? 1 : 0);
+			break;
+		}
+#endif
 		case 40:
 			InputSnesMouseCycleModeDir(dir);
 			break;
@@ -1831,6 +1854,12 @@ if (trigger & (PAD_CROSS | PAD_START))
         if (Aud_IsInitialized()) Aud_Setvol(0);
         ExecOSD(0, NULL);
     }
+#if AURORA_RUNTIME_TRACE
+    else if (m_iSelect == 38)
+    {
+        /* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919: runtime-only row; never writes video.cfg. */
+    }
+#endif
     else
         VideoSettingsSave();
 }

@@ -437,11 +437,18 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 	Uint32 fC; // 00000000 0000000C
 	Uint32 fHV; /* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V3_SPC_LAZY_HV_20260917: lazy H/V bits, mask 0x48 */
 	Uint32 rDP;
+#if AURORA_RUNTIME_TRACE
+	Uint32 uAuroraTraceEnabled;
+#endif
 //	Uint32 bDone = FALSE;
 
 	nCycles = pCpu->Cycles;
 	
 	if (nCycles <= 0) return 0;
+#if AURORA_RUNTIME_TRACE
+	/* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919: runtime state cannot change inside this synchronous call. */
+	uAuroraTraceEnabled = g_AuroraTraceEnabled;
+#endif
 
 	// registerize registers
 	rPC			= pCpu->Regs.rPC;
@@ -509,14 +516,16 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 		}
 #endif
 
-		/* AURORA_SNES_BINARY_TRACE_V6_20260918_SPC700 */
-#if AURORA_RUNTIME_TRACE
-		const Uint16 uAuroraTracePC = (Uint16)rPC;
-#endif
+		/* AURORA_SNES_BINARY_TRACE_V6_20260918_SPC700
+		 * AURORA_SNES_SAFE_PERF_V6_20260919 / AURORA_TRACE_OFF_PERF_V6_20260919
+		 * SNSPC_FETCH8 always advances the 16-bit PC by exactly one byte.
+		 * Therefore (Uint16)(rPC - 1u) is exactly the old pre-fetch PC,
+		 * including FFFF->0000 wrap. Build it only when trace is actually On. */
 		SNSPC_FETCH8(uOpcode);
 #if AURORA_RUNTIME_TRACE
-		if (g_AuroraTraceEnabled)
-			AuroraRuntimeTraceSPC(pCpu, uAuroraTracePC, (Uint8)uOpcode);
+		if (uAuroraTraceEnabled)
+			AuroraRuntimeTraceSPC(
+				pCpu, (Uint16)(rPC - 1u), (Uint8)uOpcode);
 #endif
 
 		switch (uOpcode)

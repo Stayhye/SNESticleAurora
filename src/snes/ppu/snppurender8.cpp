@@ -836,18 +836,18 @@ static _INLINE Uint64 _SnesPPUMode5PackPair(
     Bool bPreferredOdd = (Bool)((!bSubscreen && !bMosaic) ^ bHFlip);
     Uint64 uOut;
 
-    if (bSubscreen)
-    {
-        uOut =
-            (Uint64)_SnesPPUMode5Pack4(uRow0, bPreferredOdd) |
-            ((Uint64)_SnesPPUMode5Pack4(uRow1, bPreferredOdd) << 32);
-    }
-    else
-    {
-        uOut =
-            (Uint64)_SnesPPUMode5Pack4Coverage(uRow0, bPreferredOdd) |
-            ((Uint64)_SnesPPUMode5Pack4Coverage(uRow1, bPreferredOdd) << 32);
-    }
+    /* AURORA_SNES_PPU_ACCURACY_V8_20260919
+     * AURORA_SNES_PPU_ACCURACY_V8_MODE56_PHASE_20260919
+     * AURORA_SNES_PPU_ACCURACY_V8_1_20260919: final whole-tree audit retained this Mode 5/6 correction.
+     * The separate V8 $213B helper change was removed because snes.cpp
+     * already composes the documented PPU2 open-bus bit at the bus layer.
+     * Mode 5/6 physical hires phases are distinct pixels. Keep Aurora's
+     * existing selected phase, but never borrow the opposite phase when the
+     * selected pixel is transparent. Besides being more faithful, this is
+     * less work than the old host-only coverage fallback. */
+    uOut =
+        (Uint64)_SnesPPUMode5Pack4(uRow0, bPreferredOdd) |
+        ((Uint64)_SnesPPUMode5Pack4(uRow1, bPreferredOdd) << 32);
 
     if (bHFlip)
         uOut = SnesPPUChrCacheReverseBytes(uOut);
@@ -866,20 +866,12 @@ static _INLINE Uint8 _SnesPPUMode5PackPairMask(
     Bool bPreferredOdd = (Bool)((!bSubscreen && !bMosaic) ^ bHFlip);
     Uint8 uOut;
 
-    if (bSubscreen)
-    {
-        uOut = (Uint8)(
-            _SnesPPUMode5PackMask4(uMask0, bPreferredOdd) |
-            (_SnesPPUMode5PackMask4(uMask1, bPreferredOdd) << 4)
-        );
-    }
-    else
-    {
-        uOut = (Uint8)(
-            _SnesPPUMode5PackMask4Coverage(uMask0, bPreferredOdd) |
-            (_SnesPPUMode5PackMask4Coverage(uMask1, bPreferredOdd) << 4)
-        );
-    }
+    /* AURORA_SNES_PPU_ACCURACY_V8_MODE56_PHASE_20260919: opacity belongs to the same selected physical phase.
+     * Do not OR coverage from the opposite hires column. */
+    uOut = (Uint8)(
+        _SnesPPUMode5PackMask4(uMask0, bPreferredOdd) |
+        (_SnesPPUMode5PackMask4(uMask1, bPreferredOdd) << 4)
+    );
 
     if (bHFlip)
         uOut = SnesPPUChrCacheReverseMask(uOut);
@@ -1171,11 +1163,19 @@ static void _FetchCHR8_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRende
 static void _FetchCHR_64(Uint8 *pLine, SnesPPU *pPPU, SnesBGInfoT *pBGInfo, struct SnesRenderTileT *pTiles, Int32 nTiles, Int32 iLine,Uint8 *pMask, Bool bOffset, Bool bHiresSubscreen)
 {
 	Uint32 uScrollY = 0;
+	/* AURORA_SNES_SAFE_PERF_V3_20260919
+	 * GetRegs()/GetVramPtr() are inline address getters. This helper passes
+	 * only the resulting VRAM pointer to its decode routines. */
+	const SnesPPURegsT *pRegs = pPPU->GetRegs();
+	Uint16 *pVram = pPPU->GetVramPtr(0);
+	const Uint8 uBGMode = (Uint8)(pRegs->bgmode & 7);
+	const Uint32 uMosaic = pBGInfo->uMosaic;
+	const Uint32 uMosaicSize = uMosaic + 1;
 
-	if (pBGInfo->uMosaic > 0)
+	if (uMosaic > 0)
 	{
-		iLine /= pBGInfo->uMosaic + 1;
-		iLine *= pBGInfo->uMosaic + 1;
+		iLine /= uMosaicSize;
+		iLine *= uMosaicSize;
 	}
 
 	if (!bOffset)
@@ -1187,9 +1187,9 @@ static void _FetchCHR_64(Uint8 *pLine, SnesPPU *pPPU, SnesBGInfoT *pBGInfo, stru
 	{
 	case 2:
 		// Mode 5 decodes the adjacent character pair N/N+1.
-		if ((pPPU->GetRegs()->bgmode & 7) == 5)
+		if (uBGMode == 5)
 			_FetchCHR2Mode5_64(
-				pPPU->GetVramPtr(0),
+				pVram,
 				pBGInfo->uChrAddr,
 				pTiles,
 				nTiles,
@@ -1197,12 +1197,12 @@ static void _FetchCHR_64(Uint8 *pLine, SnesPPU *pPPU, SnesBGInfoT *pBGInfo, stru
 				pLine,
 				pMask,
 				_SnesPPU_Tile2PalLookup64[pBGInfo->uPalBase],
-				(pPPU->GetRegs()->mosaic & 0x02) != 0,
+				(pRegs->mosaic & 0x02) != 0,
 				bHiresSubscreen
 			);
 		else
 			_FetchCHR2_64(
-				pPPU->GetVramPtr(0),
+				pVram,
 				pBGInfo->uChrAddr,
 				pTiles,
 				nTiles,
@@ -1214,22 +1214,22 @@ static void _FetchCHR_64(Uint8 *pLine, SnesPPU *pPPU, SnesBGInfoT *pBGInfo, stru
 		break;
 	case 4:
 		// Modes 5/6 decode the adjacent hires character pair N/N+1.
-		if (((pPPU->GetRegs()->bgmode & 7) == 5) ||
-		    ((pPPU->GetRegs()->bgmode & 7) == 6))
+		if ((uBGMode == 5) ||
+		    (uBGMode == 6))
 			_FetchCHR4Mode5_64(
-				pPPU->GetVramPtr(0),
+				pVram,
 				pBGInfo->uChrAddr,
 				pTiles,
 				nTiles,
 				uScrollY & 7,
 				pLine,
 				pMask,
-				(pPPU->GetRegs()->mosaic & 0x01) != 0,
+				(pRegs->mosaic & 0x01) != 0,
 				bHiresSubscreen
 			);
 		else
 			_FetchCHR4_64(
-				pPPU->GetVramPtr(0),
+				pVram,
 				pBGInfo->uChrAddr,
 				pTiles,
 				nTiles,
@@ -1240,13 +1240,13 @@ static void _FetchCHR_64(Uint8 *pLine, SnesPPU *pPPU, SnesBGInfoT *pBGInfo, stru
 		break;
 	case 8:
 		// fetch chr (8-bit)
-		_FetchCHR8_64(pPPU->GetVramPtr(0), pBGInfo->uChrAddr, pTiles, nTiles, uScrollY & 7, pLine, pMask);
+		_FetchCHR8_64(pVram, pBGInfo->uChrAddr, pTiles, nTiles, uScrollY & 7, pLine, pMask);
 		break;
 	}
 
-	if (pBGInfo->uMosaic > 0)
+	if (uMosaic > 0)
 	{
-		_MosaicBG8(pLine + (pBGInfo->uScrollX & 7), 256, pBGInfo->uMosaic + 1);
+		_MosaicBG8(pLine + (pBGInfo->uScrollX & 7), 256, uMosaicSize);
 	}
 }
 
@@ -2268,8 +2268,10 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		Uint8 uBGFlags[4];
 		Uint16 *pOffset = NULL;
 		Uint32 uOffsetOR = 0;
+		/* AURORA_SNES_SAFE_PERF_V9_20260919 / AURORA_SNES_SAFE_PERF_V9_BG_20260919: scanline invariant reused by offset BG paths. */
+		const Bool bMode4 = (uBGMode == 4);
 
-		if ((uBGMode==2 || uBGMode==4 || uBGMode==6) &&
+		if ((uBGMode==2 || bMode4 || uBGMode==6) &&
 		    (uFetchLayers & (SNESPPU_MASK_BG1 | SNESPPU_MASK_BG2)))
 		{
 			pOffset = pRenderInfo->BGOffset;
@@ -2278,7 +2280,7 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 #if SNDBG_LOG
 			Uint32 _tBGOffset = ProfCtrGetCycle();
 #endif
-			uOffsetOR  = FetchOffset(&BGInfo[2], pOffset, iLine, pRenderInfo->uBGVramAddr[2], uBGMode==4 ? FALSE : TRUE);
+			uOffsetOR  = FetchOffset(&BGInfo[2], pOffset, iLine, pRenderInfo->uBGVramAddr[2], bMode4 ? FALSE : TRUE);
 #if SNDBG_LOG
 			g_TmgCycBGOffset += ProfCtrGetCycle() - _tBGOffset;
 #endif
@@ -2289,18 +2291,22 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 #endif
 		for (iBG=0; iBG <= 3; iBG++)
 		{
-			if (!(uFetchLayers & (1 << iBG)))
+			const Uint8 uLayerMask = (Uint8)(1u << iBG);
+			if (!(uFetchLayers & uLayerMask))
 			{
 				uBGFlags[iBG] = 0;
 				continue;
 			}
 
+			/* AURORA_SNES_SAFE_PERF_V9_BG_20260919: compute this active layer's offset bit once. */
+			const Uint32 uOffsetMask = 0x2000u << iBG;
+
 			// is offset enabled for this BG layer?
-			if (uOffsetOR & (0x2000 << iBG))
+			if (uOffsetOR & uOffsetMask)
 			{
 				// fetch BGline with offset
 				PROF_ENTER("FetchBGOffset");
-				uBGFlags[iBG] = FetchBGOffset(&BGInfo[iBG], pRenderInfo->Tiles[iBG], 33, iLine, pOffset, (0x2000 << iBG), (uBGMode==4 ? TRUE : FALSE));
+				uBGFlags[iBG] = FetchBGOffset(&BGInfo[iBG], pRenderInfo->Tiles[iBG], 33, iLine, pOffset, uOffsetMask, bMode4);
 				PROF_LEAVE("FetchBGOffset");
 
 				// invalidate cache
@@ -2336,13 +2342,17 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 				#endif
 
 				// shift mask based on h-scroll of BG
-				SNMaskSHL(&pRenderInfo->BGPlanes[iBG][SNPPU_BGPLANE_OPAQUE], TempMask[0], (BGInfo[iBG].uScrollX & 7));
-				SNMaskSHL(&pRenderInfo->BGPlanes[iBG][SNPPU_BGPLANE_PRI], TempMask[1], (BGInfo[iBG].uScrollX & 7));
+				/* AURORA_SNES_SAFE_PERF_V9_BG_20260919: identical source value for both mask planes. */
+				const Uint32 uFineX = BGInfo[iBG].uScrollX & 7;
+				SNMaskSHL(&pRenderInfo->BGPlanes[iBG][SNPPU_BGPLANE_OPAQUE], TempMask[0], uFineX);
+				SNMaskSHL(&pRenderInfo->BGPlanes[iBG][SNPPU_BGPLANE_PRI], TempMask[1], uFineX);
 
-				if (BGInfo[iBG].uMosaic > 0)
+				const Uint32 uMosaic = BGInfo[iBG].uMosaic;
+				if (uMosaic > 0)
 				{
-					_MosaicBGPlanar((Uint8 *)&pRenderInfo->BGPlanes[iBG][SNPPU_BGPLANE_OPAQUE], 256, BGInfo[iBG].uMosaic + 1);
-					_MosaicBGPlanar((Uint8 *)&pRenderInfo->BGPlanes[iBG][SNPPU_BGPLANE_PRI], 256, BGInfo[iBG].uMosaic + 1);
+					const Uint32 uMosaicSize = uMosaic + 1;
+					_MosaicBGPlanar((Uint8 *)&pRenderInfo->BGPlanes[iBG][SNPPU_BGPLANE_OPAQUE], 256, uMosaicSize);
+					_MosaicBGPlanar((Uint8 *)&pRenderInfo->BGPlanes[iBG][SNPPU_BGPLANE_PRI], 256, uMosaicSize);
 				}
 			}
 		}

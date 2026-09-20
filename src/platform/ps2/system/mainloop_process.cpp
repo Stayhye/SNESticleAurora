@@ -73,13 +73,10 @@ Bool MainLoopProcess()
     NetPlayRPCInputT NetInput;
     /* AURORA_PD_CADENCE_RESUME_FIRST_FRAME_V7_20260821 */
     Bool bGameplayJustStarted = FALSE;
-#if AURORA_RUNTIME_TRACE
-    /* AURORA_SNES_BINARY_TRACE_V6_20260918_HOTKEY_STATE */
-    Bool bAuroraTraceHotkeyHeld = FALSE;
-    /* AURORA_SNES_BINARY_TRACE_V7_3_L3_R3_HOTKEY_20260918 */
-    const Uint32 uAuroraTraceHotkey =
-        PAD_L3 | PAD_R3;
-#endif
+
+    /* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919
+     * Runtime trace is controlled only by the visible settings row now.
+     * No per-frame controller chord state is maintained. */
 
     PROF_ENTER("Frame");
 
@@ -89,27 +86,6 @@ Bool MainLoopProcess()
 
     PROF_ENTER("InputProcess");
     InputPoll();
-
-#if AURORA_RUNTIME_TRACE
-    /* AURORA_SNES_BINARY_TRACE_V6_20260918_HOTKEY_TOGGLE */
-    {
-        static Bool s_AuroraTraceChordLatched = FALSE;
-        const Uint32 p0 = InputGetPadData(0);
-        bAuroraTraceHotkeyHeld =
-            ((p0 & uAuroraTraceHotkey) == uAuroraTraceHotkey) ? TRUE : FALSE;
-
-        if (bAuroraTraceHotkeyHeld && !s_AuroraTraceChordLatched)
-        {
-            const Bool on = AuroraTraceToggleRuntime();
-            Aud_SetRuntimeTraceMute(on ? 1 : 0);
-            s_AuroraTraceChordLatched = TRUE;
-        }
-        else if (!bAuroraTraceHotkeyHeld)
-        {
-            s_AuroraTraceChordLatched = FALSE;
-        }
-    }
-#endif
 
     PROF_LEAVE("InputProcess");
 
@@ -127,11 +103,6 @@ Bool MainLoopProcess()
 	        | InputGetPadData(2) | InputGetPadData(3)
 	        | InputGetPadDpadFromAnalog(0) | InputGetPadDpadFromAnalog(1)
 	        | InputGetPadDpadFromAnalog(2) | InputGetPadDpadFromAnalog(3);
-#if AURORA_RUNTIME_TRACE
-	    /* AURORA_SNES_BINARY_TRACE_V6_20260918_HOTKEY_MASK_UI */
-	    if (bAuroraTraceHotkeyHeld)
-	        buttons &= ~uAuroraTraceHotkey;
-#endif
 
 	    _MainLoopInputProcess(buttons);
 	}
@@ -254,11 +225,6 @@ Bool MainLoopProcess()
 				    uAnalogDpad = 0;
 
 				Uint32 uHostPad = InputGetPadData(iPad) | uAnalogDpad;
-#if AURORA_RUNTIME_TRACE
-				/* AURORA_SNES_BINARY_TRACE_V6_20260918_HOTKEY_MASK_GAME */
-				if (iPad == 0 && bAuroraTraceHotkeyHeld)
-					uHostPad &= ~uAuroraTraceHotkey;
-#endif
 				Input.uPad[iPad] = _MainLoopInput(uHostPad);
 
 				/* AURORA_FAMICOM_MIC_CFG41_20260828

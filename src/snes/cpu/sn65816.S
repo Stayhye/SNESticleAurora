@@ -70,7 +70,11 @@
 #define SP_Save2   	0x68(sp)
 #define SP_Save3   	0x6C(sp)
 #define SP_Save4   	0x70(sp)
-  
+#if AURORA_RUNTIME_TRACE
+/* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919: runtime gate snapshot; 0x74..0x77 was unused. */
+#define SP_TraceEnabled 0x74(sp)
+#endif
+
 #define SP_Data0   	0x78(sp)
 #define SP_Data1   	0x79(sp)
 #define SP_Data2   	0x7A(sp)
@@ -130,10 +134,13 @@
 /* AURORA_SNES_BINARY_TRACE_V6_20260918_MACRO: pre-dispatch context ring, runtime gated. */
 #if AURORA_RUNTIME_TRACE
 #define AURORA_TRACE_SCPU_INSN() \
-        la      t0,g_AuroraTraceEnabled       ;\
-        lw      t1,0(t0)                      ;\
-        beqz    t1,9f                         ;\
-        nop                                   ;\
+        /* AURORA_SNES_SAFE_PERF_V6_20260919 / AURORA_TRACE_OFF_PERF_V6_20260919: \
+         * Off is the default. R5900 branch-likely executes the delay slot \
+         * only when the gate is taken, so the opcode-index shift replaces \
+         * V5's NOP. On recomputes that same shift once after the trace body. */ \
+        lw      t1,SP_TraceEnabled            ;\
+        beql    t1,zr,9f                      ;\
+        sll     t0,R_Data,2                   ;\
         la      t0,g_AuroraTraceSeq           ;\
         lw      t1,0(t0)                      ;\
         addiu   t1,t1,1                       ;\
@@ -169,9 +176,10 @@
         sb      t2,30(t0)                     ;\
         lbu     t2,SNCPU_rE                   ;\
         sb      t2,31(t0)                     ;\
+        sll     t0,R_Data,2                   ;\
 9:
 #else
-#define AURORA_TRACE_SCPU_INSN()
+#define AURORA_TRACE_SCPU_INSN() sll t0,R_Data,2
 #endif
 
 
@@ -1789,6 +1797,15 @@ _SNCPU_SBC16_DECIMAL:
 
 SNCPUExecute_ASM:
 		addiu	sp,sp,-0x80
+#if AURORA_RUNTIME_TRACE
+        /* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919
+         * Menu state cannot change while this synchronous CPU slice runs.
+         * Snapshot the volatile global once; trace records remain identical
+         * when enabled, while Off avoids a global-symbol load per opcode. */
+        la      t0,g_AuroraTraceEnabled
+        lw      t0,0(t0)
+        sw      t0,SP_TraceEnabled
+#endif
         sd		s0,0x00(sp)
         sd		s1,0x08(sp)
         sd		s2,0x10(sp)
@@ -1841,9 +1858,6 @@ lbu		R_Data,-1(R_PC)
         /* AURORA_SNES_BINARY_TRACE_V6_20260918_FAST */
         AURORA_TRACE_SCPU_INSN()
 
-
-		sll		t0, R_Data, 2							// R_Data = opcode * 4
-
         addu	t0, t0, R_pOpTable  					// t0 = OpTable + opcode * 4
 
         lw		t0, 0x00(t0)							// t0 -> opcode function
@@ -1861,9 +1875,6 @@ _SNCPU_ExecuteFetchUpdate:
         addiu	R_PC,R_PC,-1
         /* AURORA_SNES_BINARY_TRACE_V6_20260918_REMAP */
         AURORA_TRACE_SCPU_INSN()
-        
-
-		sll		t0, R_Data, 2							// R_Data = opcode * 4
         addu	t0, t0, R_pOpTable  					// t0 = OpTable + opcode * 4
         lw		t0, 0x00(t0)							// t0 -> opcode function
         jr		t0
