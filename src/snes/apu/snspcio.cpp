@@ -13,6 +13,7 @@ extern "C" {
 #include "platform/ps2/system/aurora_runtime_trace.h"
 /* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918 */
 
+/* AURORA_CPU_SPC_HOST_WORK_REDUCTION_V2_20260920_IO */
 #define SNES_DEBUGSPCIO (CODE_DEBUG && FALSE)
 
 #if SNES_DEBUGSPCIO
@@ -63,22 +64,25 @@ static void _SpcDebugWrite(SNSpcT *pSpc, Uint32 uAddr, Uint32 uData)
 Bool SNSpcIO::EnqueueWrite(
 	Uint32 uCycle, Uint32 uTotalCycle, Uint32 uAddr, Uint8 uData)
 {
-	const Uint8 uGroup = (uAddr & 2u) ? 0x02u : 0x01u;
-	const Uint32 uResetTotal = (uGroup == 0x01u)
-		? m_uPortResetTotal01 : m_uPortResetTotal23;
-
-	if (m_uPortResetValid & uGroup)
+	/* V2 common path: almost every APUIO write has no live $F1 reset stamp. */
+	if (m_uPortResetValid)
 	{
-		const Uint32 uDelta = uTotalCycle - uResetTotal;
-		if (uDelta < (Uint32)SNSPC_CYCLE)
-		{
-			/* Hardware reset wins.  TRUE means the write was handled, so the
-			 * caller must not fall back to an immediate apu_w assignment. */
-			return TRUE;
-		}
+		const Uint8 uGroup = (uAddr & 2u) ? 0x02u : 0x01u;
 
-		/* The first write outside that SPC cycle retires this transient stamp. */
-		m_uPortResetValid &= (Uint8)~uGroup;
+		if (m_uPortResetValid & uGroup)
+		{
+			const Uint32 uResetTotal = (uGroup == 0x01u)
+				? m_uPortResetTotal01 : m_uPortResetTotal23;
+			const Uint32 uDelta = uTotalCycle - uResetTotal;
+			if (uDelta < (Uint32)SNSPC_CYCLE)
+			{
+				/* Hardware reset wins. TRUE means handled/discarded. */
+				return TRUE;
+			}
+
+			/* First write outside that SPC cycle retires the transient stamp. */
+			m_uPortResetValid &= (Uint8)~uGroup;
+		}
 	}
 
 	return m_Queue.Enqueue(uCycle, uAddr, uData);
@@ -106,6 +110,10 @@ void SNSpcIO::SyncQueueAll()
 void SNSpcIO::SyncQueue(Uint32 uCycle)
 {
 	SNQueueElementT *pElement;
+
+	/* AURORA_CPU_SPC_HOST_WORK_REDUCTION_V2_20260920_QUEUE_EMPTY */
+	if (m_Queue.IsEmpty())
+		return;
 
 	/* AURORA_BLACKTHORNE_APUIO_SAMECYCLE_V1_SYNC_20260919
 	 * A CPU->SPC port write is due when the SPC has REACHED its timestamp,
@@ -184,7 +192,8 @@ Uint8 SNSpcIO::Read8Trap(SNSpcT *pSpc, Uint32 uAddr)
 		#endif
 
 		#if SNSPCIO_WRITEQUEUE
-		pIO->SyncQueue(SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME));
+		if (!pIO->m_Queue.IsEmpty())
+			pIO->SyncQueue(SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME));
 		#endif
 
 		return pIO->m_Regs.apu_w[uAddr & 3];
@@ -226,29 +235,56 @@ void SNSpcIO::Write8Trap(SNSpcT *pSpc, Uint32 uAddr, Uint8 uData)
 	{
 	case 0xF1:	// control
 		{
-			const Int32 iCycle = SNSPCGetCounter(pSpc, SNSPC_COUNTER_TOTAL);
+			const Bool bTimer0 = (uData & 0x01u) ? TRUE : FALSE;
+			const Bool bTimer1 = (uData & 0x02u) ? TRUE : FALSE;
+			const Bool bTimer2 = (uData & 0x04u) ? TRUE : FALSE;
+			const Bool bTimer0Change =
+				(bTimer0 != pIO->m_Regs.spc_timer[0].bEnabled);
+			const Bool bTimer1Change =
+				(bTimer1 != pIO->m_Regs.spc_timer[1].bEnabled);
+			const Bool bTimer2Change =
+				(bTimer2 != pIO->m_Regs.spc_timer[2].bEnabled);
+			const Bool bResetPorts = (uData & 0x30u) ? TRUE : FALSE;
+			const Bool bNeedTotalCycle =
+				bResetPorts || bTimer0Change || bTimer1Change || bTimer2Change;
+			Int32 iCycle = 0;
+
+			if (bNeedTotalCycle)
+				iCycle = SNSPCGetCounter(pSpc, SNSPC_COUNTER_TOTAL);
+
 			#if SNSPCIO_WRITEQUEUE
-			if (uData & 0x30) pIO->SyncQueue(SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME));
+			if (bResetPorts && !pIO->m_Queue.IsEmpty())
+				pIO->SyncQueue(SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME));
 			#endif
-			if (uData&0x10)
+
+			if (uData & 0x10u)
 			{
-				pIO->m_Regs.apu_w[0]=0;
-				pIO->m_Regs.apu_w[1]=0;
+				pIO->m_Regs.apu_w[0] = 0;
+				pIO->m_Regs.apu_w[1] = 0;
 				/* AURORA_ZENKI_APUIO_F1_COLLISION_V1_1_20260920_F1 */
 				pIO->m_uPortResetTotal01 = (Uint32)iCycle;
 				pIO->m_uPortResetValid |= 0x01u;
 			}
-			if (uData&0x20)
+			if (uData & 0x20u)
 			{
-				pIO->m_Regs.apu_w[2]=0;
-				pIO->m_Regs.apu_w[3]=0;
+				pIO->m_Regs.apu_w[2] = 0;
+				pIO->m_Regs.apu_w[3] = 0;
 				pIO->m_uPortResetTotal23 = (Uint32)iCycle;
 				pIO->m_uPortResetValid |= 0x02u;
 			}
-			SNSpcTimerSetEnable(&pIO->m_Regs.spc_timer[0], iCycle, (uData & 1));
-			SNSpcTimerSetEnable(&pIO->m_Regs.spc_timer[1], iCycle, (uData & 2));
-			SNSpcTimerSetEnable(&pIO->m_Regs.spc_timer[2], iCycle, (uData & 4));
-			SNSPCSetRomEnable(pSpc, uData & 0x80);
+
+			if (bTimer0Change)
+				SNSpcTimerSetEnable(&pIO->m_Regs.spc_timer[0], iCycle, bTimer0);
+			if (bTimer1Change)
+				SNSpcTimerSetEnable(&pIO->m_Regs.spc_timer[1], iCycle, bTimer1);
+			if (bTimer2Change)
+				SNSpcTimerSetEnable(&pIO->m_Regs.spc_timer[2], iCycle, bTimer2);
+
+			{
+				const Bool bRomEnable = (uData & 0x80u) ? TRUE : FALSE;
+				if (bRomEnable != pSpc->bRomEnable)
+					SNSPCSetRomEnable(pSpc, bRomEnable);
+			}
 		}
 		break;
 	case 0xF2:	// dsp addr

@@ -1213,6 +1213,7 @@ static Uint32 SnesDbgHash32(const void *pData, Uint32 nBytes)
 
 
 #define SNES_SYNCPPUEVERYLINE (CODE_DEBUG && 0) 
+/* AURORA_CPU_SPC_DSP_PPU_HOST_WORK_REDUCTION_V4_20260920_RASTER */
 
 /* AURORA_SGB_AUDIO_V0_5_20260904
  * Transparent per-frame proxy used only while a real SGB firmware/game is
@@ -1271,6 +1272,7 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
     }
 #endif */     
 
+    /* AURORA_CPU_SPC_HOST_WORK_REDUCTION_V2_20260920_SCHED */
     /* AURORA_TOPGEAR_SPC_SYNC_ALGEBRA_V3_20260917
      * SNSPCGetCounter(FRAME) is Counter[FRAME] - Cycles. The legacy
      * expression subtracted that getter and then subtracted Cycles
@@ -1319,7 +1321,7 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
             (Uint32)SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
         if (bFlushAll)
             m_SpcIO.SyncQueueAll();
-        else
+        else if (!m_SpcIO.m_Queue.IsEmpty())
             m_SpcIO.SyncQueue(SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
         AuroraEECrashDiagBreadcrumb(
             AED_APUIO_QUEUE_RETURN,
@@ -1501,7 +1503,16 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 	SnesPPURegsT *pPPURegs = (SnesPPURegsT *)pSnes->m_PPU.GetRegs();
 
-	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	/* V4: duplicate only the catch-up routine's pure rejection predicates
+	 * here, so a proven no-op does not pay the call on common MMIO traffic. */
+	if (pCpu == &pSnes->m_Cpu &&
+	    pSnes->m_bRasterLineActive &&
+	    !pSnes->m_bRasterCatchupActive &&
+	    !(pCpu->uSignal & SNCPU_SIGNAL_DMA) &&
+	    (!pSnes->m_bRasterHBlankDone || !pSnes->m_bRasterHDMADone))
+	{
+		pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	}
 	uAddr &= 0xFFFF;
 
 	/* AURORA_TOPGEAR_COMMON_MMIO_GATE_V2_20260917
@@ -1768,7 +1779,16 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 {
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 
-	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	/* V4: duplicate only the catch-up routine's pure rejection predicates
+	 * here, so a proven no-op does not pay the call on common MMIO traffic. */
+	if (pCpu == &pSnes->m_Cpu &&
+	    pSnes->m_bRasterLineActive &&
+	    !pSnes->m_bRasterCatchupActive &&
+	    !(pCpu->uSignal & SNCPU_SIGNAL_DMA) &&
+	    (!pSnes->m_bRasterHBlankDone || !pSnes->m_bRasterHDMADone))
+	{
+		pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	}
 	uAddr &= 0xFFFF;
 
 	/* AURORA_TOPGEAR_COMMON_MMIO_GATE_V2_20260917
@@ -1843,11 +1863,9 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 			(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_FRAME) +
 			(Uint32)SNES_SPCWRITE_LATENCY;
 		/* AURORA_ZENKI_APUIO_F1_COLLISION_V1_1_20260920
-		 * Keep a monotonic companion timestamp for same-SPC-cycle $F1 reset
-		 * arbitration; queue ordering itself remains in FRAME time. */
-		const Uint32 uAPUIOTotalWriteCycle =
-			(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_TOTAL) +
-			(Uint32)SNES_SPCWRITE_LATENCY;
+		 * V5.1: declaration stays here, but the lazy TOTAL decision is
+		 * deliberately deferred until after every possible SyncSPC(). */
+		Uint32 uAPUIOTotalWriteCycle = 0;
 		#if SNSPCIO_WRITEQUEUE
 		SNQueueElementT *pPendingAPUIO = pSnes->m_SpcIO.m_Queue.Peek();
 		if (pPendingAPUIO && pPendingAPUIO->uCycle < uAPUIOWriteCycle)
@@ -1877,11 +1895,22 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 		    (Uint32)uData,
 		    (Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_FRAME),
 		    ATR_P_FLUSH);
+		/* AURORA_APUIO_LAZY_TOTAL_RACE_FIX_V1_20260920
+		 * SyncSPC() above may itself execute SPC $F1 and create a
+		 * collision stamp. Query that state only now, immediately
+		 * before enqueue, so a newly-created stamp receives a valid
+		 * monotonic TOTAL timestamp instead of zero. */
 		#if SNSPCIO_WRITEQUEUE
+		if (pSnes->m_SpcIO.NeedsPortResetCollisionCheck(uAddr & 3u))
+		{
+			uAPUIOTotalWriteCycle =
+				(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_TOTAL) +
+				(Uint32)SNES_SPCWRITE_LATENCY;
+		}
 		if (!pSnes->m_SpcIO.EnqueueWrite(
-		        uAPUIOWriteCycle,
-		        uAPUIOTotalWriteCycle,
-		        uAddr & 3, uData))
+				uAPUIOWriteCycle,
+				uAPUIOTotalWriteCycle,
+				uAddr & 3u, uData))
 		#endif
 		{
 			pSnes->SyncSPC(SNES_SPCWRITE_LATENCY);
@@ -1994,7 +2023,16 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read4000(SNCpuT *pCpu, Uint32 uAddr)
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 	SnesIO *pIO = &pSnes->m_IO;
 
-	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	/* V4: duplicate only the catch-up routine's pure rejection predicates
+	 * here, so a proven no-op does not pay the call on common MMIO traffic. */
+	if (pCpu == &pSnes->m_Cpu &&
+	    pSnes->m_bRasterLineActive &&
+	    !pSnes->m_bRasterCatchupActive &&
+	    !(pCpu->uSignal & SNCPU_SIGNAL_DMA) &&
+	    (!pSnes->m_bRasterHBlankDone || !pSnes->m_bRasterHDMADone))
+	{
+		pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	}
 
 	/* AURORA_TOPGEAR_CPU_IO_LOW_FAST_GATE_V3_20260917
 	 * Common CPU I/O ($4016/$4017/$4200-$421f) is below every auxiliary
@@ -2152,7 +2190,16 @@ void SNCPU_TRAPFUNC SnesSystem::Write4000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 {
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 
-	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	/* V4: duplicate only the catch-up routine's pure rejection predicates
+	 * here, so a proven no-op does not pay the call on common MMIO traffic. */
+	if (pCpu == &pSnes->m_Cpu &&
+	    pSnes->m_bRasterLineActive &&
+	    !pSnes->m_bRasterCatchupActive &&
+	    !(pCpu->uSignal & SNCPU_SIGNAL_DMA) &&
+	    (!pSnes->m_bRasterHBlankDone || !pSnes->m_bRasterHDMADone))
+	{
+		pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	}
 
 	/* AURORA_TOPGEAR_CPU_IO_LOW_FAST_GATE_V3_20260917
 	 * See Read4000(): common low CPU-I/O cannot hit MCC/DMA/S-DD1. */

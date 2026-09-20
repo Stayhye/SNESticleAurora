@@ -278,6 +278,10 @@
 /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916
  * Same r19 timing rule, one fewer host instruction in every case.
  * R5900 branch-likely annuls the delay slot when the branch is not taken. */
+/* AURORA_CPU_HOST_WORK_REDUCTION_V1_20260920
+ * Host-only optimization pass.  Every change below preserves the existing
+ * SNES-visible cycle deductions and architectural state; it only removes
+ * redundant R5900 work / wasted delay slots. */
 #define SNCPU_INDEX_READ_PENALTY(_base,_index) \
 		andi	t0,R_P,SNCPU_FLAG_X	;\
 		beql	t0,zr,2f			;\
@@ -290,19 +294,19 @@
 2:
 #define SNCPU_ADC8(_dest,_src)					\
 		jal		_SNCPU_ADC8						;\
-        nop
+        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF
 
 #define SNCPU_ADC16(_dest,_src)					\
 		jal		_SNCPU_ADC16					;\
-        nop
+        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF
 
 #define SNCPU_SBC8(_dest,_src)					\
 		jal		_SNCPU_SBC8						;\
-        nop
+        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF
 
 #define SNCPU_SBC16(_dest,_src)					\
 		jal		_SNCPU_SBC16					;\
-        nop
+        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF
 
 
 
@@ -465,10 +469,11 @@
 // if pccount >= SNCPU_BANK_SIZE then force bankswitch
 #define SNCPU_BREL_PC16(_rel)				\
         subu	R_PCCount,R_PCCount,_rel				;\
-        lui		t1,0xC000								;\
         sltiu	t0, R_PCCount,SNCPU_BANK_SIZE			;\
 		addu	R_PC,R_PC,_rel							;\
-        movz	R_PCCount,t1,t0 
+		beql	t0,zr,7f								;\
+		lui		R_PCCount,0xC000						;\
+7:
 
 /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916
  * Opcode dispatch already separates E=0/E=1, so native mode does not
@@ -785,9 +790,8 @@ _SNCPU_Write8:
 _SNCPU_Write8ZeroBank:
         lw      t1,SNCPU_pMem(R_pCpu)
         beq     t1,zr,_SNCPU_Write8ZeroBankTrap
-        nop
-        addiu   R_Cycles,R_Cycles,-SNCPU_CYCLE_SLOW
         addu    t0,t1,R_Addr
+        addiu   R_Cycles,R_Cycles,-SNCPU_CYCLE_SLOW
         jr      ra
         sb      R_Data,0(t0)
 
@@ -1001,9 +1005,8 @@ _SNCPU_Read8:
 _SNCPU_Read8ZeroBank:
         lw      t1,SNCPU_pMem(R_pCpu)
         beq     t1,zr,_SNCPU_Read8ZeroBankTrap
-        nop
-        addiu   R_Cycles,R_Cycles,-SNCPU_CYCLE_SLOW
         addu    t0,t1,R_Addr
+        addiu   R_Cycles,R_Cycles,-SNCPU_CYCLE_SLOW
         jr      ra
         lbu     R_Data,0(t0)
 
@@ -1627,10 +1630,9 @@ _SNCPU_UpdateDPMask:
 _SNCPU_DPLowZero:
 		lbu		t0,SNCPU_rE
 		beq		t0,zr,_SNCPU_DPMaskDone
-		nop
+		andi	t0,R_DP,0xFF00
 
 		// E=1 and DL=0: wrap indexed operands inside D's selected page.
-		andi	t0,R_DP,0xFF00
 		sll		t0,t0,16
 		ori		R_DPMASK,t0,0x00FF
 
@@ -1647,7 +1649,6 @@ _SNCPU_DPMaskDone:
 //
 
 _SNCPU_ADC8:
-        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF		 // clear overflow flag
 		move	t0,R_t2						     // t0 = target
         addu	R_t2,R_t2,R_t1					 // dest = target + src
         addu	R_t2,R_t2,R_fC					 // dest+= carry
@@ -1660,7 +1661,7 @@ _SNCPU_ADC8:
         or		R_P,R_P,t1
 
 		andi	t1,R_P,SNCPU_FLAG_D
-        bne		t1,zr,_SNCPU_ADC8_DECIMAL
+        bnel		t1,zr,_SNCPU_ADC8_DECIMAL
 		nop
 
 		jr		ra
@@ -1668,7 +1669,6 @@ _SNCPU_ADC8:
 
 
 _SNCPU_ADC16:
-        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF		
 		move	t0,R_t2						
         addu	R_t2,R_t2,R_t1				
         addu	R_t2,R_t2,R_fC					 // dest+= carry
@@ -1681,7 +1681,7 @@ _SNCPU_ADC16:
         or		R_P,R_P,t1
 
 		andi	t1,R_P,SNCPU_FLAG_D
-        bne		t1,zr,_SNCPU_ADC16_DECIMAL
+        bnel		t1,zr,_SNCPU_ADC16_DECIMAL
 		nop
 
 		jr		ra
@@ -1690,7 +1690,6 @@ _SNCPU_ADC16:
 
 
 _SNCPU_SBC8:
-        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF		
 		move	t0,R_t2						
         addu	R_t2,R_t2,R_t1				
         addu	R_t2,R_t2,R_fC					 // dest+= carry
@@ -1703,14 +1702,13 @@ _SNCPU_SBC8:
         or		R_P,R_P,t1
 
 		andi	t1,R_P,SNCPU_FLAG_D
-        bne		t1,zr,_SNCPU_SBC8_DECIMAL
+        bnel		t1,zr,_SNCPU_SBC8_DECIMAL
 		nop
 
 		jr		ra
 		nop
 
 _SNCPU_SBC16:
-        andi	R_P,R_P,SNCPU_FLAG_V ^ 0xFF		
 		move	t0,R_t2						
         addu	R_t2,R_t2,R_t1				
         addu	R_t2,R_t2,R_fC					 // dest+= carry
@@ -1723,7 +1721,7 @@ _SNCPU_SBC16:
         or		R_P,R_P,t1
 
 		andi	t1,R_P,SNCPU_FLAG_D
-        bne		t1,zr,_SNCPU_SBC16_DECIMAL
+        bnel		t1,zr,_SNCPU_SBC16_DECIMAL
 		nop
 
 		jr		ra
@@ -2133,10 +2131,10 @@ _SNCPUExecute_DoneNoRewind:
 
 	SNCPU_OP_E0(f0);
 		// BEQ Z=1
-        SNCPU_GETFLAG_Z(R_t1);
+        andi	R_t1,R_fZ,0xFFFF; /* V1: raw lazy-Z, same low-16 test */
 		SNCPU_FETCH8(R_t0)
 
-        SNCPU_BREAK_FALSE(R_t1);
+        SNCPU_BREAK_TRUE(R_t1);
 
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
@@ -2146,10 +2144,10 @@ _SNCPUExecute_DoneNoRewind:
 
 	SNCPU_OP_E1(f0);
 		// BEQ Z=1
-        SNCPU_GETFLAG_Z(R_t1);
+        andi	R_t1,R_fZ,0xFFFF; /* V1: raw lazy-Z, same low-16 test */
 		SNCPU_FETCH8(R_t0)
 
-        SNCPU_BREAK_FALSE(R_t1);
+        SNCPU_BREAK_TRUE(R_t1);
 
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
@@ -2159,10 +2157,10 @@ _SNCPUExecute_DoneNoRewind:
 
 	SNCPU_OP_E0(d0);
 		// BNE Z=0
-        SNCPU_GETFLAG_Z(R_t1);
+        andi	R_t1,R_fZ,0xFFFF; /* V1: raw lazy-Z, same low-16 test */
 		SNCPU_FETCH8(R_t0)
 
-        SNCPU_BREAK_TRUE(R_t1);
+        SNCPU_BREAK_FALSE(R_t1);
 
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
@@ -2172,10 +2170,10 @@ _SNCPUExecute_DoneNoRewind:
 
 	SNCPU_OP_E1(d0);
 		// BNE Z=0
-        SNCPU_GETFLAG_Z(R_t1);
+        andi	R_t1,R_fZ,0xFFFF; /* V1: raw lazy-Z, same low-16 test */
 		SNCPU_FETCH8(R_t0)
 
-        SNCPU_BREAK_TRUE(R_t1);
+        SNCPU_BREAK_FALSE(R_t1);
 
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
@@ -2186,10 +2184,9 @@ _SNCPUExecute_DoneNoRewind:
 
 	SNCPU_OP_E0(90);
 		// BCC
-        SNCPU_GETFLAG_C(R_t1);
 		SNCPU_FETCH8(R_t0)
 
-        SNCPU_BREAK_TRUE(R_t1);
+        SNCPU_BREAK_TRUE(R_fC);
 
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
@@ -2199,10 +2196,9 @@ _SNCPUExecute_DoneNoRewind:
 
 	SNCPU_OP_E1(90);
 		// BCC
-        SNCPU_GETFLAG_C(R_t1);
 		SNCPU_FETCH8(R_t0)
 
-        SNCPU_BREAK_TRUE(R_t1);
+        SNCPU_BREAK_TRUE(R_fC);
 
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
@@ -2212,10 +2208,9 @@ _SNCPUExecute_DoneNoRewind:
 
 	SNCPU_OP_E0(b0);
 		// BCS
-        SNCPU_GETFLAG_C(R_t1);
 		SNCPU_FETCH8(R_t0)
 
-        SNCPU_BREAK_FALSE(R_t1);
+        SNCPU_BREAK_FALSE(R_fC);
 
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
@@ -2225,10 +2220,9 @@ _SNCPUExecute_DoneNoRewind:
 
 	SNCPU_OP_E1(b0);
 		// BCS
-        SNCPU_GETFLAG_C(R_t1);
 		SNCPU_FETCH8(R_t0)
 
-        SNCPU_BREAK_FALSE(R_t1);
+        SNCPU_BREAK_FALSE(R_fC);
 
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
