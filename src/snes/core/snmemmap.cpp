@@ -66,7 +66,11 @@ static SnesMemMapT	_SnesMemMap_HiRom[]=
 {
 	// map slow rom
 	{0x00, 0x3F, 0x0000, 0xFFFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_ROM},
-	{0x40, 0x6F, 0x0000, 0xFFFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_ROM},
+	/* AURORA_V7_1_4_HIROM_40_7D_MAP_FIX_20260917
+	 * Standard HiROM full-bank ROM decode is $40-$7D.  The old $40-$6F
+	 * upper limit dropped banks $70-$7D, i.e. part of the large-cart
+	 * address space used by 32-Mbit HiROM boards. $7E-$7F remain WRAM. */
+	{0x40, 0x7D, 0x0000, 0xFFFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_ROM},
 
 	// map fast rom
 	{0x80, 0xBF, 0x0000, 0xFFFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_ROM},
@@ -137,21 +141,31 @@ static SnesMemMapT	_SnesMemMap_HiRom_DSP1[]=
 
 
 #if SNES_DSP1
-static SnesMemMapT _SnesMemMap_LoRom_DSP1[]={
+/* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: physical NEC DSP board decodes. */
+static SnesMemMapT _SnesMemMap_LoRom_DSP1_S[]={
+    {0x20,0x3F,0x8000,0xFFFF,SNCPU_CYCLE_FAST,SNESMEM_TYPE_DSP1},
+    {0xA0,0xBF,0x8000,0xFFFF,SNCPU_CYCLE_FAST,SNESMEM_TYPE_DSP1},
+    {0,0,0,0,SNESMEM_TYPE_NONE}
+};
+static SnesMemMapT _SnesMemMap_LoRom_DSP1_L[]={
+    {0x60,0x6F,0x0000,0x7FFF,SNCPU_CYCLE_FAST,SNESMEM_TYPE_DSP1},
+    {0xE0,0xEF,0x0000,0x7FFF,SNCPU_CYCLE_FAST,SNESMEM_TYPE_DSP1},
+    {0,0,0,0,SNESMEM_TYPE_NONE}
+};
+/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V2_DSP2_20260917
+ * DSP-2's real data decode includes only $6000-$6FFF plus $8000-$BFFF, but
+ * SNCpuT descriptors are 8-KiB pages.  Trap the containing $6000-$7FFF page
+ * and let ReadDSP1/WriteDSP1 preserve $7000-$7FFF as unmapped 0xFF. */
+static SnesMemMapT _SnesMemMap_LoRom_DSP2[]={
+    {0x20,0x3F,0x6000,0x7FFF,SNCPU_CYCLE_FAST,SNESMEM_TYPE_DSP1},
     {0x20,0x3F,0x8000,0xBFFF,SNCPU_CYCLE_FAST,SNESMEM_TYPE_DSP1},
+    {0xA0,0xBF,0x6000,0x7FFF,SNCPU_CYCLE_FAST,SNESMEM_TYPE_DSP1},
     {0xA0,0xBF,0x8000,0xBFFF,SNCPU_CYCLE_FAST,SNESMEM_TYPE_DSP1},
-    /* DR mirror $C0-$CF (regiao FastROM): jogos como Super Mario Kart
-       apontam o HDMA do Mode-7 para o espelho do DSP em $C0-$CF.
-       Sem isto o HDMA le ROM em vez do registrador de dados do DSP e a
-       matriz Mode-7 vira lixo -> pista achatada (mas a CPU, que usa
-       $30-$3F, funciona, por isso o jogo "roda" mesmo assim). Veja o
-       mapa de memoria do DSP-1 LoROM ($30-$3F / $C0-$CF). */
-    {0xC0,0xCF,0x8000,0xBFFF,SNCPU_CYCLE_FAST,SNESMEM_TYPE_DSP1},
-    /* SR (Status Register): $20-$3F:C000-FFFF + mirror $A0-$BF + $C0-$CF
-       Sem isto a CPU le ROM em vez do status e o DSP-1 trava */
-    {0x20,0x3F,0xC000,0xFFFF,SNCPU_CYCLE_FAST,SNESMEM_TYPE_DSP1},
-    {0xA0,0xBF,0xC000,0xFFFF,SNCPU_CYCLE_FAST,SNESMEM_TYPE_DSP1},
-    {0xC0,0xCF,0xC000,0xFFFF,SNCPU_CYCLE_FAST,SNESMEM_TYPE_DSP1},
+    {0,0,0,0,SNESMEM_TYPE_NONE}
+};
+static SnesMemMapT _SnesMemMap_LoRom_DSP3[]={
+    {0x20,0x3F,0x8000,0xFFFF,SNCPU_CYCLE_FAST,SNESMEM_TYPE_DSP1},
+    {0xA0,0xBF,0x8000,0xFFFF,SNCPU_CYCLE_FAST,SNESMEM_TYPE_DSP1},
     {0,0,0,0,SNESMEM_TYPE_NONE}
 };
 
@@ -252,11 +266,21 @@ static Uint32 _SnesSwcDramCoprocessorFlags(
         case 0xE3:
             uFlags = SNROM_FLAG_GAMEBOY;
             break;
-        case 0xF6:
-            uFlags = SNROM_FLAG_DSP2;
+        case 0xF3:
+            if (pInfo->RomMakeup == 0x20)
+                uFlags = SNROM_FLAG_CX4; /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
             break;
+        /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: $F6 is ST010/ST011 family, never DSP-2. */
         default:
             break;
+    }
+
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: header hardware identity first. */
+    if (uFlags & SNROM_FLAG_DSP1)
+    {
+        if (pInfo->RomType == 0x03 && pInfo->RomMakeup == 0x30) uFlags = SNROM_FLAG_DSP4;
+        else if (pInfo->RomType == 0x05 && pInfo->RomMakeup == 0x20) uFlags = SNROM_FLAG_DSP2;
+        else if (pInfo->RomType == 0x05 && pInfo->RomMakeup == 0x30 && pInfo->License == 0xB2) uFlags = SNROM_FLAG_DSP3;
     }
 
     if (uFlags & SNROM_FLAG_DSP1)
@@ -275,10 +299,10 @@ static Uint32 _SnesSwcDramCoprocessorFlags(
     if (!strncmp(uTitle, "METAL COMBAT", 12))
         uFlags = SNROM_FLAG_OBC1;
 
-    if (!strncmp(uTitle, "MEGAMAN X2", 10) ||
+    if (!uFlags && (!strncmp(uTitle, "MEGAMAN X2", 10) ||
         !strncmp(uTitle, "MEGAMAN X3", 10) ||
         !strncmp(uTitle, "ROCKMAN X2", 10) ||
-        !strncmp(uTitle, "ROCKMAN X3", 10))
+        !strncmp(uTitle, "ROCKMAN X3", 10)))
         uFlags = SNROM_FLAG_CX4;
 
     if ((pInfo->RomType & 0xF0) == 0x40)
@@ -440,6 +464,243 @@ static void _MapSuperFXRom(SNCpuT *pCpu, Uint8 *pRom, Uint32 uRomBytes, Int32 nB
             }
         }
     }
+}
+
+/* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: S-CPU <-> SuperFX shared cartridge-bus arbitration.
+ * Reference behavior: while GO+RON, CPU ROM reads see the GSU vector pattern;
+ * while GO+RAN, CPU RAM reads are open bus.  RAM writes remain accepted.
+ * Mapping is changed only when ownership changes, so ordinary carts and the
+ * normal SuperFX direct-fetch path pay no per-read branch. */
+
+static void _SnesSuperFXTrapRom(SNCpuT *pCpu,
+                                SNCpuReadTrapFuncT pRead,
+                                SNCpuWriteTrapFuncT pWrite)
+{
+    Uint32 bank, page;
+    for (bank = 0; bank <= 0x3Fu; ++bank)
+    {
+        Uint32 lo = (bank << 16) | 0x8000u;
+        Uint32 hi = lo | 0x800000u;
+        SNCPUSetTrap(pCpu, lo, 0x8000u, pRead, pWrite);
+        SNCPUSetTrap(pCpu, hi, 0x8000u, pRead, pWrite);
+    }
+    for (bank = 0; bank <= 0x1Fu; ++bank)
+    {
+        Uint32 lo = (0x40u + bank) << 16;
+        Uint32 hi = (0xC0u + bank) << 16;
+        for (page = 0; page < 0x10000u; page += SNCPU_BANK_SIZE)
+        {
+            SNCPUSetTrap(pCpu, lo + page, SNCPU_BANK_SIZE, pRead, pWrite);
+            SNCPUSetTrap(pCpu, hi + page, SNCPU_BANK_SIZE, pRead, pWrite);
+        }
+    }
+}
+
+static void _SnesSuperFXTrapRamMap(SNCpuT *pCpu, SnesMemMapT *pMap,
+                                   Uint32 nRamBytes,
+                                   SNCpuReadTrapFuncT pRead,
+                                   SNCpuWriteTrapFuncT pWrite)
+{
+    while (pMap && pMap->eMemType != SNESMEM_TYPE_NONE)
+    {
+        Uint32 bank;
+        Uint32 nBytes = (Uint32)pMap->uEndAddr - (Uint32)pMap->uStartAddr + 1u;
+        if (nRamBytes && nBytes >= nRamBytes) nBytes = nRamBytes;
+        nBytes = (nBytes + SNCPU_BANK_SIZE - 1u) & ~(SNCPU_BANK_SIZE - 1u);
+        if (nBytes > (Uint32)pMap->uEndAddr - (Uint32)pMap->uStartAddr + 1u)
+            nBytes = (Uint32)pMap->uEndAddr - (Uint32)pMap->uStartAddr + 1u;
+        for (bank = pMap->uStartBank; nBytes && bank <= pMap->uEndBank; ++bank)
+            SNCPUSetTrap(pCpu, (bank << 16) | pMap->uStartAddr,
+                         nBytes, pRead, pWrite);
+        ++pMap;
+    }
+}
+
+Bool SnesSystem::ResolveSuperFXRom(Uint32 uAddr, Uint32 *pOffset) const
+{
+    Uint8 bank;
+    Uint16 addr;
+    Uint32 logical;
+    if (!pOffset || !m_pRom || !m_pRom->GetData() || !m_pRom->GetBytes())
+        return FALSE;
+    bank = (Uint8)(uAddr >> 16);
+    addr = (Uint16)uAddr;
+
+    if (((bank <= 0x3F) || (bank >= 0x80 && bank <= 0xBF)) && addr >= 0x8000)
+        logical = ((Uint32)(bank & 0x3F) << 15) | (Uint32)(addr - 0x8000u);
+    else if ((bank >= 0x40 && bank <= 0x5F) ||
+             (bank >= 0xC0 && bank <= 0xDF))
+        logical = ((Uint32)(bank & 0x1F) << 16) | (Uint32)addr;
+    else
+        return FALSE;
+
+    *pOffset = _SnesMirrorRomOffset(m_pRom->GetBytes(), logical);
+    return TRUE;
+}
+
+Bool SnesSystem::ResolveSuperFXRam(Uint32 uAddr, Uint32 *pOffset) const
+{
+    Uint8 bank;
+    Uint16 addr;
+    Uint32 baseBank = 0;
+    Uint32 bankIndex;
+    Uint32 mappedPerBank;
+    Int32 board;
+    if (!pOffset || !m_pRom || !m_uSramSize)
+        return FALSE;
+
+    bank = (Uint8)(uAddr >> 16);
+    addr = (Uint16)uAddr;
+    board = _SnesSuperFXBoardType(m_pRom->GetRomTitle());
+
+    if (board != SNES_SUPERFX_BOARD_MC1 &&
+        ((bank <= 0x3F) || (bank >= 0x80 && bank <= 0xBF)) &&
+        addr >= 0x6000 && addr <= 0x7FFF)
+    {
+        *pOffset = ((Uint32)addr - 0x6000u) % m_uSramSize;
+        return TRUE;
+    }
+
+    if (board == SNES_SUPERFX_BOARD_MC1)
+    {
+        if (bank >= 0x60 && bank <= 0x7D) baseBank = 0x60;
+        else if (bank >= 0xE0) baseBank = 0xE0;
+        else return FALSE;
+    }
+    else if (board == SNES_SUPERFX_BOARD_GSU1)
+    {
+        if (bank >= 0x70 && bank <= 0x71) baseBank = 0x70;
+        else if (bank >= 0xF0 && bank <= 0xF1) baseBank = 0xF0;
+        else return FALSE;
+    }
+    else
+    {
+        if (bank >= 0x70 && bank <= 0x71) baseBank = 0x70;
+        else return FALSE;
+    }
+
+    mappedPerBank = m_uSramSize < 0x10000u ? m_uSramSize : 0x10000u;
+    if ((Uint32)addr >= mappedPerBank) return FALSE;
+    bankIndex = (Uint32)bank - baseBank;
+    *pOffset = (bankIndex * mappedPerBank + (Uint32)addr) % m_uSramSize;
+    return TRUE;
+}
+
+Uint8 SNCPU_TRAPFUNC SnesSystem::ReadGSURomBus(SNCpuT *pCpu, Uint32 uAddr)
+{
+    static const Uint8 vector[16] =
+        {0x00,0x01,0x00,0x01,0x04,0x01,0x00,0x01,
+         0x00,0x01,0x08,0x01,0x00,0x01,0x0C,0x01};
+    SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+    Uint32 off;
+    Uint8 v = pCpu->uMDR;
+    if (!pSnes || !pSnes->m_bSuperFX) return v;
+    if (!pSnes->m_GSU.SnesCanAccessRom())
+        v = vector[uAddr & 15u];
+    else if (pSnes->ResolveSuperFXRom(uAddr, &off))
+        v = pSnes->m_pRom->GetData()[off];
+    pCpu->uMDR = v;
+    return v;
+}
+
+void SNCPU_TRAPFUNC SnesSystem::WriteGSURomBus(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
+{
+    (void)uAddr;
+    pCpu->uMDR = uData;
+    /* Program ROM is not writable from the S-CPU. */
+}
+
+Uint8 SNCPU_TRAPFUNC SnesSystem::ReadGSURamBus(SNCpuT *pCpu, Uint32 uAddr)
+{
+    SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+    Uint32 off;
+    Uint8 v = pCpu->uMDR;
+    if (!pSnes || !pSnes->m_bSuperFX) return v;
+    if (pSnes->m_GSU.SnesCanAccessRam() && pSnes->ResolveSuperFXRam(uAddr, &off))
+        v = pSnes->m_SRam[off];
+    pCpu->uMDR = v;
+    return v;
+}
+
+void SNCPU_TRAPFUNC SnesSystem::WriteGSURamBus(SNCpuT *pCpu, Uint32 uAddr, Uint8 uData)
+{
+    SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
+    Uint32 off;
+    pCpu->uMDR = uData;
+    /* ares/full hardware model: S-CPU RAM writes are not blocked by RAN. */
+    if (pSnes && pSnes->m_bSuperFX && pSnes->ResolveSuperFXRam(uAddr, &off))
+        pSnes->m_SRam[off] = uData;
+}
+
+Bool SnesSystem::UpdateSuperFXBusMap(Bool bForce)
+{
+    Bool romBlocked, ramBlocked, changed = FALSE;
+    Int32 board;
+    Uint32 bank;
+    if (!m_bSuperFX || !m_pRom)
+    {
+        m_bSuperFXRomBlocked = FALSE;
+        m_bSuperFXRamBlocked = FALSE;
+        return FALSE;
+    }
+
+    romBlocked = m_GSU.SnesCanAccessRom() ? FALSE : TRUE;
+    ramBlocked = m_GSU.SnesCanAccessRam() ? FALSE : TRUE;
+    board = _SnesSuperFXBoardType(m_pRom->GetRomTitle());
+
+    if (bForce || romBlocked != m_bSuperFXRomBlocked)
+    {
+        changed = TRUE;
+        if (romBlocked)
+            _SnesSuperFXTrapRom(&m_Cpu, ReadGSURomBus, WriteGSURomBus);
+        else
+            _MapSuperFXRom(&m_Cpu, m_pRom->GetData(), m_pRom->GetBytes(), board);
+        m_bSuperFXRomBlocked = romBlocked;
+    }
+
+    if (bForce || ramBlocked != m_bSuperFXRamBlocked)
+    {
+        SnesMemMapT *pRamMap = (board == SNES_SUPERFX_BOARD_MC1) ?
+            _SnesMemMap_SuperFXMC1RAM :
+            ((board == SNES_SUPERFX_BOARD_GSU1) ?
+                _SnesMemMap_SuperFXGSU1RAM : _SnesMemMap_SuperFXRAM);
+        changed = TRUE;
+        if (ramBlocked)
+        {
+            _SnesSuperFXTrapRamMap(&m_Cpu, pRamMap, m_uSramSize,
+                                   ReadGSURamBus, WriteGSURamBus);
+            if (board != SNES_SUPERFX_BOARD_MC1)
+            {
+                for (bank = 0; bank <= 0x3Fu; ++bank)
+                {
+                    Uint32 a = (bank << 16) | 0x6000u;
+                    SNCPUSetTrap(&m_Cpu, a, 0x2000u, ReadGSURamBus, WriteGSURamBus);
+                    SNCPUSetTrap(&m_Cpu, a | 0x800000u, 0x2000u,
+                                 ReadGSURamBus, WriteGSURamBus);
+                }
+            }
+        }
+        else
+        {
+            MapMem(pRamMap);
+            if (board != SNES_SUPERFX_BOARD_MC1)
+            {
+                for (bank = 0; bank <= 0x3Fu; ++bank)
+                {
+                    Uint32 a = (bank << 16) | 0x6000u;
+                    SNCPUSetMemSpeed(&m_Cpu, a, 0x2000u, SNCPU_CYCLE_SLOW);
+                    SNCPUSetBank(&m_Cpu, a, 0x2000u, m_SRam, TRUE);
+                    a |= 0x800000u;
+                    SNCPUSetMemSpeed(&m_Cpu, a, 0x2000u, SNCPU_CYCLE_SLOW);
+                    SNCPUSetBank(&m_Cpu, a, 0x2000u, m_SRam, TRUE);
+                }
+            }
+        }
+        m_bSuperFXRamBlocked = ramBlocked;
+    }
+
+    if (changed) SNCPUMirror24BitBus(&m_Cpu);
+    return changed;
 }
 
 void SnesSystem::MapMem(SnesMemMapT *pMemMap)
@@ -1129,28 +1390,23 @@ void SnesSystem::MapSuperWildCardCoprocessor(void)
     if (uActive & SNROM_FLAG_DSP1)
     {
         m_pDsp = &m_DSP1;
-        MapSuperWildCardDevice(
-            m_SWC.GetExternalCartridgeMapping() == SNROM_MAPPING_HIROM ?
-                _SnesMemMap_HiRom_DSP1 : _SnesMemMap_LoRom_DSP1);
+        if (m_SWC.GetExternalCartridgeMapping() == SNROM_MAPPING_HIROM)
+            MapSuperWildCardDevice(_SnesMemMap_HiRom_DSP1);
+        else
+            MapSuperWildCardDevice(m_SWC.GetExternalCartridgeBytes() > 0x100000u ?
+                _SnesMemMap_LoRom_DSP1_L : _SnesMemMap_LoRom_DSP1_S);
     }
-    else if (uActive & SNROM_FLAG_DSP2)
-    {
-        m_pDsp = &m_DSP2;
-        MapSuperWildCardDevice(
-            m_SWC.GetExternalCartridgeMapping() == SNROM_MAPPING_HIROM ?
-                _SnesMemMap_HiRom_DSP1 : _SnesMemMap_LoRom_DSP1);
-    }
-    else if (uActive & SNROM_FLAG_DSP4)
-    {
-        m_pDsp = &m_DSP4;
-        MapSuperWildCardDevice(_SnesMemMap_LoRom_DSP4);
-    }
-    else if (uActive & SNROM_FLAG_DSP3)
-    {
-        /* The existing core intentionally exposes DSP-3 as an inert device
-         * until its HLE exists; accepting a donor must remain crash-safe. */
-        MapSuperWildCardDevice(_SnesMemMap_LoRom_DSP1);
-    }
+    else if ((uActive & SNROM_FLAG_DSP2) && m_SWC.GetExternalCartridgeMapping() == SNROM_MAPPING_LOROM)
+    { m_pDsp = &m_DSP2; MapSuperWildCardDevice(_SnesMemMap_LoRom_DSP2); }
+    else if ((uActive & SNROM_FLAG_DSP3) && m_SWC.GetExternalCartridgeMapping() == SNROM_MAPPING_LOROM)
+    { m_pDsp = &m_DSP3; MapSuperWildCardDevice(_SnesMemMap_LoRom_DSP3); }
+    else if ((uActive & SNROM_FLAG_DSP4) && m_SWC.GetExternalCartridgeMapping() == SNROM_MAPPING_LOROM)
+    { m_pDsp = &m_DSP4; MapSuperWildCardDevice(_SnesMemMap_LoRom_DSP4); }
+
+    /* AURORA_FDC52B8_AUDIT_DSP3_RELEASE_V1_20260917
+     * SWC donor/device changes can detach DSP-3 without SetSnesRom(). */
+    if (pOldDsp == &m_DSP3 && m_pDsp != &m_DSP3)
+        m_DSP3.ReleaseWork();
 
     if (m_pDsp && m_pDsp != pOldDsp)
         m_pDsp->Reset();
@@ -1400,6 +1656,8 @@ void SnesSystem::MapMem(SNRomMappingE eRomMapping, Uint32 uFlags)
 	m_bSDD1 = FALSE;
 	m_bSRTC = (uFlags & SNROM_FLAG_SRTC) ? TRUE : FALSE;
 	m_bSuperFX = (uFlags & SNROM_FLAG_SUPERFX) ? TRUE : FALSE;
+	m_bSuperFXRomBlocked = FALSE; /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
+	m_bSuperFXRamBlocked = FALSE;
 
 	switch (eRomMapping)
 	{
@@ -1419,27 +1677,13 @@ void SnesSystem::MapMem(SNRomMappingE eRomMapping, Uint32 uFlags)
 			}
 
 #if SNES_DSP1
-			if (uFlags & SNROM_FLAG_DSP1) { MapMem(_SnesMemMap_LoRom_DSP1); m_pDsp = &m_DSP1; }
-			if (uFlags & SNROM_FLAG_DSP2) { MapMem(_SnesMemMap_LoRom_DSP1); m_pDsp = &m_DSP2; }
-			// DSP-3 (SD Gundam GX): ainda SEM HLE proprio.  Mapeia a
-			// regiao do DSP, mas m_pDsp fica NULL -> a guarda anti-crash
-			// em ReadDSP1/WriteDSP1 mantem o emulador estavel (status
-			// "pronto", dados 0).  O jogo nao renderiza certo, mas nao
-			// trava.  (Sem dependencia de firmware externo.)
-			if (uFlags & SNROM_FLAG_DSP3)
-			{
-				MapMem(_SnesMemMap_LoRom_DSP1);
-				// m_pDsp permanece NULL (inerte)
+			if (uFlags & SNROM_FLAG_DSP1) {
+				MapMem(m_pRom->GetBytes() > 0x100000u ? _SnesMemMap_LoRom_DSP1_L : _SnesMemMap_LoRom_DSP1_S);
+				m_pDsp = &m_DSP1;
 			}
-			// DSP-4 (Top Gear 3000): HLE self-contained -- NAO precisa de
-			// firmware.  O chip esta sempre disponivel, entao a regiao do
-			// DSP e' sempre mapeada e m_pDsp aponta para o HLE.
-			if (uFlags & SNROM_FLAG_DSP4)
-			{
-				/* AURORA_DSP4_REAL_LOROM_MAP_20260831 */
-				MapMem(_SnesMemMap_LoRom_DSP4);
-				m_pDsp = &m_DSP4;
-			}
+			if (uFlags & SNROM_FLAG_DSP2) { MapMem(_SnesMemMap_LoRom_DSP2); m_pDsp = &m_DSP2; }
+			if (uFlags & SNROM_FLAG_DSP3) { MapMem(_SnesMemMap_LoRom_DSP3); m_pDsp = &m_DSP3; }
+			if (uFlags & SNROM_FLAG_DSP4) { MapMem(_SnesMemMap_LoRom_DSP4); m_pDsp = &m_DSP4; }
 #endif
 			if (uFlags & SNROM_FLAG_OBC1) { MapMem(_SnesMemMap_OBC1); }
 			if (uFlags & SNROM_FLAG_CX4)
@@ -1515,11 +1759,7 @@ void SnesSystem::MapMem(SNRomMappingE eRomMapping, Uint32 uFlags)
 				MapMem(_SnesMemMap_HiRom_DSP1);
 				m_pDsp = &m_DSP1;;
 			}
-			if (uFlags & SNROM_FLAG_DSP2)
-			{
-				MapMem(_SnesMemMap_HiRom_DSP1);
-				m_pDsp = &m_DSP2;
-			}
+			/* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: no synthetic HiROM DSP-2 board. */
 #endif
 			if (uFlags & SNROM_FLAG_OBC1) { MapMem(_SnesMemMap_OBC1); }
 			break;

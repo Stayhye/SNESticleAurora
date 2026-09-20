@@ -502,25 +502,48 @@ static size_t AuroraGpSPAudioBatch(const int16_t *data, size_t frames)
             return frames;
     }
 
-    /* Conservative fallback if the specialised path ever declines a batch. */
+    /* AURORA_GBA_AUDIO_INTERLEAVED_GAIN_FASTPATH_V4_20260917
+     * V7 merge of the accepted V4 optimization onto the current GBA bridge.
+     * The existing AuroraGpSPScaleVolume() arithmetic is unchanged.  For
+     * non-unity gain we keep the scaled batch interleaved and offer it to the
+     * same native libretro mixer path.  If that path declines, the exact
+     * current split-L/R fallback is retained.  Unity gain still uses the
+     * zero-copy attempt immediately above and falls back exactly as before. */
     {
         size_t pos = 0;
+        static Int16 interleaved[512 * 2];
         Int16 left[512];
         Int16 right[512];
+        AudMixBuffer *aud = (AudMixBuffer *)p->mix;
 
         while (pos < frames)
         {
             size_t i;
             size_t batch = frames - pos;
+            bool accepted = false;
             if (batch > 512U) batch = 512U;
+
             for (i = 0; i < batch; ++i)
             {
-                left[i] = AuroraGpSPScaleVolume(
+                interleaved[i * 2U + 0U] = AuroraGpSPScaleVolume(
                     data[(pos + i) * 2U + 0U], gain);
-                right[i] = AuroraGpSPScaleVolume(
+                interleaved[i * 2U + 1U] = AuroraGpSPScaleVolume(
                     data[(pos + i) * 2U + 1U], gain);
             }
-            p->mix->OutputSamplesStereo(left, right, (Int32)batch);
+
+            if (gain != 200)
+                accepted = aud->OutputLibretroInterleaved(
+                    interleaved, (Int32)batch);
+
+            if (!accepted)
+            {
+                for (i = 0; i < batch; ++i)
+                {
+                    left[i] = interleaved[i * 2U + 0U];
+                    right[i] = interleaved[i * 2U + 1U];
+                }
+                p->mix->OutputSamplesStereo(left, right, (Int32)batch);
+            }
             pos += batch;
         }
     }

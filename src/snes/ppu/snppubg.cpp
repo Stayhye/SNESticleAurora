@@ -368,11 +368,56 @@ static void _FetchBG8x8Offset2(Uint32 uScrollX, Uint32 uScrollY, Int32 iLine, Sn
 
 static void _GetScreenPtrs(SnesPPUScreenT **ppScreen, SnesPPU *pPPU, Uint32 uScrAddr, Uint32 uScrSize)
 {
-	// get pointers to screens
-	ppScreen[0] = (SnesPPUScreenT *)pPPU->GetVramPtr(uScrAddr + _SnesPPU_ScrSizeOffset[uScrSize][0]);
-	ppScreen[1] = (SnesPPUScreenT *)pPPU->GetVramPtr(uScrAddr + _SnesPPU_ScrSizeOffset[uScrSize][1]);
-	ppScreen[2] = (SnesPPUScreenT *)pPPU->GetVramPtr(uScrAddr + _SnesPPU_ScrSizeOffset[uScrSize][2]);
-	ppScreen[3] = (SnesPPUScreenT *)pPPU->GetVramPtr(uScrAddr + _SnesPPU_ScrSizeOffset[uScrSize][3]);
+	/* AURORA_TOPGEAR_BG_SCREENPTR_ALIAS_V5_20260917
+	 * DecodeBGInfo constrains uScrSize to 0..3. Preserve GetVramPtr() on
+	 * every UNIQUE address so the 0x7fff VRAM wrap remains per-address. */
+	ppScreen[0] = (SnesPPUScreenT *)pPPU->GetVramPtr(uScrAddr);
+
+	switch (uScrSize)
+	{
+	case 0: /* 32x32: all four abstract screens alias screen 0 */
+		ppScreen[1] = ppScreen[0];
+		ppScreen[2] = ppScreen[0];
+		ppScreen[3] = ppScreen[0];
+		break;
+
+	case 1: /* 64x32: 0/2 and 1/3 alias */
+		ppScreen[1] =
+			(SnesPPUScreenT *)pPPU->GetVramPtr(uScrAddr + 0x0400);
+		ppScreen[2] = ppScreen[0];
+		ppScreen[3] = ppScreen[1];
+		break;
+
+	case 2: /* 32x64: 0/1 and 2/3 alias */
+		ppScreen[1] = ppScreen[0];
+		ppScreen[2] =
+			(SnesPPUScreenT *)pPPU->GetVramPtr(uScrAddr + 0x0400);
+		ppScreen[3] = ppScreen[2];
+		break;
+
+	case 3: /* 64x64: four distinct screens */
+		ppScreen[1] =
+			(SnesPPUScreenT *)pPPU->GetVramPtr(uScrAddr + 0x0400);
+		ppScreen[2] =
+			(SnesPPUScreenT *)pPPU->GetVramPtr(uScrAddr + 0x0800);
+		ppScreen[3] =
+			(SnesPPUScreenT *)pPPU->GetVramPtr(uScrAddr + 0x0C00);
+		break;
+
+	default:
+		/* Private helper callers are expected to obey DecodeBGInfo's &3.
+		 * Keep an explicit conservative fallback instead of aliasing a bad
+		 * value silently if that invariant is ever broken. */
+		ppScreen[0] = (SnesPPUScreenT *)pPPU->GetVramPtr(
+			uScrAddr + _SnesPPU_ScrSizeOffset[uScrSize & 3][0]);
+		ppScreen[1] = (SnesPPUScreenT *)pPPU->GetVramPtr(
+			uScrAddr + _SnesPPU_ScrSizeOffset[uScrSize & 3][1]);
+		ppScreen[2] = (SnesPPUScreenT *)pPPU->GetVramPtr(
+			uScrAddr + _SnesPPU_ScrSizeOffset[uScrSize & 3][2]);
+		ppScreen[3] = (SnesPPUScreenT *)pPPU->GetVramPtr(
+			uScrAddr + _SnesPPU_ScrSizeOffset[uScrSize & 3][3]);
+		break;
+	}
 }
 
 

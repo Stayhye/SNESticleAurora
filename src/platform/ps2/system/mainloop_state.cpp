@@ -2633,6 +2633,12 @@ static Uint32 _MainLoop_SegaStateCapacity = 0;
 static Uint8 *_MainLoop_SegaCompressed = NULL;
 static Uint32 _MainLoop_SegaCompressedCapacity = 0;
 
+/* AURORA_GBA_STATE_LIFECYCLE_V2_20260916
+ * GBA pins the generic raw/compression workspace across frames.
+ * It is reserved before gpSP's greedy 1 MiB ROM-cache allocator runs and is
+ * released at the ROM teardown boundary. */
+static Bool _MainLoop_GbaStateScratchPinned = FALSE;
+
 static Bool _MainLoopStateIsSwc()
 {
     return (_pSystem == _pSnes && _pSnes &&
@@ -2648,6 +2654,13 @@ static Bool _MainLoopStateIsSgb()
 
 static void _MainLoopStateReleaseSegaScratch()
 {
+    /* Save/Load guards must not surrender the GBA pre-reserved workspace.
+     * _MainLoopUnloadRom() sets _pSystem=NULL before
+     * MainLoopStateOnRomChanged(), so real teardown still frees it. */
+    if (_MainLoop_GbaStateScratchPinned && _pSystem == _pGba)
+        return;
+
+    _MainLoop_GbaStateScratchPinned = FALSE;
     if (_MainLoop_SegaStateData) free(_MainLoop_SegaStateData);
     if (_MainLoop_SegaCompressed) free(_MainLoop_SegaCompressed);
     _MainLoop_SegaStateData = NULL;
@@ -2728,6 +2741,46 @@ static Uint8 *_MainLoopStateGetCompressedBuffer(Uint32 nNeed, Uint32 *pCapacity)
     if (pCapacity) *pCapacity = _MainLoop_SegaCompressedCapacity;
     return _MainLoop_SegaCompressed;
 }
+
+
+/* AURORA_GBA_STATE_LIFECYCLE_V2_20260916
+ * Reserve both buffers before gpSP retro_init()/init_gamepak_buffer().
+ * Current gpSP uses 416 KiB raw; compression limit is raw*110%+128. */
+Bool MainLoopStateReserveGbaScratch(Uint32 nStateBytes)
+{
+    Uint32 nCompressedBytes;
+    Uint32 nActualCompressed = 0;
+
+    _MainLoop_GbaStateScratchPinned = FALSE;
+    _MainLoopStateReleaseSegaScratch();
+
+    if (!nStateBytes)
+        return FALSE;
+
+    nCompressedBytes = _MainLoopStateCompressedLimit(nStateBytes);
+    if (!nCompressedBytes ||
+        !_MainLoopStateEnsureSegaStateData(nStateBytes) ||
+        !_MainLoopStateGetCompressedBuffer(
+            nCompressedBytes, &nActualCompressed) ||
+        nActualCompressed < nCompressedBytes)
+    {
+        _MainLoop_GbaStateScratchPinned = FALSE;
+        _MainLoopStateReleaseSegaScratch();
+        return FALSE;
+    }
+
+    _MainLoop_GbaStateScratchPinned = TRUE;
+    return TRUE;
+}
+
+
+void MainLoopStateReleaseGbaScratch()
+{
+    _MainLoop_GbaStateScratchPinned = FALSE;
+    _MainLoopStateReleaseSegaScratch();
+}
+
+
 static Int32 _MainLoop_StateUnformattedCard = -1;
 static Char _MainLoop_StateConfigPath[1024] = "";
 

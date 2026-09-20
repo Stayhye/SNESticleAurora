@@ -40,6 +40,8 @@ public:
 	virtual Bool	GetChannelState(Int32 iChannel, Uint8 *pEnvX, Uint8 *pOutX);
 	virtual void	KeyOn(Int32 iChannel);
 	virtual void	KeyOff(Int32 iChannel);
+	/* AURORA_SPC700_MEGA_ACCURACY_V1_20260916 */
+	virtual void SoftReset();
 
 	void	Reset();
 	void	SaveState(struct SNStateSPCDSPT *pState);
@@ -74,7 +76,7 @@ class    SNSpcDspMixFull : public SNSpcDspMix
 	Int32	OutputSampleModulated(Int32 iChannel, Int16 *pOut, Uint16 *pFrac,
 			const Int16 *pPitchMod, Int32 nSamples, Int32 nSampleRate);
 	Int32   OutputNoise(Int16 *pOut, Uint16 *pFrac, Int32 nSamples, Int32 nSampleRate);
-	void	FilterEcho(Int16 *pLeftEcho, Int16 *pRightEcho, Int32 nSamples, Int32 nSampleRate, Bool bEchoSPCMem);
+	void	FilterEcho(Int16 *pLeftEcho, Int16 *pRightEcho, Int32 nSamples, Int32 nSampleRate, Bool bEchoWrite);
 public:
 	void	Reset();
 	void	Mix(class CMixBuffer *pOutBuffer);

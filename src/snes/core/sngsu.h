@@ -72,7 +72,7 @@ public:
     // --- Acesso do lado SNES aos registradores/cache ($3000-$34FF) ---
     // uOffset = endereco & 0x3FFF (ja relativo a $3000? nao: passamos o
     // endereco baixo 0x3000-0x34FF e tratamos os espelhos aqui).
-    Uint8 ReadReg (Uint16 uAddrLow);          // uAddrLow = endereco & 0xFFFF
+    Uint8 ReadReg (Uint16 uAddrLow, Uint8 uOpenBus = 0); /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
     void  WriteReg(Uint16 uAddrLow, Uint8 uData);
 
     // --- Acesso do lado SNES a Game Pak ROM/RAM (arbitragem via SCMR) ---
@@ -166,6 +166,8 @@ private:
 
     // ultimo endereco de RAM acessado (para SBK)
     Uint16 m_LastRamAddr;
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: real S-CPU R0-R15 write latch. */
+    Uint8  m_CpuRegLatch;
 
     // --- graficos (PLOT / pixel cache) ---
     Uint8  m_Color;            // registrador COLOR
@@ -190,6 +192,10 @@ private:
     Uint8  SfrLow()  const;
     Uint8  SfrHigh() const;
     void   SfrWriteLow(Uint8 v);
+    Uint16 DecodeCpuReadAddr(Uint16 a, Bool *pMapped) const;
+    Uint16 DecodeCpuWriteAddr(Uint16 a, Bool *pMapped) const;
+    Bool   FastMultiplyEnabled() const
+    { return (m_Revision != SNGSU_REVISION_MC1 && (m_CFGR & 0x20)) ? TRUE : FALSE; }
 
     Uint32 RomOffset(Uint8 uBank, Uint16 uAddr) const;  // GSU addr -> offset linear
     Uint8  RawCodeRead(Uint16 uAddr) const;             // sem passar pelo code-cache

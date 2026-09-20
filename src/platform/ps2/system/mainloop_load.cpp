@@ -1253,78 +1253,205 @@ enum
      * distinct passthrough Game Pak backing. Keep a 4 MiB rung for 32-Mbit
      * carts and permit the SNES loader's existing ExLoROM range up to 8 MiB. */
     MAINLOOP_SWC_CART_32MBIT_BYTES = 4 * 1024 * 1024,
-    MAINLOOP_SWC_CART_RESERVE_BYTES = 8 * 1024 * 1024
+    MAINLOOP_SWC_CART_RESERVE_BYTES = 8 * 1024 * 1024,
+    MAINLOOP_SWC_DRAM_BYTES = 4 * 1024 * 1024, /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916 */
+    /* AURORA_SNES_32MBIT_HOST_GUARD_FIX_V1_20260918 */
+    /* AURORA_SNES_32MBIT_HOST_GUARD_NEWLINE_HOTFIX_V2_20260918: literal \\n tokens repaired/validated. */
+    MAINLOOP_SNES_HOST_READ_GUARD_BYTES = 16,
+    MAINLOOP_SWC_ARENA_BYTES =
+        MAINLOOP_SWC_DRAM_BYTES +
+        MAINLOOP_SWC_CART_32MBIT_BYTES +
+        MAINLOOP_SNES_HOST_READ_GUARD_BYTES
 };
 
 static Uint8 *s_pSwcCartReserve = NULL;
 static Uint32 s_uSwcCartReserveBytes = 0;
 
+/* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916
+ * Keep copier DRAM separate from the hot Game Pak backing at the emulated
+ * hardware level. AURORA_SWC_32MBIT_ARENA_V1_2_20260916 may source both from one HOST allocation, but the
+ * two 4 MiB slices never overlap and remain separate physical memories. */
+static Uint8 *s_pSwcDramReserve = NULL;
+static Uint32 s_uSwcDramReserveBytes = 0;
+static Bool s_bSwcDramReserveLoaned = FALSE; /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916 */
+
+/* AURORA_SWC_32MBIT_ARENA_V1_2_20260916
+ * Host-only arena. Ownership belongs exclusively to the frontend. The SWC
+ * may borrow the first half and SnesRom may borrow the second half. */
+static Uint8 *s_pSwcArena = NULL;
+static Uint32 s_uSwcArenaBytes = 0;
+
+static Bool _MainLoopSwcCartReserveIsArenaSlice()
+{
+    return s_pSwcArena &&
+           s_pSwcCartReserve == s_pSwcArena + MAINLOOP_SWC_DRAM_BYTES
+        ? TRUE : FALSE;
+}
+
+static Bool _MainLoopSwcDramReserveIsArenaSlice()
+{
+    return s_pSwcArena && s_pSwcDramReserve == s_pSwcArena
+        ? TRUE : FALSE;
+}
+
+static void _MainLoopSwcMaybeReleaseArena()
+{
+    if (!s_pSwcArena || s_bSwcDramReserveLoaned ||
+        s_pSwcDramReserve || s_pSwcCartReserve)
+        return;
+
+    free(s_pSwcArena);
+    s_pSwcArena = NULL;
+    s_uSwcArenaBytes = 0;
+}
+
+static void _MainLoopSwcReleaseDramReserve()
+{
+    /* Never invalidate live copier DRAM. */
+    if (s_bSwcDramReserveLoaned)
+    {
+        if (_pSnes && _pSnes->IsSuperWildCard())
+            return;
+        s_bSwcDramReserveLoaned = FALSE;
+    }
+
+    if (s_pSwcDramReserve)
+    {
+        if (!_MainLoopSwcDramReserveIsArenaSlice())
+            free(s_pSwcDramReserve);
+        s_pSwcDramReserve = NULL;
+    }
+    s_uSwcDramReserveBytes = 0;
+    _MainLoopSwcMaybeReleaseArena();
+}
+
 static void _MainLoopSwcReleaseCartReserve()
 {
     if (s_pSwcCartReserve)
     {
-        free(s_pSwcCartReserve);
+        if (!_MainLoopSwcCartReserveIsArenaSlice())
+            free(s_pSwcCartReserve);
         s_pSwcCartReserve = NULL;
     }
     s_uSwcCartReserveBytes = 0;
+    _MainLoopSwcMaybeReleaseArena();
+}
+
+static Bool _MainLoopSwcEnsureArena()
+{
+    if (s_pSwcArena && s_uSwcArenaBytes >= MAINLOOP_SWC_ARENA_BYTES)
+    {
+        s_pSwcDramReserve = s_pSwcArena;
+        s_uSwcDramReserveBytes = MAINLOOP_SWC_DRAM_BYTES;
+        s_pSwcCartReserve = s_pSwcArena + MAINLOOP_SWC_DRAM_BYTES;
+        s_uSwcCartReserveBytes =
+            MAINLOOP_SWC_CART_32MBIT_BYTES +
+            MAINLOOP_SNES_HOST_READ_GUARD_BYTES;
+        return TRUE;
+    }
+
+    if (s_pSwcDramReserve || s_pSwcCartReserve || s_bSwcDramReserveLoaned)
+        return FALSE;
+
+    s_pSwcArena = (Uint8 *)malloc((size_t)MAINLOOP_SWC_ARENA_BYTES);
+    if (!s_pSwcArena)
+        return FALSE;
+
+    s_uSwcArenaBytes = MAINLOOP_SWC_ARENA_BYTES;
+    s_pSwcDramReserve = s_pSwcArena;
+    s_uSwcDramReserveBytes = MAINLOOP_SWC_DRAM_BYTES;
+    s_pSwcCartReserve = s_pSwcArena + MAINLOOP_SWC_DRAM_BYTES;
+    s_uSwcCartReserveBytes =
+            MAINLOOP_SWC_CART_32MBIT_BYTES +
+            MAINLOOP_SNES_HOST_READ_GUARD_BYTES;
+    printf("[SWC] reserved one %u-byte arena (4 MiB DRAM + 4 MiB cart)\n",
+           (unsigned)s_uSwcArenaBytes);
+    return TRUE;
+}
+
+static Bool _MainLoopSwcEnsureDramReserve()
+{
+    if (s_pSwcDramReserve &&
+        s_uSwcDramReserveBytes >= MAINLOOP_SWC_DRAM_BYTES)
+        return TRUE;
+
+    if (s_pSwcArena && s_uSwcArenaBytes >= MAINLOOP_SWC_ARENA_BYTES)
+    {
+        s_pSwcDramReserve = s_pSwcArena;
+        s_uSwcDramReserveBytes = MAINLOOP_SWC_DRAM_BYTES;
+        return TRUE;
+    }
+
+    _MainLoopSwcReleaseDramReserve();
+    s_pSwcDramReserve = (Uint8 *)malloc((size_t)MAINLOOP_SWC_DRAM_BYTES);
+    if (!s_pSwcDramReserve)
+    {
+        printf("[SWC] pre-core 4 MiB DRAM reserve unavailable; "
+               "using internal-allocation fallback\n");
+        return FALSE;
+    }
+    s_uSwcDramReserveBytes = MAINLOOP_SWC_DRAM_BYTES;
+    return TRUE;
 }
 
 static Bool _MainLoopSwcEnsureCartReserve(Uint32 nBytes)
 {
+    Uint32 nHostBytes;
+
     if (!nBytes || nBytes > MAINLOOP_SWC_CART_RESERVE_BYTES)
         return FALSE;
+    if (nBytes > 0xffffffffu - MAINLOOP_SNES_HOST_READ_GUARD_BYTES)
+        return FALSE;
 
-    if (s_pSwcCartReserve && s_uSwcCartReserveBytes == nBytes)
+    nHostBytes = nBytes + MAINLOOP_SNES_HOST_READ_GUARD_BYTES;
+
+    if (s_pSwcCartReserve && s_uSwcCartReserveBytes >= nHostBytes)
         return TRUE;
 
-    if (s_pSwcCartReserve && s_uSwcCartReserveBytes > nBytes)
+    /* AURORA_SNES_32MBIT_HOST_GUARD_FIX_V1_20260918
+     * Logical cart remains <=32 Mbit; the host slice gets only the tiny
+     * readable tail required by the R5900 direct-read fast path. */
+    if (nBytes <= MAINLOOP_SWC_CART_32MBIT_BYTES &&
+        s_pSwcArena && s_uSwcArenaBytes >= MAINLOOP_SWC_ARENA_BYTES)
     {
-        /* AURORA_LOADER_REVIEW_V2_3_FINAL_OVER_V2_20260915: shrink é oportunista; falha preserva o bloco antigo. */
-        Uint8 *pSmaller = (Uint8 *)realloc(
-            s_pSwcCartReserve, (size_t)nBytes);
-        if (pSmaller)
-        {
-            s_pSwcCartReserve = pSmaller;
-            s_uSwcCartReserveBytes = nBytes;
-            printf("[SWC] cart backing shrunk to %u bytes\n",
-                   (unsigned)nBytes);
-        }
-        else
-        {
-            printf("[SWC] cart backing shrink declined; keeping %u bytes\n",
-                   (unsigned)s_uSwcCartReserveBytes);
-        }
+        s_pSwcCartReserve = s_pSwcArena + MAINLOOP_SWC_DRAM_BYTES;
+        s_uSwcCartReserveBytes =
+            MAINLOOP_SWC_CART_32MBIT_BYTES +
+            MAINLOOP_SNES_HOST_READ_GUARD_BYTES;
         return TRUE;
     }
 
     _MainLoopSwcReleaseCartReserve();
-
-    s_pSwcCartReserve = (Uint8 *)malloc((size_t)nBytes);
+    s_pSwcCartReserve = (Uint8 *)malloc((size_t)nHostBytes);
     if (!s_pSwcCartReserve)
     {
-        printf("[SWC] %u-byte cart backing unavailable; "
-               "using normal allocation fallback\n",
-               (unsigned)nBytes);
+        printf("[SWC] %u-byte cart backing (+guard) unavailable; "
+               "using normal fallback\n", (unsigned)nBytes);
         return FALSE;
     }
-
-    s_uSwcCartReserveBytes = nBytes;
-    printf("[SWC] reserved %u bytes contiguous backing for external cartridge\n",
-           (unsigned)s_uSwcCartReserveBytes);
+    s_uSwcCartReserveBytes = nHostBytes;
     return TRUE;
 }
 
-/* AURORA_LOADER_REVIEW_V2_20260915
- * Reserve cartridge backing before constructing SnesSystem and before the
- * copier allocates its own 4 MiB DRAM. Try 8 MiB first, then 4 MiB.
- * Failure remains non-fatal so disk-only boot retains the old low-RAM path. */
 static Uint32 _MainLoopSwcPrepareCartHeadroom()
 {
-    /* AURORA_SWC_32MBIT_FIRST_HEADROOM_V1_20260915
-     * Preserve exactly the 4 MiB needed by a classic 32-Mbit Game Pak.
-     * Reserving 8 MiB here only increases pre-core heap pressure; larger
-     * cartridges may still attempt their exact allocation at hot insert. */
+    /* AURORA_SWC_32MBIT_ARENA_V1_2_20260916
+     * A normal BIOS launch and a post-L2+R3 relaunch must not depend on
+     * allocator history. First ask for one 8 MiB block and split it 4+4.
+     * If that exact block is unavailable, fall back to v1_1's independent
+     * 4 MiB allocations instead of making the BIOS fail. */
+    if (_pSnes && _pSnes->IsSuperWildCard())
+        return s_uSwcCartReserveBytes;
+
+    s_bSwcDramReserveLoaned = FALSE;
     _MainLoopSwcReleaseCartReserve();
+    _MainLoopSwcReleaseDramReserve();
+
+    if (_MainLoopSwcEnsureArena())
+        return MAINLOOP_SWC_CART_32MBIT_BYTES;
+
+    if (!_MainLoopSwcEnsureDramReserve())
+        return 0;
 
     if (_MainLoopSwcEnsureCartReserve(MAINLOOP_SWC_CART_32MBIT_BYTES))
         return MAINLOOP_SWC_CART_32MBIT_BYTES;
@@ -1337,13 +1464,17 @@ static Bool _MainLoopEnsureSnesSystemWithSwcHeadroom()
     if (_MainLoopEnsureSnesSystem())
         return TRUE;
 
-    if (s_uSwcCartReserveBytes > MAINLOOP_SWC_CART_32MBIT_BYTES)
+    /* AURORA_SWC_32MBIT_ARENA_V1_2_20260916
+     * An arena cannot release only its second half back to malloc. If the
+     * core itself cannot be constructed with the full 8 MiB parked, release
+     * the whole host arena and preserve the historical low-memory fallback. */
+    if (s_pSwcArena)
     {
         _MainLoopSwcReleaseCartReserve();
-        (void)_MainLoopSwcEnsureCartReserve(
-            MAINLOOP_SWC_CART_32MBIT_BYTES);
+        _MainLoopSwcReleaseDramReserve();
         if (_MainLoopEnsureSnesSystem())
             return TRUE;
+        return FALSE;
     }
 
     if (s_uSwcCartReserveBytes)
@@ -1353,6 +1484,12 @@ static Bool _MainLoopEnsureSnesSystemWithSwcHeadroom()
             return TRUE;
     }
 
+    if (s_pSwcDramReserve)
+    {
+        _MainLoopSwcReleaseDramReserve();
+        if (_MainLoopEnsureSnesSystem())
+            return TRUE;
+    }
     return FALSE;
 }
 
@@ -1361,13 +1498,13 @@ static Bool _MainLoopEnsureSwcRasterWithHeadroom()
     if (MainLoopEnsureGameplayRasterWidth(256))
         return TRUE;
 
-    if (s_uSwcCartReserveBytes > MAINLOOP_SWC_CART_32MBIT_BYTES)
+    /* AURORA_SWC_32MBIT_ARENA_V1_2_20260916: if a rare video reinit needs EE heap, an unopened SWC may
+     * discard its arena as one unit. A live borrowed DRAM is never freed. */
+    if (s_pSwcArena && (!_pSnes || !_pSnes->IsSuperWildCard()))
     {
         _MainLoopSwcReleaseCartReserve();
-        (void)_MainLoopSwcEnsureCartReserve(
-            MAINLOOP_SWC_CART_32MBIT_BYTES);
-        if (MainLoopEnsureGameplayRasterWidth(256))
-            return TRUE;
+        _MainLoopSwcReleaseDramReserve();
+        return MainLoopEnsureGameplayRasterWidth(256);
     }
 
     if (s_uSwcCartReserveBytes)
@@ -1377,18 +1514,40 @@ static Bool _MainLoopEnsureSwcRasterWithHeadroom()
             return TRUE;
     }
 
+    if (!_pSnes || !_pSnes->IsSuperWildCard())
+        _MainLoopSwcReleaseDramReserve();
     return FALSE;
 }
 
-/* AURORA_LOADER_REVIEW_V2_3_FINAL_OVER_V2_20260915
- * DRAM, firmware e metadata D88 usam a família explícita abaixo.
- * Erros de formato/I/O não entram no retry de headroom. */
 static Bool _MainLoopSwcHeadroomMemoryError(const char *pError)
 {
     static const char kPrefix[] = "not enough EE memory for ";
     return pError &&
            !strncmp(pError, kPrefix, sizeof(kPrefix) - 1)
         ? TRUE : FALSE;
+}
+
+/* AURORA_SWC_32MBIT_ARENA_V1_2_20260916: borrowed DRAM may be the first half of the arena. */
+static Bool _MainLoopSwcLoadBorrowedDram(
+    const char *pFirmwarePath, const char *pDiskPath)
+{
+    Bool bLoaded;
+
+    if (!_pSnes)
+        return FALSE;
+
+    /* A failed SNSuperWildCard::Load() has already Shutdown() its previous
+     * mapping.  Publish the loan only after the new load fully succeeds. */
+    s_bSwcDramReserveLoaned = FALSE;
+    bLoaded = _pSnes->LoadSuperWildCard(
+        pFirmwarePath, pDiskPath,
+        s_pSwcDramReserve, s_uSwcDramReserveBytes);
+
+    if (bLoaded && s_pSwcDramReserve &&
+        s_uSwcDramReserveBytes >= MAINLOOP_SWC_DRAM_BYTES)
+        s_bSwcDramReserveLoaned = TRUE;
+
+    return bLoaded;
 }
 
 static Bool _MainLoopLoadSuperWildCardWithHeadroom(
@@ -1399,7 +1558,8 @@ static Bool _MainLoopLoadSuperWildCardWithHeadroom(
     if (!_pSnes)
         return FALSE;
 
-    if (_pSnes->LoadSuperWildCard(pFirmwarePath, pDiskPath))
+    if (_MainLoopSwcLoadBorrowedDram(
+            pFirmwarePath, pDiskPath))
         return TRUE;
 
     pError = _pSnes->GetSuperWildCardError();
@@ -1414,7 +1574,8 @@ static Bool _MainLoopLoadSuperWildCardWithHeadroom(
         (void)_MainLoopSwcEnsureCartReserve(
             MAINLOOP_SWC_CART_32MBIT_BYTES);
 
-        if (_pSnes->LoadSuperWildCard(pFirmwarePath, pDiskPath))
+        if (_MainLoopSwcLoadBorrowedDram(
+            pFirmwarePath, pDiskPath))
             return TRUE;
 
         pError = _pSnes->GetSuperWildCardError();
@@ -1425,7 +1586,8 @@ static Bool _MainLoopLoadSuperWildCardWithHeadroom(
     if (s_uSwcCartReserveBytes)
     {
         _MainLoopSwcReleaseCartReserve();
-        if (_pSnes->LoadSuperWildCard(pFirmwarePath, pDiskPath))
+        if (_MainLoopSwcLoadBorrowedDram(
+            pFirmwarePath, pDiskPath))
             return TRUE;
     }
 
@@ -1646,6 +1808,8 @@ _MainLoopSwcCartSRAMDetach();
      * Now destruct wrappers so bridge/JIT/core heap cannot remain resident. */
     _pSystem = NULL;
     if (_pSnes) { delete _pSnes; _pSnes = NULL; }
+    s_bSwcDramReserveLoaned = FALSE; /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916: borrower is now gone. */
+    _MainLoopSwcReleaseDramReserve();
     if (_pNes)  { delete _pNes;  _pNes  = NULL; }
     if (_pFds)  { delete _pFds;  _pFds  = NULL; }
     if (_pSega) { delete _pSega; _pSega = NULL; }
@@ -3818,9 +3982,18 @@ static Bool _MainLoopExecuteSwcDisk(const char *pMappedPath,
         return FALSE;
     }
 
-    if (!(bMagicom ? _pSnes->LoadSuperMagicom(FirmwarePath, pMappedPath)
-                   : _MainLoopLoadSuperWildCardWithHeadroom(
-                         FirmwarePath, pMappedPath)))
+    /* AURORA_D88_STANDALONE_REENTRY_FIX_V1_20260916
+     * The copier raster is ready now. Render the blocking-load UI in that
+     * raster before BIOS+D88 I/O instead of leaving the old browser frame
+     * stretched/corrupted on screen. */
+    _MainLoopLoadPhaseBegin();
+    Bool bD88Booted =
+        bMagicom ? _pSnes->LoadSuperMagicom(FirmwarePath, pMappedPath)
+                 : _MainLoopLoadSuperWildCardWithHeadroom(
+                       FirmwarePath, pMappedPath);
+    _MainLoopLoadProgressFinish(bD88Booted);
+
+    if (!bD88Booted)
     {
         if (!bMagicom)
             _MainLoopSwcReleaseCartReserve();
@@ -4628,6 +4801,24 @@ static Bool _MainLoopExecuteGbaPath(const char *pMappedPath,
     }
 
     _MainLoop_fOutputIntensity = 1.0f;
+
+    /* AURORA_GBA_STATE_LIFECYCLE_V2_20260916
+     * Reserve the full state workspace before gpSP retro_init() calls
+     * init_gamepak_buffer(), whose 1 MiB cache allocations run until malloc
+     * fails. On a tight heap the ROM LRU therefore becomes one block smaller
+     * instead of starving Save/Load later. */
+    {
+        Int32 nGbaStateBytes = _pGba->GetStateSize();
+        if (nGbaStateBytes <= 0 ||
+            !MainLoopStateReserveGbaScratch((Uint32)nGbaStateBytes))
+        {
+            MainLoopModalPrintf(
+                60 * 5,
+                "ERROR: not enough memory for GBA state workspace");
+            return FALSE;
+        }
+    }
+
     /* AURORA_LOADER_REVIEW_V2_3_FINAL_OVER_V2_20260915: fase real de inicialização/paging do gpSP. */
     _MainLoopLoadPhaseBegin();
     Bool bGbaLoaded =
@@ -4639,6 +4830,7 @@ static Bool _MainLoopExecuteGbaPath(const char *pMappedPath,
     if (!bGbaLoaded)
     {
         _pGba->UnloadGame();
+        MainLoopStateReleaseGbaScratch();
         MainLoopModalPrintf(60 * 5,
             "ERROR: gpSP could not run this GBA image"); /* AURORA_GPSP_GBA_V13_SAFE_PERF_20260911: ROMs larger than cache use gpSP paging */
         return FALSE;
@@ -4883,11 +5075,12 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
     }
 
     /* AURORA_V6_MAGICOM_FRONT_FAREAST_20260831: shared loader/cart/disk workflow. */
-    if (_pSnes && _pSnes->IsSuperWildCard() &&
-        eType == MAINLOOP_ENTRYTYPE_SNESWCDISK)
-    {
-        return _MainLoopSwcInsertDisk(pFileName);
-    }
+    /* AURORA_D88_STANDALONE_REENTRY_FIX_V1_20260916
+     * A .d88 selected through _MainLoopExecuteFile is a standalone launch,
+     * not a hot insert into a possibly stale copier left resident after
+     * L2+R3. Let it fall through _MainLoopUnloadRom() below; then
+     * _MainLoopExecuteSwcDisk() recreates the copier and mounts the disk from
+     * a clean state. Explicit in-copier swap/create paths remain untouched. */
     if (_pSnes && _pSnes->IsSuperWildCard() &&
         (!_pSnes->HasSuperWildCardCartridge() ||
          _pSnes->IsSuperWildCardFirmwareMode()) &&

@@ -56,8 +56,8 @@ void SNGSU::SetRevision(Uint8 uRevision)
     m_Revision = uRevision;
     m_ConfigVCR = (m_Revision == SNGSU_REVISION_MC1) ? 0x01 : 0x04;
     m_VCR = m_ConfigVCR;
-    if (m_Revision == SNGSU_REVISION_MC1)
-        m_CLSR = 0;              // MC1 has no usable 21-MHz mode
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: nocash hardware tests show CLSR exists on MC1 too.
+     * Keep only MC1's missing fast-multiply capability separate. */
 }
 
 void SNGSU::Reset()
@@ -88,6 +88,7 @@ void SNGSU::Reset()
     m_Pipeline = 0x01;                 // o primeiro byte executado e' um NOP
     m_PCModified = FALSE;
     m_LastRamAddr = 0;
+    m_CpuRegLatch = 0; /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916 */
     m_Color = 0; m_POR = 0;
     memset(m_PixColor, 0, sizeof(m_PixColor));
     m_PixFlags[0] = m_PixFlags[1] = 0;
@@ -350,30 +351,127 @@ Uint8 SNGSU::Pipe()
 //==========================================================================
 //  Arbitragem ROM/RAM (SCMR)
 //==========================================================================
-Bool SNGSU::SnesCanAccessRom() const { return (m_SCMR & 0x10) == 0; }  // RON
-Bool SNGSU::SnesCanAccessRam() const { return (m_SCMR & 0x08) == 0; }  // RAN
+Bool SNGSU::SnesCanAccessRom() const { return (!m_bGo || (m_SCMR & 0x10) == 0) ? TRUE : FALSE; }  // RON
+Bool SNGSU::SnesCanAccessRam() const { return (!m_bGo || (m_SCMR & 0x08) == 0) ? TRUE : FALSE; }  // RAN
 
 //==========================================================================
 //  MMIO do lado SNES ($3000-$34FF)
 //==========================================================================
-Uint8 SNGSU::ReadReg(Uint16 uAddrLow)
+/* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: revision-accurate S-CPU I/O decode.
+ *
+ * GSU2 mirrors the complete $3000-$303F block at $3040-$30FF and
+ * $3300-$34FF, with $3020-$302F mirroring $3030-$303F. Black-blob MC1 has
+ * the older sparse decoder documented by nocash/fullSNES. Read and write
+ * decode differ in the native $303x block because several control registers
+ * are write-only while MC1 reads expose SFR mirrors there. */
+Uint16 SNGSU::DecodeCpuReadAddr(Uint16 a, Bool *pMapped) const
 {
-    Uint16 a = uAddrLow & 0xFFFF;
+    *pMapped = TRUE;
+    if (a >= 0x3100 && a <= 0x32FF) return a;
 
-    // A janela da CPU ($3100-$32FF) soma os nove bits baixos do CBR ao
-    // indice fisico. Com CBR=$C3A0, por exemplo, o byte logico zero aparece
-    // em $3160: ($060 + $1A0) & $1FF = 0.
+    if (m_Revision == SNGSU_REVISION_MC1)
+    {
+        if (a >= 0x3000 && a <= 0x301F) return a;
+        if (a >= 0x3030 && a <= 0x303F)
+        {
+            if (a == 0x303B) return 0x303B;
+            if (a == 0x3030 || a == 0x3031) return a;
+            return (Uint16)(0x3030 | (a & 1));
+        }
+        if (a >= 0x3040 && a <= 0x305F) return (Uint16)(0x3000 | (a & 0x1F));
+        if (a >= 0x3060 && a <= 0x307F)
+        {
+            if ((a & 0x1F) == 0x1B) return 0x303B;
+            return (Uint16)(0x3030 | (a & 1));
+        }
+        if (a >= 0x3330 && a <= 0x333F)
+            return (a == 0x333B) ? 0x303B : (Uint16)(0x3030 | (a & 1));
+        if (a >= 0x3340 && a <= 0x335F) return (Uint16)(0x3000 | (a & 0x1F));
+        if (a >= 0x3360 && a <= 0x337F)
+        {
+            if ((a & 0x1F) == 0x1B) return 0x303B;
+            return (Uint16)(0x3030 | (a & 1));
+        }
+        if (a >= 0x3430 && a <= 0x343F)
+            return (a == 0x343B) ? 0x303B : (Uint16)(0x3030 | (a & 1));
+        if (a >= 0x3440 && a <= 0x345F) return (Uint16)(0x3000 | (a & 0x1F));
+        if (a >= 0x3460 && a <= 0x347F)
+        {
+            if ((a & 0x1F) == 0x1B) return 0x303B;
+            return (Uint16)(0x3030 | (a & 1));
+        }
+        *pMapped = FALSE;
+        return a;
+    }
+
+    if (a >= 0x3000 && a <= 0x301F) return a;
+    if (a >= 0x3020 && a <= 0x302F) return (Uint16)(0x3030 | (a & 0x0F));
+    if (a >= 0x3030 && a <= 0x303F) return a;
+    if (a >= 0x3040 && a <= 0x30FF) return (Uint16)(0x3000 | (a & 0x3F));
+    if (a >= 0x3300 && a <= 0x34FF) return (Uint16)(0x3000 | (a & 0x3F));
+    *pMapped = FALSE;
+    return a;
+}
+
+Uint16 SNGSU::DecodeCpuWriteAddr(Uint16 a, Bool *pMapped) const
+{
+    *pMapped = TRUE;
+    if (a >= 0x3100 && a <= 0x32FF) return a;
+
+    if (m_Revision == SNGSU_REVISION_MC1)
+    {
+        if (a >= 0x3000 && a <= 0x301F) return a;
+        if (a >= 0x3030 && a <= 0x303F) return a;
+        if (a >= 0x3040 && a <= 0x305F) return (Uint16)(0x3000 | (a & 0x1F));
+        if (a >= 0x3060 && a <= 0x307F)
+        {
+            if ((a & 0x1F) == 0x1B) return 0x303B;
+            return (Uint16)(0x3030 | (a & 1));
+        }
+        if (a >= 0x3330 && a <= 0x333F)
+            return (a == 0x333B) ? 0x303B : (Uint16)(0x3030 | (a & 1));
+        if (a >= 0x3340 && a <= 0x335F) return (Uint16)(0x3000 | (a & 0x1F));
+        if (a >= 0x3360 && a <= 0x337F)
+        {
+            if ((a & 0x1F) == 0x1B) return 0x303B;
+            return (Uint16)(0x3030 | (a & 1));
+        }
+        if (a >= 0x3430 && a <= 0x343F)
+            return (a == 0x343B) ? 0x303B : (Uint16)(0x3030 | (a & 1));
+        if (a >= 0x3440 && a <= 0x345F) return (Uint16)(0x3000 | (a & 0x1F));
+        if (a >= 0x3460 && a <= 0x347F)
+        {
+            if ((a & 0x1F) == 0x1B) return 0x303B;
+            return (Uint16)(0x3030 | (a & 1));
+        }
+        *pMapped = FALSE;
+        return a;
+    }
+
+    if (a >= 0x3000 && a <= 0x301F) return a;
+    if (a >= 0x3020 && a <= 0x302F) return (Uint16)(0x3030 | (a & 0x0F));
+    if (a >= 0x3030 && a <= 0x303F) return a;
+    if (a >= 0x3040 && a <= 0x30FF) return (Uint16)(0x3000 | (a & 0x3F));
+    if (a >= 0x3300 && a <= 0x34FF) return (Uint16)(0x3000 | (a & 0x3F));
+    *pMapped = FALSE;
+    return a;
+}
+
+Uint8 SNGSU::ReadReg(Uint16 uAddrLow, Uint8 uOpenBus)
+{
+    Bool mapped;
+    Uint16 a = DecodeCpuReadAddr((Uint16)(uAddrLow & 0xFFFF), &mapped);
+    if (!mapped) return uOpenBus;
+
+    if (m_bGo && a != 0x3030 && a != 0x3031 && a != 0x303A && a != 0x303B)
+        return uOpenBus;
+
     if (a >= 0x3100 && a <= 0x32FF)
     {
         Uint16 off = (Uint16)(((a - 0x3100) + (m_CBR & 0x01FF)) & 0x01FF);
         return m_Cache[off];
     }
 
-    // GSU2 espelha os 64 bytes de registradores nestas janelas.
-    if (a >= 0x3040 && a <= 0x30FF) a = (Uint16)(0x3000 | (a & 0x3F));
-    else if (a >= 0x3300 && a <= 0x34FF) a = (Uint16)(0x3000 | (a & 0x3F));
-
-    // R0-R15
     if (a >= 0x3000 && a <= 0x301F)
     {
         Int32 idx = (a - 0x3000) >> 1;
@@ -383,14 +481,10 @@ Uint8 SNGSU::ReadReg(Uint16 uAddrLow)
     switch (a)
     {
     case 0x3030: return SfrLow();
-    case 0x3031: { Uint8 v = SfrHigh(); m_bIrq = FALSE; return v; } // leitura limpa IRQ
+    case 0x3031: { Uint8 v = SfrHigh(); m_bIrq = FALSE; return v; }
     case 0x3034: return m_PBR;
     case 0x3036: return m_ROMBR;
-    case 0x3037: return m_CFGR;
-    case 0x3038: return m_SCBR;
-    case 0x3039: return m_CLSR;
-    case 0x303A: return m_SCMR;
-    case 0x303B: return m_VCR;                 // version code (read-only)
+    case 0x303B: return m_VCR;
     case 0x303C: return m_RAMBR;
     case 0x303E: return (Uint8)(m_CBR & 0xFF);
     case 0x303F: return (Uint8)(m_CBR >> 8);
@@ -400,7 +494,12 @@ Uint8 SNGSU::ReadReg(Uint16 uAddrLow)
 
 void SNGSU::WriteReg(Uint16 uAddrLow, Uint8 uData)
 {
-    Uint16 a = uAddrLow & 0xFFFF;
+    Bool mapped;
+    Uint16 a = DecodeCpuWriteAddr((Uint16)(uAddrLow & 0xFFFF), &mapped);
+    if (!mapped) return;
+
+    if (m_bGo && a != 0x3030 && a != 0x303A)
+        return;
 
     if (a >= 0x3100 && a <= 0x32FF)
     {
@@ -410,25 +509,24 @@ void SNGSU::WriteReg(Uint16 uAddrLow, Uint8 uData)
         return;
     }
 
-    if (a >= 0x3040 && a <= 0x30FF) a = (Uint16)(0x3000 | (a & 0x3F));
-    else if (a >= 0x3300 && a <= 0x34FF) a = (Uint16)(0x3000 | (a & 0x3F));
-
-    // R0-R15 sao byte-addressable. Preservar o outro byte do proprio
-    // registrador tambem cobre escritas isoladas ou intercaladas; um latch
-    // global misturava o byte baixo de registradores diferentes.
     if (a >= 0x3000 && a <= 0x301F)
     {
-        Int32 idx = (a - 0x3000) >> 1;
+        /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: CPU write latch. Even writes only load LATCH; the following
+         * odd write commits LSB=LATCH/MSB=data to the selected register. */
         if ((a & 1) == 0)
-            m_R[idx] = (Uint16)((m_R[idx] & 0xFF00) | uData);
-        else
-            m_R[idx] = (Uint16)(((Uint16)uData << 8) | (m_R[idx] & 0x00FF));
+        {
+            m_CpuRegLatch = uData;
+            return;
+        }
+
+        Int32 idx = (a - 0x3000) >> 1;
+        m_R[idx] = (Uint16)(((Uint16)uData << 8) | m_CpuRegLatch);
         if (idx == 14) UpdateRomBuffer();
-        if (a == 0x301F)        // escrita em R15.MSB dispara GO
+        if (a == 0x301F)
         {
             m_bGo = TRUE;
             m_ClockCarry = 0;
-            m_Runaway = 0;      // reinicia o watchdog a cada novo START
+            m_Runaway = 0;
 #if SNDBG_LOG
             m_Diag.Starts++;
             m_Diag.CurrentJobInstructions = 0;
@@ -443,10 +541,7 @@ void SNGSU::WriteReg(Uint16 uAddrLow, Uint8 uData)
         {
             Bool wasGo = m_bGo;
             SfrWriteLow(uData);
-            // Limpa CBR/cache somente na transicao explicita GO=1 -> GO=0.
-            // Uma escrita de flags enquanto ja parado nao pode destruir o
-            // codigo que a CPU acabou de carregar na janela de cache.
-            if (wasGo && !m_bGo) { m_CBR = 0; FlushCodeCache(); }
+            if (!m_bGo) { m_CBR = 0; FlushCodeCache(); }
             if (!wasGo && m_bGo)
             {
                 m_ClockCarry = 0;
@@ -462,21 +557,12 @@ void SNGSU::WriteReg(Uint16 uAddrLow, Uint8 uData)
         }
         break;
     case 0x3031:
-        m_bAlt1 = (uData & 0x01) != 0;
-        m_bAlt2 = (uData & 0x02) != 0;
-        m_bIL   = (uData & 0x04) != 0;
-        m_bIH   = (uData & 0x08) != 0;
-        m_bB    = (uData & 0x10) != 0;
-        m_bIrq  = (uData & 0x80) != 0;
         break;
-    case 0x3033: /* BRAMR (backup ram enable) - ignorado por enquanto */ break;
+    case 0x3033: break;
     case 0x3034: m_PBR  = uData & 0x7F; FlushCodeCache(); break;
     case 0x3037: m_CFGR = uData; break;
     case 0x3038: m_SCBR = uData; break;
-    case 0x3039:
-        /* AURORA_V8_GSU_MC1_CLOCK: MC1 is fixed to the low clock. */
-        m_CLSR = (m_Revision == SNGSU_REVISION_MC1) ? 0 : (uData & 1);
-        break;
+    case 0x3039: m_CLSR = uData & 1; break;
     case 0x303A: m_SCMR = uData; break;
     default: break;
     }
@@ -936,7 +1022,8 @@ SNGSU_ALWAYS_INLINE void SNGSU::Step()
         WriteRegister(m_Dreg, hi);
         SetZSfromWord(hi);
         m_bCY = ((up >> 15) & 1) != 0;                 // CY = bit15 do produto
-        ChargeClocks(((m_CFGR & 0x20) ? 3 : 7) * CacheClockCost());
+        /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: MC1 ignores CFGR.MS0; later GSU silicon may use it. */
+        ChargeClocks((FastMultiplyEnabled() ? 3 : 7) * CacheClockCost());
     }
     else if (op >= 0x80 && op <= 0x8F)       // MULT / UMULT / +#imm (low 16)
     {
@@ -949,7 +1036,7 @@ SNGSU_ALWAYS_INLINE void SNGSU::Step()
             r = (Int32)(Int8)sr * b;
         }
         Uint16 res = (Uint16)r; SetZSfromWord(res); WriteRegister(m_Dreg, res);
-        if (!(m_CFGR & 0x20)) ChargeClocks(CacheClockCost());
+        if (!FastMultiplyEnabled()) ChargeClocks(CacheClockCost());
     }
     else if (op >= 0xD0 && op <= 0xDE)       // INC Rn
     {
@@ -995,8 +1082,8 @@ SNGSU_ALWAYS_INLINE void SNGSU::Step()
         Bool take = FALSE;
         switch (op) {
         case 0x05: take = TRUE;               break;   // BRA
-        case 0x06: take = (m_bS == m_bOV);    break;   // BGE  (S^V=0)
-        case 0x07: take = (m_bS != m_bOV);    break;   // BLT  (S^V=1)
+        case 0x06: take = (m_bS != m_bOV);    break;   // hardware BLT (S^V=1)
+        case 0x07: take = (m_bS == m_bOV);    break;   // hardware BGE (S^V=0)
         case 0x08: take = !m_bZ;              break;   // BNE
         case 0x09: take =  m_bZ;              break;   // BEQ
         case 0x0A: take = !m_bS;              break;   // BPL

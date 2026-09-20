@@ -35,6 +35,7 @@ SNSuperWildCard::SNSuperWildCard()
     m_eModel = MODEL_SWC; /* AURORA_V6_MAGICOM_FRONT_FAREAST_20260831 */
     m_pDRAM = NULL;
     m_nDRAMBytes = 0;
+    m_bOwnDRAM = FALSE; /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916 */
     m_pFirmware = NULL;
     m_nFirmwareBytes = 0;
     m_pCartRom = NULL; /* AURORA_SWC_FLOPPY_V5_20260831 */
@@ -63,6 +64,7 @@ SNSuperWildCard::SNSuperWildCard()
     m_bSplitAwaitingMediaSwap = FALSE;
     m_uSplitSavedBlocks = 0;
     m_uSplitBlocksOnMedia = 0;
+    m_uSplitLastHeaderOffset = ~0u; /* AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917 */
     m_bD88HeaderDirty = FALSE;
     m_DiskPath[0] = 0;
     m_LastError[0] = 0;
@@ -145,35 +147,80 @@ Bool SNSuperWildCard::LoadFirmware(const Char *pPath)
              * machine exposes a 16-KiB BIOS. Accept only an unambiguous
              * classic 16-KiB payload: exactly one valid quarter, or multiple
              * valid quarters that are byte-identical. */
-            Uint8 firstBlock[SWC_FIRMWARE_BYTES];
-            Uint8 block[SWC_FIRMWARE_BYTES];
+            /* AURORA_PS2_EE_SWC_STACK_V1_20260917
+             * Do not place two 16 KiB firmware images on the PS2 thread
+             * stack. First identify valid quarters from the reset-vector
+             * bytes, then compare multiple candidates in 512-byte chunks.
+             * Peak temporary stack drops from ~32 KiB to ~1 KiB. */
+            Uint8 validMask = 0;
+            Uint8 compareA[512];
+            Uint8 compareB[512];
             Int32 first = -1;
             Int32 nValid = 0;
             Bool identical = TRUE;
 
             for (Int32 q = 0; q < 4; ++q)
             {
-                long off = (long)q * (long)SWC_FIRMWARE_BYTES;
+                Uint8 rvBytes[2];
+                long off = (long)q * (long)SWC_FIRMWARE_BYTES + 0x1FFCL;
+                Uint16 rv;
+
                 if (fseek(pFile, off, SEEK_SET) != 0 ||
-                    fread(block, 1, SWC_FIRMWARE_BYTES, pFile) != SWC_FIRMWARE_BYTES)
+                    fread(rvBytes, 1, sizeof(rvBytes), pFile) != sizeof(rvBytes))
                 {
                     fclose(pFile);
                     SetError("cannot inspect classic SWC 64 KiB overdump");
                     return FALSE;
                 }
 
-                if (_AuroraClassicSwcVectorOK(block, SWC_FIRMWARE_BYTES))
+                rv = (Uint16)rvBytes[0] | ((Uint16)rvBytes[1] << 8);
+                if (rv >= 0xE000u && rv != 0xFFFFu)
                 {
                     if (first < 0)
-                    {
                         first = q;
-                        memcpy(firstBlock, block, SWC_FIRMWARE_BYTES);
-                    }
-                    else if (memcmp(firstBlock, block, SWC_FIRMWARE_BYTES) != 0)
-                    {
-                        identical = FALSE;
-                    }
+                    validMask |= (Uint8)(1u << q);
                     ++nValid;
+                }
+            }
+
+            if (nValid > 1)
+            {
+                for (Int32 q = first + 1; q < 4 && identical; ++q)
+                {
+                    if (!(validMask & (Uint8)(1u << q)))
+                        continue;
+
+                    for (Uint32 pos = 0; pos < SWC_FIRMWARE_BYTES;
+                         pos += (Uint32)sizeof(compareA))
+                    {
+                        Uint32 chunk = SWC_FIRMWARE_BYTES - pos;
+                        if (chunk > (Uint32)sizeof(compareA))
+                            chunk = (Uint32)sizeof(compareA);
+
+                        if (fseek(
+                                pFile,
+                                (long)first * (long)SWC_FIRMWARE_BYTES +
+                                    (long)pos,
+                                SEEK_SET) != 0 ||
+                            fread(compareA, 1, chunk, pFile) != chunk ||
+                            fseek(
+                                pFile,
+                                (long)q * (long)SWC_FIRMWARE_BYTES +
+                                    (long)pos,
+                                SEEK_SET) != 0 ||
+                            fread(compareB, 1, chunk, pFile) != chunk)
+                        {
+                            fclose(pFile);
+                            SetError("cannot compare classic SWC 64 KiB overdump");
+                            return FALSE;
+                        }
+
+                        if (memcmp(compareA, compareB, chunk) != 0)
+                        {
+                            identical = FALSE;
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -966,6 +1013,7 @@ Bool SNSuperWildCard::MountDisk(const Char *pDiskPath)
         m_bSplitNextMediaRequired = FALSE;
         m_bSplitAwaitingMediaSwap = FALSE;
         m_uSplitBlocksOnMedia = 0;
+    m_uSplitLastHeaderOffset = ~0u; /* AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917 */
     }
 
     m_bDiskChanged = TRUE;
@@ -1015,7 +1063,9 @@ Bool SNSuperWildCard::SwapDisk(const Char *pDiskPath)
 
 Bool SNSuperWildCard::Load(const Char *pFirmwarePath,
                              const Char *pDiskPath,
-                             ModelE eModel)
+                             ModelE eModel,
+                             Uint8 *pExternalDRAM,
+                             Uint32 nExternalDRAMBytes) /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916 */
 {
     Shutdown();
     m_LastError[0]=0;
@@ -1024,10 +1074,24 @@ Bool SNSuperWildCard::Load(const Char *pFirmwarePath,
 
     m_eModel=eModel;
     m_nDRAMBytes=(m_eModel==MODEL_MAGICOM)?MAGICOM_DRAM_BYTES:SWC_DRAM_BYTES;
-    /* AURORA_V6_MAGICOM_FRONT_FAREAST_20260831: allocate only the physical model capacity. */
-    m_pDRAM=(Uint8 *)malloc(m_nDRAMBytes);
-    if (!m_pDRAM)
-    { SetError("not enough EE memory for copier DRAM"); m_nDRAMBytes=0; return FALSE; }
+    /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916
+     * Classic SWC can borrow the exact physical 4 MiB block that the PS2
+     * frontend reserved before constructing SnesSystem. This changes only
+     * host allocation order: the emulated DRAM size/addressing is unchanged.
+     * Magicom and fallback boots keep the original internal malloc path. */
+    m_pDRAM = NULL;
+    m_bOwnDRAM = FALSE;
+    if (pExternalDRAM && nExternalDRAMBytes >= m_nDRAMBytes)
+    {
+        m_pDRAM = pExternalDRAM;
+    }
+    else
+    {
+        m_pDRAM=(Uint8 *)malloc(m_nDRAMBytes);
+        if (!m_pDRAM)
+        { SetError("not enough EE memory for copier DRAM"); m_nDRAMBytes=0; return FALSE; }
+        m_bOwnDRAM = TRUE;
+    }
     memset(m_pDRAM,0,m_nDRAMBytes);
 
     if (!LoadFirmware(pFirmwarePath))
@@ -1079,9 +1143,13 @@ void SNSuperWildCard::Shutdown()
 
     if (m_pDRAM)
     {
-        free(m_pDRAM);
+        /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916: borrowed frontend DRAM outlives Shutdown() and is
+         * released only after SnesSystem destruction. */
+        if (m_bOwnDRAM)
+            free(m_pDRAM);
         m_pDRAM = NULL;
     }
+    m_bOwnDRAM = FALSE;
 
     m_bActive = FALSE;
     m_nDRAMBytes = 0;
@@ -1103,6 +1171,7 @@ void SNSuperWildCard::Shutdown()
     m_bSplitAwaitingMediaSwap = FALSE;
     m_uSplitSavedBlocks = 0;
     m_uSplitBlocksOnMedia = 0;
+    m_uSplitLastHeaderOffset = ~0u; /* AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917 */
     m_bD88HeaderDirty = FALSE;
     m_uD88DiskBytes = 0;
 
@@ -1127,6 +1196,7 @@ void SNSuperWildCard::Reset()
     m_bSplitAwaitingMediaSwap = FALSE;
     m_uSplitSavedBlocks = 0;
     m_uSplitBlocksOnMedia = 0;
+    m_uSplitLastHeaderOffset = ~0u; /* AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917 */
     FdcReset(FALSE);
 }
 
@@ -1320,15 +1390,29 @@ Bool SNSuperWildCard::FdcStoreCurrentSector()
     if (_AuroraSwcProgramSplitHeader(m_Sector, &bNeedsNext, &blocks))
     {
         Uint32 targetBlocks = 0;
-        if (m_uSplitSavedBlocks >= m_uSplitBlocksOnMedia)
-            m_uSplitSavedBlocks -= m_uSplitBlocksOnMedia;
-        else
-            m_uSplitSavedBlocks = 0;
+        const Uint32 headerOffset = (Uint32)off;
+        const Bool sameHeader =
+            (m_uSplitLastHeaderOffset == headerOffset) ? TRUE : FALSE;
+
+        /* AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917
+         * A repeated write to the SAME physical D88 sector is a header
+         * rewrite, so replace its previous contribution. A DIFFERENT
+         * header sector is the next logical split and must accumulate.
+         * Thus 064+064+064 becomes 64+64+64 = 192 blocks (12 Mbit). */
+        if (sameHeader)
+        {
+            if (m_uSplitSavedBlocks >= m_uSplitBlocksOnMedia)
+                m_uSplitSavedBlocks -= m_uSplitBlocksOnMedia;
+            else
+                m_uSplitSavedBlocks = 0;
+        }
+
         m_uSplitBlocksOnMedia = (Uint32)blocks;
         if ((~0u) - m_uSplitSavedBlocks < m_uSplitBlocksOnMedia)
             m_uSplitSavedBlocks = ~0u;
         else
             m_uSplitSavedBlocks += m_uSplitBlocksOnMedia;
+        m_uSplitLastHeaderOffset = headerOffset;
 
         if (m_pCartRom && m_nCartBytes)
         {
@@ -1874,6 +1958,7 @@ Bool SNSuperWildCard::SetExternalCartridge(
     /* AURORA_D88_V1_6_MULTIDISK_1600_20260901 */
     m_uSplitSavedBlocks = 0;
     m_uSplitBlocksOnMedia = 0;
+    m_uSplitLastHeaderOffset = ~0u; /* AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917 */
     m_bSplitNextMediaRequired = FALSE;
     m_bSplitAwaitingMediaSwap = FALSE;
     return TRUE;
@@ -1899,6 +1984,7 @@ void SNSuperWildCard::ClearExternalCartridge()
 
     m_uSplitSavedBlocks = 0;
     m_uSplitBlocksOnMedia = 0;
+    m_uSplitLastHeaderOffset = ~0u; /* AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917 */
     m_bSplitNextMediaRequired = FALSE;
     m_bSplitAwaitingMediaSwap = FALSE;
 }

@@ -2078,6 +2078,84 @@ static s32 load_gamepak_raw_memory(const void *data, size_t data_size)
     _pb_cpu.write_text(
         _pb_cs, encoding="utf-8", newline="\n")
 
+
+    # AURORA_GBA_DYNAREC_DEFERRED_EXIT_TEARDOWN_V7_20260916
+    #
+    # cpu_threaded.c grows deferred_exits with realloc() while resolving
+    # external JIT branch exits. The existing ROM/RAM JIT buffers are freed
+    # at retro_deinit(), but this independent worklist historically kept its
+    # high-water allocation across games. Free it only at full dynarec
+    # teardown: there is no per-frame cost and no churn inside one game.
+    _v7_cpu = stage / "cpu_threaded.c"
+    _v7_cps = _v7_cpu.read_text(encoding="utf-8")
+    _v7_mark = "AURORA_GBA_DYNAREC_DEFERRED_EXIT_TEARDOWN_V7_20260916"
+    if _v7_mark not in _v7_cps:
+        _v7_old = """void deinit_dynarec_caches(void)
+{
+  rom_translation_ptr = NULL;
+  ram_translation_ptr = NULL;
+  last_rom_translation_ptr = NULL;
+  last_ram_translation_ptr = NULL;
+
+  ram_block_tag = INITIAL_TOP_TAG;
+  rom_cache_watermark = INITIAL_ROM_WATERMARK;
+  bios_swi_entrypoint = NULL;
+
+  iwram_code_min = ~0U;
+  iwram_code_max = 0U;
+  ewram_code_min = ~0U;
+  ewram_code_max = 0U;
+  memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
+}
+"""
+        _v7_new = """void deinit_dynarec_caches(void)
+{
+  /* AURORA_GBA_DYNAREC_DEFERRED_EXIT_TEARDOWN_V7_20260916
+   * The deferred branch-exit vector is independent of the executable JIT
+   * mapping. It may grow with realloc() during a game, so full content
+   * teardown must release that high-water allocation as well. */
+  free(deferred_exits);
+  deferred_exits = NULL;
+  deferred_exit_count = 0;
+  deferred_exit_capacity = 0;
+  translate_depth = 0;
+
+  rom_translation_ptr = NULL;
+  ram_translation_ptr = NULL;
+  last_rom_translation_ptr = NULL;
+  last_ram_translation_ptr = NULL;
+
+  ram_block_tag = INITIAL_TOP_TAG;
+  rom_cache_watermark = INITIAL_ROM_WATERMARK;
+  bios_swi_entrypoint = NULL;
+
+  iwram_code_min = ~0U;
+  iwram_code_max = 0U;
+  ewram_code_min = ~0U;
+  ewram_code_max = 0U;
+  memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
+}
+"""
+        if _v7_cps.count(_v7_old) != 1:
+            raise SystemExit(
+                "gpSP V7: expected one deinit_dynarec_caches lifecycle anchor, found %d"
+                % _v7_cps.count(_v7_old)
+            )
+        _v7_cps = _v7_cps.replace(_v7_old, _v7_new, 1)
+
+    for _v7_tok in (
+        _v7_mark,
+        "free(deferred_exits);",
+        "deferred_exits = NULL;",
+        "deferred_exit_count = 0;",
+        "deferred_exit_capacity = 0;",
+        "translate_depth = 0;",
+    ):
+        if _v7_tok not in _v7_cps:
+            raise SystemExit("gpSP V7 post-patch audit failed: missing " + _v7_tok)
+
+    _v7_cpu.write_text(_v7_cps, encoding="utf-8", newline="\n")
+
     stamp.write_text(digest + "\n", encoding="utf-8")
     print(f"[ gpSP stage ] V21: SMALL JIT memory + 4 MiB paged ROM + TFA pre-reserve (V15 SIO) + pager I/O + full PS2 JIT cache sync: {stage}")
 

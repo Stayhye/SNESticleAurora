@@ -69,7 +69,7 @@ jobs:
           test "$(git -C src/third_party/fceumm-fds rev-parse HEAD)" = "dc77e3ca4baad08f0023f61dba9846550735b74d"
           echo "gpSP commit:"
           git -C src/third_party/gpsp rev-parse HEAD
-          test "$(git -C src/third_party/gpsp rev-parse HEAD)" = "8d268a6bb2cd799f8f2791ebb544a7ef550cfc6f"
+          test "$(git -C src/third_party/gpsp rev-parse HEAD)" = "52db8b129b46d97caf3887fca6fe4e52c93ba9d1"
 
 
       # AURORA_CONTINUOUS_PICODRIVE_SOURCE_V4_2

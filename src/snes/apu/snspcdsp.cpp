@@ -4,6 +4,8 @@
 #include "prof.h"
 #include "snspcdsp.h"
 #include "console.h"
+#include "platform/ps2/system/aurora_runtime_trace.h"
+/* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918 */
 
 #define SNSPCDSP_DETERMINISMSAFE (0)
 #define SNSPCDSP_DEBUGPRINT (CODE_DEBUG && FALSE)
@@ -16,12 +18,20 @@
 
 SNSpcDsp::SNSpcDsp()
 {
+	/* AURORA_SPC700_MEGA_ACCURACY_V1_20260916 */
+	m_pMem = NULL;
+	m_pShadowMem = NULL;
+	m_pbRomEnable = NULL;
+	m_pMixer[0] = NULL;
+	m_pMixer[1] = NULL;
 }
 
 void SNSpcDsp::Reset()
 {
 	memset(m_Regs, 0, sizeof(m_Regs));
-	m_Regs[SNSPCDSP_REG_FLG] = 0x40;
+	/* AURORA_HW_ACCURACY_SDSP_FLG_RESET_V1_20260916
+	 * Internal S-DSP FLG powers/resets to $E0. */
+	m_Regs[SNSPCDSP_REG_FLG] = 0xE0;
 	m_Queue.Reset();
 }
 
@@ -30,6 +40,15 @@ void SNSpcDsp::Write8(Uint32 uAddr, Uint8 uData)
 	Int32 iChannel;
 
 	uAddr &= 0x7F;
+	/* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918_DSPW */
+	if (uAddr == 0x4C || uAddr == 0x5C || uAddr == 0x5D ||
+	    uAddr == 0x6C || uAddr == 0x6D || uAddr == 0x7C ||
+	    uAddr == 0x7D)
+	{
+		AuroraTraceRecord(
+		    ATR_DSP_W, ATR_F_PRE, (Uint16)uAddr,
+		    (Uint32)uData, (Uint32)m_Regs[uAddr], ATR_P_NONE);
+	}
 
 //	if (uAddr==SNSPCDSP_REG_FLG) // && uData != m_Regs[uAddr])
 //		ConDebug("flg %02X\n", uData);
@@ -46,11 +65,13 @@ void SNSpcDsp::Write8(Uint32 uAddr, Uint8 uData)
 	case SNSPCDSP_REG_FLG:
 		if (uData & 0x80)
 		{
-			// soft reset
-			m_Regs[SNSPCDSP_REG_FLG] |= 0x40 | 0x20; // enable mute, disable echo
+			/* Soft reset: mute + echo-write-disable, voices enter Release at zero. */
+			m_Regs[SNSPCDSP_REG_FLG] |= 0x60;
 			m_Regs[SNSPCDSP_REG_KOFF] = 0;
 			m_Regs[SNSPCDSP_REG_KON] = 0;
-	    	m_Regs[SNSPCDSP_REG_ENDX] = 0;
+			m_Regs[SNSPCDSP_REG_ENDX] = 0;
+			if (m_pMixer[0]) m_pMixer[0]->SoftReset();
+			if (m_pMixer[1]) m_pMixer[1]->SoftReset();
 		}
 		break;
     case SNSPCDSP_REG_KON:
@@ -150,15 +171,20 @@ Uint16 SNSpcDsp::GetSampleDir(Uint8 uSrcN, Uint32 uOffset)
 	uSampleDir =  m_Regs[SNSPCDSP_REG_DIR] * 0x100 + uSrcN * 0x04;
 	uSampleDir+= uOffset;
 
-	// read word from sample directory
-	uData = m_pMem[uSampleDir + 0] << 0;
-	uData|= m_pMem[uSampleDir + 1] << 8;
+	// S-DSP reads physical APURAM; 16-bit address bus wraps naturally.
+	uData = ReadRAM((Uint16)(uSampleDir + 0)) << 0;
+	uData|= ReadRAM((Uint16)(uSampleDir + 1)) << 8;
 	return uData;
 }
 
 
 void SNSpcDsp::KeyOn(Int32 iChannel)
 {
+	/* AURORA_SNES_BINARY_TRACE_V6_20260918_KON */
+	AuroraTraceRecord(
+	    ATR_KON, ATR_F_PRE, (Uint16)iChannel,
+	    (Uint32)m_Regs[SNSPCDSP_REG_ENDX], 0, ATR_P_FLUSH);
+	AuroraTraceArmVoice(iChannel);
 	// clear endx
 	m_Regs[SNSPCDSP_REG_ENDX] &=  ~(1 << iChannel);
 
@@ -172,6 +198,10 @@ void SNSpcDsp::KeyOn(Int32 iChannel)
 
 void SNSpcDsp::KeyOff(Int32 iChannel)
 {
+	/* AURORA_SNES_BINARY_TRACE_V6_20260918_KOFF */
+	AuroraTraceRecord(
+	    ATR_KOFF, ATR_F_PRE, (Uint16)iChannel,
+	    0, 0, ATR_P_FLUSH);
 	// tell mixer(s) to key off
 	if (m_pMixer[0])
 		m_pMixer[0]->KeyOff(iChannel);

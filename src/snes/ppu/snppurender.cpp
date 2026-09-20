@@ -340,9 +340,15 @@ static _INLINE Uint16 _SnesPPUResolveMode34Color15(Uint8 uPixel, Uint8 uMeta,
 
 static Bool _SnesPPUHasMode34DirectPixels(const SNPPUBlendInfoT *pInfo)
 {
+	/* AURORA_TOPGEAR_DIRECT_SCAN64_V5_20260917
+	 * uAttrib8 is 64-byte aligned. A direct-color owner is bit 3 in either
+	 * nibble, so 32 packed tests are exactly the old 256 byte tests. */
+	const Uint64 *pAttrib64 = (const Uint64 *)pInfo->uAttrib8;
+	const Uint64 uDirectMask = 0x8888888888888888ULL;
 	Uint32 i;
-	for (i = 0; i < 256; i++)
-		if (pInfo->uAttrib8[i] & 0x88)
+
+	for (i = 0; i < 256 / 8; i++)
+		if (pAttrib64[i] & uDirectMask)
 			return TRUE;
 	return FALSE;
 }
@@ -433,6 +439,11 @@ void SnesPPURender::RenderLine32(Int32 iLine, Bool bPlanar)
 	SnesRender8pInfoT *pRenderInfo;
     SNPPUBlendInfoT *pBlendInfo;
 	const SnesPPURegsT *pRegs  = m_pPPU->GetRegs();
+	/* AURORA_TOPGEAR_PRESENTED_LINE_CACHE_V4_20260917
+	 * This scanline render is synchronous. Cache exact immutable fields
+	 * from the already-snapshotted register image. */
+	const Uint8 uBGMode = (Uint8)(pRegs->bgmode & 7);
+	const Uint32 uIntensity = (Uint32)(pRegs->inidisp & 0x0F);
 	/* AURORA_V85_EFFECTIVE_COLOR_PATH
 	 * Derive renderer-only values. Never mutate emulated PPU registers. */
 	const Uint8 uHackFlags = SNPPURenderGetSoftwareHackFlags();
@@ -476,7 +487,7 @@ static Bool bPrint = TRUE;
 
 		if (m_UpdateFlags & SNESPPURENDER_UPDATE_PAL)
 		{
-            m_pBlend->UpdatePalette(pBlendInfo, m_pPPU->GetCGData(), m_pPPU->GetIntensity());
+            m_pBlend->UpdatePalette(pBlendInfo, m_pPPU->GetCGData(), uIntensity);
 
 			m_UpdateFlags &= ~SNESPPURENDER_UPDATE_PAL;
 		}
@@ -537,9 +548,9 @@ static Bool bPrint = TRUE;
 		 * no tile palette attributes, therefore its metadata is YYY=000. */
 		Bool bBG1DirectPixels = FALSE;
 		if ((uEffectiveCGWSEL & 0x01) &&
-		    (((pRegs->bgmode & 7) == 3) ||
-		     ((pRegs->bgmode & 7) == 4) ||
-		     ((pRegs->bgmode & 7) == 7)))
+		    ((uBGMode == 3) ||
+		     (uBGMode == 4) ||
+		     (uBGMode == 7)))
 		{
 			bBG1DirectPixels = _SnesPPUHasMode34DirectPixels(pBlendInfo);
 		}
@@ -557,7 +568,7 @@ static Bool bPrint = TRUE;
 		bDirectMain = !bBG1DirectPixels &&
 		              (uEffectiveCGADSUB & 0x3F) == 0 &&
 		              (uEffectiveCGWSEL & 0xC0) == 0 &&
-		              m_pPPU->GetIntensity() == 15;
+		              uIntensity == 15;
 #endif
 
 		// determine color window mask for main screen
@@ -653,14 +664,14 @@ static Bool bPrint = TRUE;
 				SNMaskClear(&DirectOutputMask[1]);
 				SNMaskClear(&DirectOutputMask[2]);
 				m_pBlend->Exec(pBlendInfo, iLine, 0, DirectOutputMask, FALSE,
-					m_pPPU->GetIntensity());
+					uIntensity);
 			}
 
 			/* Exec stages its source before returning. Restore the real CGRAM
 			 * master palette immediately and mark it dirty for the next normal
 			 * scanline; the in-flight GIF chain owns its scratchpad copy. */
 			m_pBlend->UpdatePalette(pBlendInfo, m_pPPU->GetCGData(),
-				m_pPPU->GetIntensity());
+				uIntensity);
 		}
 		else
 #endif
@@ -671,7 +682,7 @@ static Bool bPrint = TRUE;
             pRegs->coldata,
 			bDirectMain ? NULL : ColorMask,
             (uEffectiveCGADSUB & 0x80),
-            m_pPPU->GetIntensity()
+            uIntensity
             );
 		}
 #if SNDBG_LOG

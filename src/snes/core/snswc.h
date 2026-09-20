@@ -46,8 +46,14 @@ public:
     SNSuperWildCard();
     ~SNSuperWildCard();
 
+    /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916
+     * The frontend may lend the classic SWC its pre-core 4 MiB DRAM block.
+     * Ownership stays with the frontend; Magicom/default callers retain the
+     * original internal-allocation path through the default arguments. */
     Bool Load(const Char *pFirmwarePath, const Char *pDiskPath,
-              ModelE eModel = MODEL_SWC);
+              ModelE eModel = MODEL_SWC,
+              Uint8 *pExternalDRAM = NULL,
+              Uint32 nExternalDRAMBytes = 0);
     void Shutdown();
     void Reset();
 
@@ -147,6 +153,7 @@ private:
     ModelE m_eModel;
     Uint8 *m_pDRAM;
     Uint32 m_nDRAMBytes;
+    Bool m_bOwnDRAM; /* AURORA_SWC_32MBIT_SRAM_FIDELITY_V1_1_20260916: borrowed frontend DRAM is never freed here. */
     Uint8 *m_pFirmware;
     Uint32 m_nFirmwareBytes;
 
@@ -200,6 +207,10 @@ private:
      * stop honoring "more split files" once the real cartridge is exhausted. */
     Uint32 m_uSplitSavedBlocks;
     Uint32 m_uSplitBlocksOnMedia;
+    /* AURORA_SWC_12MBIT_SPLIT_ACCOUNTING_V1_20260917
+     * D88 data offset of the most recently seen program header.
+     * Rewrites replace that split; a different offset is a new split. */
+    Uint32 m_uSplitLastHeaderOffset;
 
     Bool m_bD88HeaderDirty;
 

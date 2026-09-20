@@ -24,6 +24,7 @@
 
 #include "types.h"
 #include "sncx4.h"
+/* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: CX4 hardware-level command/bus audit. */
 
 #include <string.h>
 
@@ -438,80 +439,77 @@ void SNCX4::ConvOAM()
     {
         Uint8 offset = (Uint8)((m_Ram[0x626] & 3) * 2);
         Uint8 SprCount = (Uint8)(128 - m_Ram[0x626]);
-        Int32 prio, k;
-        for (prio = 0x30; prio >= 0; prio -= 0x10)
+        Int32 k;
+        Int32 src = 0x220;
+
+        /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: CX4 OAM keeps source order; do not sort by OBJ priority. */
+        for (k = m_Ram[0x0620]; k > 0 && SprCount > 0; k--, src += 16)
         {
-            Int32 src = 0x220;
-            for (k = m_Ram[0x0620]; k > 0 && SprCount > 0; k--, src += 16)
+            Int16 SprX, SprY;
+            Uint8 SprName, SprAttr;
+            Uint32 spr;
+            SprX = (Int16)(RdW(src) - globalX);
+            SprY = (Int16)(RdW(src + 2) - globalY);
+            SprName = m_Ram[src + 5];
+            SprAttr = (Uint8)(m_Ram[src + 4] | m_Ram[src + 6]);
+            spr = Rd3(src + 7);
+            if (RdMem(spr) != 0)
             {
-                Int16 SprX, SprY;
-                Uint8 SprName, SprAttr;
-                Uint32 spr;
-                if ((m_Ram[src + 4] & 0x30) != prio)
-                    continue;
-                SprX = (Int16)(RdW(src) - globalX);
-                SprY = (Int16)(RdW(src + 2) - globalY);
-                SprName = m_Ram[src + 5];
-                SprAttr = (Uint8)(m_Ram[src + 4] | m_Ram[src + 6]);
-                spr = Rd3(src + 7);
-                if (RdMem(spr) != 0)
+                Int32 SprCnt = RdMem(spr);
+                spr++;
+                for (; SprCnt > 0 && SprCount > 0; SprCnt--, spr += 4)
                 {
-                    Int32 SprCnt = RdMem(spr);
-                    spr++;
-                    for (; SprCnt > 0 && SprCount > 0; SprCnt--, spr += 4)
+                    Uint8 b0 = RdMem(spr);
+                    Uint8 b1 = RdMem(spr + 1);
+                    Uint8 b2 = RdMem(spr + 2);
+                    Uint8 b3 = RdMem(spr + 3);
+                    Int16 X, Y;
+                    X = (Int8)b1;
+                    if (SprAttr & 0x40)
+                        X = (Int16)(-X - ((b0 & 0x20) ? 16 : 8));
+                    X = (Int16)(X + SprX);
+                    if (X >= -16 && X <= 272)
                     {
-                        Uint8 b0 = RdMem(spr);
-                        Uint8 b1 = RdMem(spr + 1);
-                        Uint8 b2 = RdMem(spr + 2);
-                        Uint8 b3 = RdMem(spr + 3);
-                        Int16 X, Y;
-                        X = (Int8)b1;
-                        if (SprAttr & 0x40)
-                            X = (Int16)(-X - ((b0 & 0x20) ? 16 : 8));
-                        X = (Int16)(X + SprX);
-                        if (X >= -16 && X <= 272)
+                        Y = (Int8)b2;
+                        if (SprAttr & 0x80)
+                            Y = (Int16)(-Y - ((b0 & 0x20) ? 16 : 8));
+                        Y = (Int16)(Y + SprY);
+                        if (Y >= -16 && Y <= 224)
                         {
-                            Y = (Int8)b2;
-                            if (SprAttr & 0x80)
-                                Y = (Int16)(-Y - ((b0 & 0x20) ? 16 : 8));
-                            Y = (Int16)(Y + SprY);
-                            if (Y >= -16 && Y <= 224)
-                            {
-                                m_Ram[oam + 0] = (Uint8)(X & 0xff);
-                                m_Ram[oam + 1] = (Uint8)Y;
-                                m_Ram[oam + 2] = (Uint8)(SprName + b3);
-                                m_Ram[oam + 3] = (Uint8)(SprAttr ^ (b0 & 0xc0));
-                                m_Ram[oam2] &= (Uint8)~(3 << offset);
-                                if (X & 0x100)
-                                    m_Ram[oam2] |= (Uint8)(1 << offset);
-                                if (b0 & 0x20)
-                                    m_Ram[oam2] |= (Uint8)(2 << offset);
-                                oam += 4;
-                                SprCount--;
-                                offset = (Uint8)((offset + 2) & 6);
-                                if (offset == 0)
-                                    oam2++;
-                            }
+                            m_Ram[oam + 0] = (Uint8)(X & 0xff);
+                            m_Ram[oam + 1] = (Uint8)Y;
+                            m_Ram[oam + 2] = (Uint8)(SprName + b3);
+                            m_Ram[oam + 3] = (Uint8)(SprAttr ^ (b0 & 0xc0));
+                            m_Ram[oam2] &= (Uint8)~(3 << offset);
+                            if (X & 0x100)
+                                m_Ram[oam2] |= (Uint8)(1 << offset);
+                            if (b0 & 0x20)
+                                m_Ram[oam2] |= (Uint8)(2 << offset);
+                            oam += 4;
+                            SprCount--;
+                            offset = (Uint8)((offset + 2) & 6);
+                            if (offset == 0)
+                                oam2++;
                         }
                     }
                 }
-                else if (SprCount > 0)
-                {
-                    m_Ram[oam + 0] = (Uint8)SprX;
-                    m_Ram[oam + 1] = (Uint8)SprY;
-                    m_Ram[oam + 2] = SprName;
-                    m_Ram[oam + 3] = SprAttr;
-                    m_Ram[oam2] &= (Uint8)~(3 << offset);
-                    if (SprX & 0x100)
-                        m_Ram[oam2] |= (Uint8)(3 << offset);
-                    else
-                        m_Ram[oam2] |= (Uint8)(2 << offset);
-                    oam += 4;
-                    SprCount--;
-                    offset = (Uint8)((offset + 2) & 6);
-                    if (offset == 0)
-                        oam2++;
-                }
+            }
+            else if (SprCount > 0)
+            {
+                m_Ram[oam + 0] = (Uint8)SprX;
+                m_Ram[oam + 1] = (Uint8)SprY;
+                m_Ram[oam + 2] = SprName;
+                m_Ram[oam + 3] = SprAttr;
+                m_Ram[oam2] &= (Uint8)~(3 << offset);
+                if (SprX & 0x100)
+                    m_Ram[oam2] |= (Uint8)(3 << offset);
+                else
+                    m_Ram[oam2] |= (Uint8)(2 << offset);
+                oam += 4;
+                SprCount--;
+                offset = (Uint8)((offset + 2) & 6);
+                if (offset == 0)
+                    oam2++;
             }
         }
     }
@@ -910,20 +908,27 @@ void SNCX4::Command(Uint8 uByte)
         break;
     }
 
-    case 0x10:   // polar -> retangular
+    case 0x10:   // polar -> retangular (signed 16-bit distance)
     {
-        Int32 tmp = ((Int32)RdW(0x1f83) * cx4_cos(RdW(0x1f80) & 0x1ff) * 2) >> 16;
+        Int32 d = (Int32)(Int16)RdW(0x1f83);
+        Int32 angle = (Int32)(RdW(0x1f80) & 0x1ff);
+        Int32 tmp = (Int32)(Int16)((cx4_cos(angle) * d) >> 15);
         Wr3(0x1f86, (Uint32)tmp);
-        tmp = ((Int32)RdW(0x1f83) * cx4_sin(RdW(0x1f80) & 0x1ff) * 2) >> 16;
-        Wr3(0x1f89, (Uint32)(tmp - (tmp >> 6)));
+        tmp = (Int32)(Int16)((cx4_sin(angle) * d) >> 15);
+        tmp -= tmp >> 6;
+        Wr3(0x1f89, (Uint32)tmp);
         break;
     }
 
-    case 0x13:   // polar -> retangular
+    case 0x13:   // polar -> retangular, rounded
     {
-        Int32 tmp = ((Int32)RdW(0x1f83) * cx4_cos(RdW(0x1f80) & 0x1ff) * 2) >> 8;
+        Int32 d = (Int32)(Int16)RdW(0x1f83) * 2;
+        Int32 angle = (Int32)(RdW(0x1f80) & 0x1ff);
+        Int32 tmp = cx4_cos(angle) * d;
+        tmp = (tmp >> 8) + ((tmp >> 7) & 1);
         Wr3(0x1f86, (Uint32)tmp);
-        tmp = ((Int32)RdW(0x1f83) * cx4_sin(RdW(0x1f80) & 0x1ff) * 2) >> 8;
+        tmp = cx4_sin(angle) * d;
+        tmp = (tmp >> 8) + ((tmp >> 7) & 1);
         Wr3(0x1f89, (Uint32)tmp);
         break;
     }
@@ -1062,18 +1067,79 @@ void SNCX4::Command(Uint8 uByte)
 // Interface de barramento ($6000-$7FFF)
 // ---------------------------------------------------------------------------
 
-Uint8 SNCX4::Read(Uint32 uAddr)
+Uint8 SNCX4::Read(Uint32 uAddr, Uint8 uOpenBus)
 {
-    if (uAddr == 0x7f5e)
-        return 0;   // status: sempre pronto
-    return m_Ram[(uAddr - 0x6000) & (CX4_VISIBLE - 1)];
+    Uint16 a = (Uint16)uAddr;
+
+    /* AURORA_DSP_SA1_FX_CX4_CPU_MEGA_ACCURACY_V6_20260916: physical 3 KiB RAM mirror ($6000-$6BFF <-> $7000-$7BFF). */
+    if ((a >= 0x6000 && a <= 0x6BFF) ||
+        (a >= 0x7000 && a <= 0x7BFF))
+        return m_Ram[a & 0x0FFFu];
+
+    /* Physical chips expose a repeating electrical/noise pattern in these
+       holes. The synchronous HLE has no analogue state, so preserve the
+       actual S-CPU data bus rather than aliasing registers or inventing RAM. */
+    if ((a >= 0x6C00 && a <= 0x6FFF) ||
+        (a >= 0x7C00 && a <= 0x7F3F))
+        return uOpenBus;
+
+    if (a >= 0x7F40 && a <= 0x7F52)
+    {
+        Uint8 v = m_Ram[a - 0x6000];
+        /* Hardware reads back only implemented bits. */
+        if (a == 0x7F48) return (Uint8)(v & 0x01u);
+        if (a == 0x7F4C) return (Uint8)(v & 0x03u);
+        if (a == 0x7F50) return (Uint8)(v & 0x77u);
+        if (a == 0x7F51 || a == 0x7F52) return (Uint8)(v & 0x01u);
+        return v;
+    }
+
+    /* HLE commands complete synchronously, so busy/IRQ/suspend status reads
+       are idle. $7F58/$7F5A are measured as hard zero on real hardware. */
+    if (a >= 0x7F53 && a <= 0x7F5F)
+        return 0;
+
+    /* Vector RAM followed by the sixteen 24-bit general registers. */
+    if (a >= 0x7F60 && a <= 0x7FAF)
+        return m_Ram[a - 0x6000];
+
+    if (a >= 0x7FB0 && a <= 0x7FBF)
+        return 0;
+
+    /* Register mirror. */
+    if (a >= 0x7FC0 && a <= 0x7FEF)
+        return m_Ram[0x1F80u + (a - 0x7FC0u)];
+
+    if (a >= 0x7FF0 && a <= 0x7FFF)
+        return 0;
+
+    return uOpenBus;
 }
 
 void SNCX4::Write(Uint32 uAddr, Uint8 uData)
 {
-    m_Ram[(uAddr - 0x6000) & (CX4_VISIBLE - 1)] = uData;
-    if (uAddr == 0x7f4f)
+    Uint16 a = (Uint16)uAddr;
+    Uint32 off;
+
+    if ((a >= 0x6000 && a <= 0x6BFF) ||
+        (a >= 0x7000 && a <= 0x7BFF))
+    {
+        m_Ram[a & 0x0FFFu] = uData;
+        return;
+    }
+
+    if (a >= 0x7F40 && a <= 0x7F52)
+        off = (Uint32)(a - 0x6000);
+    else if (a >= 0x7F60 && a <= 0x7FAF)
+        off = (Uint32)(a - 0x6000);
+    else if (a >= 0x7FC0 && a <= 0x7FEF)
+        off = 0x1F80u + (Uint32)(a - 0x7FC0u);
+    else
+        return;
+
+    m_Ram[off] = uData;
+    if (a == 0x7F4F)
         Command(uData);
-    else if (uAddr == 0x7f47)
+    else if (a == 0x7F47)
         DmaTransfer();
 }

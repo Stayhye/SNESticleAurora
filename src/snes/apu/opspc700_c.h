@@ -2191,8 +2191,8 @@ SNSPC_ENDOP(4)
 
 	// TSET1_addr_abs_
 SNSPC_OP(0x00e,6)
-	/* AURORA_SPC700_TSET_TCLR_REFERENCE_V1
-	 * N/Z are the equality-test result A-old_memory, not A&memory. */
+	/* AURORA_SPC700_MEGA_ACCURACY_V1_20260916
+	 * Equality-test flags plus the hardware RMW second read before write. */
 	SNSPC_FETCH16(t0);
 	SNSPC_READ8(t0,t1);
 	SNSPC_GET_A8(t2);
@@ -2201,6 +2201,7 @@ SNSPC_OP(0x00e,6)
 	SNSPC_SETFLAG_N8(t2);
 	SNSPC_GET_A8(t2);
 	SNSPC_OR(t1,t2);
+	SNSPC_DUMMYREAD8(t0);
 	SNSPC_WRITE8(t0,t1);
 SNSPC_ENDOP(6)
 
@@ -2215,6 +2216,7 @@ SNSPC_OP(0x04e,6)
 	SNSPC_GET_A8(t2);
 	SNSPC_OR(t1,t2);
 	SNSPC_XOR(t1,t2);
+	SNSPC_DUMMYREAD8(t0);
 	SNSPC_WRITE8(t0,t1);
 SNSPC_ENDOP(6)
 

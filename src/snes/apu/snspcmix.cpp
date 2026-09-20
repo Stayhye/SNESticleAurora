@@ -10,6 +10,8 @@
 #include "sntiming.h"
 #include "snspcdefs.h"
 #include "sndbglog.h"
+#include "platform/ps2/system/aurora_runtime_trace.h"
+/* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918 */
 extern "C" {
 #include "snspcbrr.h"
 };
@@ -101,12 +103,9 @@ static Uint32 _SNSpcDsp_BentLineMS[32]=
 		35, 28, 21, 18, 14, 11, 7, 3
 };
 
-static Uint32 _SNSpcDsp_NoiseFreq[32]=
-{
-	0,	16,	21,	25,	31,	42,	50,	63,	83,	100,	
-	125,	167,	200,	250,	333,	400,	500,	667,	800,	1000,	1300,
-	1600,	2000,	2700,	3200,	4000,	5300,	6400,	8000,	10700,	16000,	32000
-};
+/* AURORA_SPC700_MEGA_ACCURACY_V1_20260916 */
+static const Uint16 _SNSpcDspCounterRate[32]={0,2048,1536,1280,1024,768,640,512,384,320,256,192,160,128,96,80,64,48,40,32,24,20,16,12,10,8,6,5,4,3,2,1};
+static const Uint16 _SNSpcDspCounterOffset[32]={0,0,1040,536,0,1040,536,0,1040,536,0,1040,536,0,1040,536,0,1040,536,0,1040,536,0,1040,536,0,1040,536,0,1040,0,0};
 
 
 
@@ -182,6 +181,25 @@ void SNSpcDspMix::BuildLookupTables(Uint32 nSampleRate)
 void SNSpcDspMix::Reset()
 {
 	memset(m_Channels, 0, sizeof(m_Channels));
+	/* AURORA_DKC_SPC_HOST_SAFETY_V1_RESET_20260917
+	 * Do not depend on SnesSystem/mixer storage having been zero-filled.
+	 * The next Mix() must build the envelope tables for the real rate. */
+	m_nSampleRate = 0;
+}
+
+void SNSpcDspMix::SoftReset()
+{
+	Int32 i;
+	for (i=0;i<SNSPCDSP_CHANNEL_NUM;i++)
+	{
+		SNSpcChannelT *c=&m_Channels[i];
+		c->eEnvState=SNSPCDSP_ENVSTATE_RELEASE;
+		c->iEnvelope=0;
+		c->nEnvCount=0;
+		c->envx=0;
+		c->outx=0;
+		c->endx=FALSE;
+	}
 }
 
 void SNSpcDspMix::KeyOn(Int32 iChannel)
@@ -190,8 +208,22 @@ void SNSpcDspMix::KeyOn(Int32 iChannel)
 	const SNSpcVoiceRegsT *pRegs = m_pDsp->GetVoiceRegs(iChannel);
 
 	pChannel->eEnvState  = SNSPCDSP_ENVSTATE_ATTACK;
+	pChannel->iEnvelope  = 0;
 	pChannel->nEnvCount  = 0;
+	pChannel->envx       = 0;
+	pChannel->outx       = 0;
 	pChannel->uBlockAddr = m_pDsp->GetSampleDir(pRegs->srcn, 0);
+
+	/* AURORA_DKC_SPC_HOST_SAFETY_V1_KEYON_20260917
+	 * A new KON starts a new BRR/interpolation stream.  Reset the simplified
+	 * interpolation history and place phase at the existing decode threshold:
+	 * the first OutputSample iteration FetchBlock()s the new BRR block, then
+	 * starts from the two zero history samples.  This also prevents a stale
+	 * end-of-batch phase from becoming an out-of-row BlockData subscript. */
+	memset(pChannel->BlockData, 0, sizeof(pChannel->BlockData));
+	pChannel->iPhase = 14 << 16;
+	pChannel->uOldBlockAddr = pChannel->uBlockAddr;
+
     // clear endx
 	pChannel->endx		 = FALSE;
 }
@@ -208,6 +240,8 @@ void SNSpcDspMix::KeyOff(Int32 iChannel)
 	}
 }
 
+/* AURORA_HW_ACCURACY_SDSP_SILENT_OUTX_V1_20260916
+ * Once a BRR voice has ended, OUTX must expose zero rather than stale ENVX. */
 Bool SNSpcDspMix::GetChannelState(Int32 iChannel, Uint8 *pEnvX, Uint8 *pOutX)
 {
 	SNSpcChannelT *pChannel = &m_Channels[iChannel];
@@ -491,12 +525,7 @@ Int32 SNSpcDspMix::OutputEnvelope(Int32 iChannel, Uint8 *pOut, Int32 nSamples)
 	// update envx
 	pChannel->envx = iEnvelope >> (SNSPCDSP_ENVELOPE_BITS - 7);
 
-	// voice ended?
-	if (eEnvState == SNSPCDSP_ENVSTATE_SILENCE)
-	{
-		// signal end of channel
-		pChannel->endx = TRUE;
-	}
+	/* Envelope reaching zero does not assert ENDX; BRR end flags do. */
 
 	PROF_LEAVE("SNSpcDspOutputEnvelope");
 	return 1;
@@ -513,55 +542,94 @@ void SNSpcDspMixFull::Reset()
 	memset(&m_Echo, 0, sizeof(m_Echo));
 	memset(m_EchoBuffer, 0, sizeof(m_EchoBuffer));
 	m_iNoisePhase = 0;
-	m_uNoiseGen   = 1;
+	m_uNoiseGen   = 0x4000;
 }
 
 Int32 SNSpcDspMixFull::OutputNoise(Int16 *pOut, Uint16 *pFrac, Int32 nSamples, Int32 nSampleRate)
 {
-	Uint32 uNoiseFreq;
-	Int32 iNoisePhase;
-	Int32 iNoisePhaseInc;
-	Uint32 uNoiseGen;
+	Uint32 rate=m_pDsp->GetReg(SNSPCDSP_REG_FLG)&31;
+	Uint32 counter=(Uint32)m_iNoisePhase;
+	Uint32 noise=m_uNoiseGen&0x7FFFu;
+	Uint32 period=_SNSpcDspCounterRate[rate];
+	Uint32 offset=_SNSpcDspCounterOffset[rate];
+	Uint32 eventCountdown=0;
+	(void)nSampleRate;
 
-	iNoisePhase = m_iNoisePhase;
-	uNoiseGen   = m_uNoiseGen;
-	if (uNoiseGen==0) uNoiseGen=1;
+	if(!noise) noise=0x4000;
 
-	// get noise frequency
-	uNoiseFreq = _SNSpcDsp_NoiseFreq[m_pDsp->GetReg(SNSPCDSP_REG_FLG) & 0x1F];
-
-	/* AURORA_AUDIO_NATIVE_NOISE_V3
-	 * 65536/32000 reduces exactly to 256/125. */
-	if (nSampleRate == SNSPCDSP_SAMPLERATE)
-		iNoisePhaseInc = (Int32)((uNoiseFreq << 8) / 125u);
-	else
-		iNoisePhaseInc = 0x10000 * uNoiseFreq / nSampleRate;
-
-	while (nSamples > 0)
+	/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V2_DSP2_20260917
+	 * The S-DSP noise counter is free-running even with NON/NOV == 0.
+	 * When nobody consumes the generated samples, advance the exact counter
+	 * phase and exact number of LFSR events without writing the transient
+	 * sample/fraction buffers.  All legal periods divide the 30720-step
+	 * counter, so the event cadence remains identical across wrap. */
+	if(!pOut || !pFrac)
 	{
-		while (iNoisePhase >= 0x10000)
-		{
-			uNoiseGen<<=1;
-			if (uNoiseGen & 0x80000000)
-			{
-				uNoiseGen^=0x0040001;
-			}
+		Uint32 n=(nSamples > 0) ? (Uint32)nSamples : 0u;
 
-			iNoisePhase-= 0x10000;
+		/* V1 never leaves 30720 after a positive sample, but accept that
+		 * boundary representation from old/debug states: on the next sample
+		 * it behaves exactly like stored zero. Preserve it when n==0. */
+		if(n && counter==30720u) counter=0;
+
+		if(rate && period && n)
+		{
+			Uint32 firstCounter=counter ? (counter-1u) : 30719u;
+			Uint32 firstEvent=((firstCounter+offset)%period)+1u;
+			Uint32 events=(n < firstEvent) ? 0u :
+				(1u + (n-firstEvent)/period);
+			while(events--)
+				noise=(((noise<<13)^(noise<<14))&0x4000u)|(noise>>1);
 		}
 
-		iNoisePhase+=iNoisePhaseInc;
+		if(n)
+		{
+			Uint32 step=n%30720u;
+			if(step)
+			{
+				Uint32 start=counter ? counter : 30720u;
+				if(step < start) counter=start-step;
+				else if(step == start) counter=0;
+				else counter=30720u-(step-start);
+			}
+			/* A complete 30720-sample revolution returns the stored counter
+			 * to exactly the same representation, including zero. */
+		}
 
-		pOut[0] = uNoiseGen;
-		pOut[1] = uNoiseGen;
-		pFrac[0] = 0;
-		pOut+=2;
-		pFrac++;
-		nSamples--;
+		m_iNoisePhase=(Int32)counter;
+		m_uNoiseGen=noise;
+		return 1;
 	}
 
-	m_iNoisePhase = iNoisePhase;
-	m_uNoiseGen   = uNoiseGen;
+	/* V1 generated-output path: one exact phase calculation per chunk, then
+	 * a countdown instead of a modulo at every 32-kHz sample. */
+	if(rate && period)
+	{
+		Uint32 firstCounter=counter ? (counter-1u) : 30719u;
+		eventCountdown=((firstCounter+offset)%period)+1u;
+	}
+
+	while(nSamples-- > 0)
+	{
+		if(!counter) counter=30720;
+		counter--;
+
+		if(rate)
+		{
+			eventCountdown--;
+			if(!eventCountdown)
+			{
+				noise=(((noise<<13)^(noise<<14))&0x4000u)|(noise>>1);
+				eventCountdown=period;
+			}
+		}
+
+		Int16 s=(Int16)(noise<<1);
+		pOut[0]=s; pOut[1]=s; pFrac[0]=0;
+		pOut+=2; pFrac++;
+	}
+	m_iNoisePhase=(Int32)counter;
+	m_uNoiseGen=noise;
 	return 1;
 }
 
@@ -575,37 +643,92 @@ void SNSpcDspMixFull::FetchBlock(Int32 iChannel)
 	pChannel->BlockData[0][15] = pChannel->BlockData[1][15];
 
 	// decode next block
-	if (pChannel->uBlockAddr!=0) 
+	if (pChannel->uBlockAddr!=0)
 	{
 		PROF_ENTER("SNSpcBRRDecode");
-		uFlags = SNSpcBRRDecode((m_pDsp->GetMem() + pChannel->uBlockAddr), pChannel->BlockData[1], pChannel->BlockData[0][15], pChannel->BlockData[0][14]);
+		Uint16 uBrrAddr = (Uint16)pChannel->uBlockAddr;
+		/* AURORA_SNES_BINARY_TRACE_V6_20260918_BRR_PRE */
+		AuroraTraceBrrPre(
+		    iChannel, uBrrAddr,
+		    (Int32)pChannel->BlockData[0][14],
+		    (Int32)pChannel->BlockData[0][15]);
+		Uint8 *pBrrBlock = m_pDsp->GetRAMSpan(uBrrAddr, 9);
+
+		/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V1_20260917: almost every BRR block is contiguous physical APURAM.
+		 * Keep byte-wise ReadRAM only for the real exceptional boundaries. */
+		if (pBrrBlock)
+		{
+			uFlags = SNSpcBRRDecode(
+				pBrrBlock, pChannel->BlockData[1],
+				pChannel->BlockData[0][15], pChannel->BlockData[0][14]);
+		}
+		else
+		{
+			Uint8 BrrBlock[9];
+			Int32 iBrrByte;
+			for (iBrrByte=0; iBrrByte<9; ++iBrrByte)
+			{
+				BrrBlock[iBrrByte] = m_pDsp->ReadRAM(uBrrAddr);
+				uBrrAddr = (Uint16)(uBrrAddr + 1);
+			}
+			uFlags = SNSpcBRRDecode(
+				BrrBlock, pChannel->BlockData[1],
+				pChannel->BlockData[0][15], pChannel->BlockData[0][14]);
+		}
 		PROF_LEAVE("SNSpcBRRDecode");
+		/* AURORA_SNES_BINARY_TRACE_V6_20260918_BRR_POST */
+		AuroraTraceBrrPost(
+		    iChannel, uBrrAddr, uFlags,
+		    (Int32)pChannel->BlockData[1][0],
+		    (Int32)pChannel->BlockData[1][1],
+		    (Int32)pChannel->BlockData[1][14],
+		    (Int32)pChannel->BlockData[1][15]);
 		pChannel->uBlockAddr += 9;
-	}  else
+	}
+	else
 	{
-		// fade out slowly
-//		SNSpcBRRClear(pChannel->BlockData[1], pChannel->BlockData[0][15] - (pChannel->BlockData[0][15]>>1));
 		SNSpcBRRClear(pChannel->BlockData[1], 0);
 	}
 
-	// end of sample reached?
 	if (uFlags&1)
 	{
 		const SNSpcVoiceRegsT *pRegs = m_pDsp->GetVoiceRegs(iChannel);
-
-		//$ set ENDX
 		pChannel->endx = TRUE;
-		//m_RegsSNSPCDSP_REG_ENDX] |=   1 << iChannel;
-
-		if (uFlags & 2 )
-		{
-			// do looping here?
+		if (uFlags & 2)
 			pChannel->uBlockAddr = m_pDsp->GetSampleDir(pRegs->srcn, 2);
-		} else
-		{
+		else
 			pChannel->uBlockAddr = 0;
-		}
 	}
+}
+
+
+/* AURORA_DKC_SPC_HOST_SAFETY_V1_HISTORY_20260917
+ * BlockData is one 32-sample object arranged as two rows of 16.  Aurora keeps
+ * two previous samples in row 0 and addresses them as phase -2/-1 while row 1
+ * holds the current block.  Keep that physical layout, but never index before
+ * or beyond a C++ row subobject.
+ *
+ * A legacy/restored state may also carry the end-of-batch phase that used to
+ * reach 16..17 (or higher with PMON) before a block-address change.  Clamp the
+ * history source to the last fully decoded pair rather than reading unrelated
+ * channel/object memory. */
+static _INLINE void _SNSpcDspCaptureInterpolationHistory(
+	SNSpcChannelT *pChannel)
+{
+	Int32 iSample = pChannel->iPhase >> 16;
+	Int16 *pAll = &pChannel->BlockData[0][0];
+	Int16 s0, s1;
+
+	if (iSample < -2) iSample = -2;
+	if (iSample > 14) iSample = 14;
+
+	/* row 1 starts at flat index 16; -2/-1 intentionally select row 0's
+	 * final two samples, while 0..14 remain wholly inside row 1. */
+	const Int32 iFlat = 16 + iSample;
+	s0 = pAll[iFlat + 0];
+	s1 = pAll[iFlat + 1];
+	pChannel->BlockData[1][14] = s0;
+	pChannel->BlockData[1][15] = s1;
 }
 
 
@@ -636,8 +759,7 @@ Int32 SNSpcDspMixFull::OutputSample(Int32 iChannel, Int16 *pOut, Uint16 *pFrac, 
 	if (pChannel->uBlockAddr!= pChannel->uOldBlockAddr)
 	{
 		// this is done to ensure interpolation is correct from old sample to new sample
-		pBlockData[14] = pBlockData[(pChannel->iPhase >> 16) + 0];
-		pBlockData[15] = pBlockData[(pChannel->iPhase >> 16) + 1];
+		_SNSpcDspCaptureInterpolationHistory(pChannel);
 
 		// trigger decode, retain fractional component 
 		pChannel->iPhase &= 0xFFFF;
@@ -670,7 +792,10 @@ Int32 SNSpcDspMixFull::OutputSample(Int32 iChannel, Int16 *pOut, Uint16 *pFrac, 
 			iPhase -= (16<<16);
 		}
 
-		pSample = &pBlockData[iPhase>>16];
+		/* AURORA_DKC_SPC_HOST_SAFETY_V1_FLAT_BLOCKDATA_20260917: phase -2/-1 is the previous row, not a
+		 * negative subscript of BlockData[1]. */
+		Int32 iSampleIndex = 16 + (iPhase >> 16);
+		pSample = &pChannel->BlockData[0][0] + iSampleIndex;
 		iSample0 = pSample[0];
 		iSample1 = pSample[1];
 		// write samples to be filtered later
@@ -696,7 +821,7 @@ Int32 SNSpcDspMixFull::OutputSample(Int32 iChannel, Int16 *pOut, Uint16 *pFrac, 
 	}
 
 	// set outx to be envx for now
-	pChannel->outx = pChannel->envx;
+	pChannel->outx = (pChannel->uBlockAddr == 0) ? 0 : pChannel->envx;
 
 	pChannel->uOldBlockAddr = pChannel->uBlockAddr;
 	pChannel->iPhase = iPhase;
@@ -734,8 +859,7 @@ Int32 SNSpcDspMixFull::OutputSampleModulated(
 
         if (pChannel->uBlockAddr != pChannel->uOldBlockAddr)
         {
-                pBlockData[14] = pBlockData[(pChannel->iPhase >> 16) + 0];
-                pBlockData[15] = pBlockData[(pChannel->iPhase >> 16) + 1];
+                _SNSpcDspCaptureInterpolationHistory(pChannel);
                 pChannel->iPhase &= 0xFFFF;
                 pChannel->iPhase |= 14 << 16;
         }
@@ -756,7 +880,9 @@ Int32 SNSpcDspMixFull::OutputSampleModulated(
                         iPhase -= (16 << 16);
                 }
 
-                pSample = &pBlockData[iPhase >> 16];
+                /* AURORA_DKC_SPC_HOST_SAFETY_V1_FLAT_BLOCKDATA_20260917 */
+                Int32 iSampleIndex = 16 + (iPhase >> 16);
+                pSample = &pChannel->BlockData[0][0] + iSampleIndex;
                 iSample0 = pSample[0];
                 iSample1 = pSample[1];
                 pFrac[0] = (Uint16)iPhase;
@@ -796,7 +922,7 @@ Int32 SNSpcDspMixFull::OutputSampleModulated(
 
         /* Preserve Aurora's pre-v2 externally visible OUTX approximation.
          * PMON uses its own transient per-sample data below. */
-        pChannel->outx = pChannel->envx;
+        pChannel->outx = (pChannel->uBlockAddr == 0) ? 0 : pChannel->envx;
         pChannel->uOldBlockAddr = pChannel->uBlockAddr;
         pChannel->iPhase = iPhase;
         PROF_LEAVE("SNSpcDspOutputSamplePMON");
@@ -1280,85 +1406,107 @@ void _MixEcho(Int16 *pOut, Int32 *pMain, SNSpcEchoSampleT *pEcho, Int32 nSamples
 
  */
 
-static Int32 _FilterEchoStereo(SNSpcEchoSampleT *pEchoLeft, SNSpcEchoSampleT *pEchoRight, Int32 nSamples, Int32 iEchoFeedback, Int16 *pEchoBuf, Uint32 uEchoAddr, Uint32 uEchoSize, const Int16 *pCoeff, SNSpcFIRFilterT *pFilter)
+static _INLINE Int32 _SNSpcClamp16(Int32 v)
 {
-	Int32 iFilterPos;
-	iFilterPos = pFilter[0].iPos;
-
-	while (nSamples > 0)
+	if(v>32767)return 32767;
+	if(v<-32768)return -32768;
+	return v;
+}
+static _INLINE Int16 _SNSpcEchoRead16(SNSpcDsp *dsp,Uint32 a)
+{
+	Uint16 addr=(Uint16)a;
+	Uint16 lo=dsp->ReadRAM(addr);
+	Uint16 hi=dsp->ReadRAM((Uint16)(addr+1));
+	return (Int16)(lo|(hi<<8));
+}
+static _INLINE void _SNSpcEchoWrite16(SNSpcDsp *dsp,Uint32 a,Int16 v)
+{
+	Uint16 addr=(Uint16)a,u=(Uint16)v;
+	dsp->WriteRAM(addr,(Uint8)u);
+	dsp->WriteRAM((Uint16)(addr+1),(Uint8)(u>>8));
+}
+static _INLINE Int32 _SNSpcEchoFIR(const Int16 *l,const Int16 *c)
+{
+	Int32 s=0,i;
+	for(i=0;i<7;i++)s+=((Int32)l[i]*c[i])>>6;
+	s=(Int16)s;
+	s+=(Int16)(((Int32)l[7]*c[7])>>6);
+	return _SNSpcClamp16(s)&~1;
+}
+static Uint32 _FilterEchoStereoARAM(SNSpcEchoSampleT *L,SNSpcEchoSampleT *R,Int32 n,Int32 fb,SNSpcDsp *dsp,Uint32 base,Uint32 pos,Uint32 size,const Int16 *coef,SNSpcFIRFilterT *f,Bool wr)
+{
+	Int32 fp=f[0].iPos;
+	Uint8 *pLinearRam=dsp->GetLinearPhysicalRAM();
+	if(!size)size=4;
+	if(pos>=size)pos%=size;
+	while(n-- > 0)
 	{
-		Int32 iSampleL, iSampleR;
-		Int32 iEchoSampleL, iEchoSampleR;
-		Int16 *pFilterLineL, *pFilterLineR;
+		Int32 inL=*L,inR=*R,rdL,rdR,fl,fr,wl,wrv;
+		Int16 *ll,*rr;
+		Uint32 a=(base+pos)&0xFFFFu;
 
-		iSampleL  = pEchoLeft[0];
-		iSampleR  = pEchoRight[0];
+		/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V1_20260917: direct access is bit-for-bit the same physical APURAM
+		 * when IPL is off.  Keep the split shadow-RAM helpers when IPL is on. */
+		if(pLinearRam)
+		{
+			Uint16 a0=(Uint16)a;
+			Uint16 a1=(Uint16)(a0+1);
+			Uint16 a2=(Uint16)(a0+2);
+			Uint16 a3=(Uint16)(a0+3);
+			rdL=(Int16)((Uint16)pLinearRam[a0]|((Uint16)pLinearRam[a1]<<8));
+			rdR=(Int16)((Uint16)pLinearRam[a2]|((Uint16)pLinearRam[a3]<<8));
+		}
+		else
+		{
+			rdL=_SNSpcEchoRead16(dsp,a);
+			rdR=_SNSpcEchoRead16(dsp,a+2);
+		}
 
-		// fetch sample from echo buffer
-		iEchoSampleL = pEchoBuf[uEchoAddr+0];             // (1.15.0)
-		iEchoSampleR = pEchoBuf[uEchoAddr+1];             // (1.15.0)
+		ll=&f[0].Line[fp&7]; rr=&f[1].Line[fp&7]; fp--;
+		ll[0]=ll[8]=(Int16)(rdL>>1);
+		rr[0]=rr[8]=(Int16)(rdR>>1);
+		fl=_SNSpcEchoFIR(ll,coef); fr=_SNSpcEchoFIR(rr,coef);
+		*L=(Int16)fl; *R=(Int16)fr;
+		wl=_SNSpcClamp16(inL+(Int16)((fl*fb)>>7))&~1;
+		wrv=_SNSpcClamp16(inR+(Int16)((fr*fb)>>7))&~1;
 
-		// get pointer to start of filter line
-		pFilterLineL = &pFilter[0].Line[iFilterPos&7];
-		pFilterLineR = &pFilter[1].Line[iFilterPos&7];
-		iFilterPos--;
+		if(wr)
+		{
+			if(pLinearRam)
+			{
+				Uint16 a0=(Uint16)a;
+				Uint16 a1=(Uint16)(a0+1);
+				Uint16 a2=(Uint16)(a0+2);
+				Uint16 a3=(Uint16)(a0+3);
+				Uint16 uL=(Uint16)(Int16)wl;
+				Uint16 uR=(Uint16)(Int16)wrv;
+				pLinearRam[a0]=(Uint8)uL;
+				pLinearRam[a1]=(Uint8)(uL>>8);
+				pLinearRam[a2]=(Uint8)uR;
+				pLinearRam[a3]=(Uint8)(uR>>8);
+			}
+			else
+			{
+				_SNSpcEchoWrite16(dsp,a,(Int16)wl);
+				_SNSpcEchoWrite16(dsp,a+2,(Int16)wrv);
+			}
+		}
 
-		// write sample twice for doubled line
-		pFilterLineL[0] = iEchoSampleL;
-		pFilterLineL[8] = iEchoSampleL;
-		pFilterLineR[0] = iEchoSampleR;
-		pFilterLineR[8] = iEchoSampleR;
-
-		// calculate FIR filter
-		iEchoSampleL = pFilterLineL[0] * pCoeff[0];
-		iEchoSampleR = pFilterLineR[0] * pCoeff[0];
-		iEchoSampleL+= pFilterLineL[1] * pCoeff[1];
-		iEchoSampleR+= pFilterLineR[1] * pCoeff[1];
-		iEchoSampleL+= pFilterLineL[2] * pCoeff[2];
-		iEchoSampleR+= pFilterLineR[2] * pCoeff[2];
-		iEchoSampleL+= pFilterLineL[3] * pCoeff[3];
-		iEchoSampleR+= pFilterLineR[3] * pCoeff[3];
-		iEchoSampleL+= pFilterLineL[4] * pCoeff[4];
-		iEchoSampleR+= pFilterLineR[4] * pCoeff[4];
-		iEchoSampleL+= pFilterLineL[5] * pCoeff[5];
-		iEchoSampleR+= pFilterLineR[5] * pCoeff[5];
-		iEchoSampleL+= pFilterLineL[6] * pCoeff[6];
-		iEchoSampleR+= pFilterLineR[6] * pCoeff[6];
-		iEchoSampleL+= pFilterLineL[7] * pCoeff[7];
-		iEchoSampleR+= pFilterLineR[7] * pCoeff[7];
-		iEchoSampleL >>= 7;
-		iEchoSampleR >>= 7;
-
-		// store sample (post-filter) for use by mixing this frame
-		pEchoLeft[0] = iEchoSampleL;
-		pEchoRight[0] = iEchoSampleR;
-
-		// apply feedback to echo sample
-		iEchoSampleL *= iEchoFeedback;
-		iEchoSampleR *= iEchoFeedback;
-		iEchoSampleL >>= 7;
-		iEchoSampleR >>= 7;
-
-		// add echo (1.15.0)
-		iEchoSampleL += iSampleL;
-		iEchoSampleR += iSampleR;
-
-		// write sample to echo buffer (1.15.0)
-		pEchoBuf[uEchoAddr+0] = iEchoSampleL;
-		pEchoBuf[uEchoAddr+1] = iEchoSampleR;
-
-		// wrap echo address
-		uEchoAddr+=2;
-		if (uEchoAddr >= uEchoSize) uEchoAddr = 0;
-
-		pEchoLeft++;
-		pEchoRight++;
-		nSamples--;
+		pos+=4; if(pos>=size)pos=0; L++; R++;
 	}
-
-	pFilter[0].iPos = iFilterPos;
-	pFilter[1].iPos = iFilterPos;
-	return uEchoAddr;
+	f[0].iPos=fp; f[1].iPos=fp;
+	return pos;
+}
+void SNSpcDspMixFull::FilterEcho(Int16 *L,Int16 *R,Int32 n,Int32 rate,Bool wr)
+{
+	Uint32 pos=m_Echo.uEchoAddr;
+	Uint32 size=(m_pDsp->GetReg(SNSPCDSP_REG_EDL)&15)<<11;
+	Uint32 base=((Uint32)m_pDsp->GetReg(SNSPCDSP_REG_ESA))<<8;
+	Int16 c[8];
+	if(rate!=SNSPCDSP_SAMPLERATE && size)size=size*rate/SNSPCDSP_SAMPLERATE;
+	if(!size)size=4;
+	c[0]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR0);c[1]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR1);c[2]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR2);c[3]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR3);c[4]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR4);c[5]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR5);c[6]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR6);c[7]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR7);
+	m_Echo.uEchoAddr=(Uint16)_FilterEchoStereoARAM(L,R,n,(Int8)m_pDsp->GetReg(SNSPCDSP_REG_EFB),m_pDsp,base,pos,size,c,m_Echo.Filter,wr);
 }
 
 
@@ -1368,8 +1516,6 @@ struct SNSpcDspDataT
 	Uint16 FracData[SNSPCDSP_BUFFERSIZE] _ALIGN(16);
 	Uint8 EnvData[SNSPCDSP_BUFFERSIZE] _ALIGN(16);
 
-	/* AURORA_SNES_PMON_NOISE_V3_20260822
-	 * Two transient buffers avoid read/write overlap between adjacent voices. */
 	Int16 PitchModA[SNSPCDSP_BUFFERSIZE] _ALIGN(16);
 	Int16 PitchModB[SNSPCDSP_BUFFERSIZE] _ALIGN(16);
 
@@ -1378,9 +1524,6 @@ struct SNSpcDspDataT
 };
 
 
-/* Previous voice output for PMON: interpolated sample * envelope,
- * before per-channel L/R volume. This mirrors Aurora's existing linear
- * interpolation so modulation follows the sample Aurora itself renders. */
 static void _SNSpcBuildPitchModOutput(
         Int16 *pOut, const Int16 *pIn, const Uint8 *pEnvelope,
         const Uint16 *pFrac, Int32 nSamples)
@@ -1406,75 +1549,6 @@ static void _SNSpcBuildPitchModOutput(
                 pFrac++;
                 nSamples--;
         }
-}
-
-
-#if 0
-Int32 _MixTemp(Int32 level, Int16 *pSamples, Int32 nSamples)
-{
-	while (nSamples > 0)
-	{
-		pSamples[0] = (level&0x10000) ? 4096 : -4096;
-
-		level += 0x10000 * 220 / 48000;
-		pSamples++;
-		nSamples--;
-	}
-	return level;
-}
-#endif
-
-
-// filter echo buffer into echo memory
-
-void SNSpcDspMixFull::FilterEcho(Int16 *pLeftEcho, Int16 *pRightEcho, Int32 nSamples, Int32 nSampleRate, Bool bEchoSPCMem)
-{
-	Int16 *pEchoBuf;
-	Uint32 uEchoAddr;
-	Uint32 uEchoSize;
-	Int16	FilterCoeff[8];
-
-	// use internal echo buffer. Can only use spc memory if sample rate = 32000 (not deterministic!)
-	if (bEchoSPCMem && (nSampleRate == SNSPCDSP_SAMPLERATE))
-	{
-		pEchoBuf  = (Int16*)(m_pDsp->GetMem() + (m_pDsp->GetReg(SNSPCDSP_REG_ESA) * 0x100));
-	} else
-	{
-		pEchoBuf = m_EchoBuffer;
-	}
-
-	uEchoAddr = m_Echo.uEchoAddr;
-
-	// calculate echo buffer size based on sample rate
-	uEchoSize = (m_pDsp->GetReg(SNSPCDSP_REG_EDL)&0xF) * 512 * 2;
-	/* AURORA_AUDIO_NATIVE_ECHO_V3: at 32 kHz scaling is exactly 1:1. */
-	if (nSampleRate != SNSPCDSP_SAMPLERATE)
-		uEchoSize = uEchoSize * nSampleRate / SNSPCDSP_SAMPLERATE;
-	if (uEchoSize > SNSPCDSP_ECHOBUFFER_SIZE) uEchoSize = SNSPCDSP_ECHOBUFFER_SIZE;
-
-	// set filter coefficients
-	FilterCoeff[0] = (Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR0);
-	FilterCoeff[1] = (Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR1);
-	FilterCoeff[2] = (Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR2);
-	FilterCoeff[3] = (Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR3);
-	FilterCoeff[4] = (Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR4);
-	FilterCoeff[5] = (Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR5);
-	FilterCoeff[6] = (Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR6);
-	FilterCoeff[7] = (Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR7);
-
-	// fix echo address
-	if (uEchoAddr >= uEchoSize)
-	{
-		if (uEchoSize > 0) uEchoAddr %= uEchoSize;
-		else uEchoAddr=0;
-	}
-
-	PROF_ENTER("SNSpcDspFilterEchoStereo");
-	// filter echo (left)
-	m_Echo.uEchoAddr = _FilterEchoStereo(pLeftEcho, pRightEcho, nSamples, 
-		(Int8)m_pDsp->GetReg(SNSPCDSP_REG_EFB), pEchoBuf, uEchoAddr, uEchoSize, FilterCoeff, m_Echo.Filter);
-
-	PROF_LEAVE("SNSpcDspFilterEchoStereo");
 }
 
 
@@ -1516,6 +1590,7 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 
 	// get number of samples needed to mix
 	nTotalSamples = pMixBuf->GetOutputSamples();
+	/* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918_MIX: routine MIX event suppressed. */
 #if SNDBG_LOG
 	g_DbgAudioSamples += (Uint32)nTotalSamples;
 #endif
@@ -1537,18 +1612,19 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 		Int32 iChannel;
 		Uint8 uEchoEnable;
 		Uint8 uPitchMod;
+		Uint8 uNoiseEnable; /* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V2_DSP2_20260917 */
 		Int16 *pPitchModPrev = pData->PitchModA;
 		Int16 *pPitchModNext = pData->PitchModB;
 
 		// dequeue write queue up to current cycle time
 		m_pDsp->Sync(uCycle);
 
-		// get echo enable bits
+		// EON remains active even while FLG protects echo writes.
 		uEchoEnable = m_pDsp->GetReg(SNSPCDSP_REG_EON);
-		if (m_pDsp->GetReg(SNSPCDSP_REG_FLG)&0x20) uEchoEnable=0;
 
 		/* Voice 0 cannot be pitch-modulated on real hardware. */
 		uPitchMod = m_pDsp->GetReg(SNSPCDSP_REG_PMON) & 0xFE;
+		uNoiseEnable = m_pDsp->GetReg(SNSPCDSP_REG_NOV);
 
 		// dont update more than samples-per-update at a time
 		nSamples = nTotalSamples;
@@ -1560,16 +1636,20 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 		_SNSpcDspMemset64((Uint64 *)pData->Echo[0], (sizeof(SNSpcEchoSampleT) * nSamples+7) / 8);
 		_SNSpcDspMemset64((Uint64 *)pData->Echo[1], (sizeof(SNSpcEchoSampleT) * nSamples+7) / 8);
 
-		// output niose
-		if (m_pDsp->GetReg(SNSPCDSP_REG_NOV))
+		// Noise/rate counter free-runs independent of NON selection.
 		{
 			PROF_ENTER("SNSpcDspOutputNoise");
-			OutputNoise(m_iNoiseSample, m_iNoiseFrac, nSamples, nSampleRate);
+			/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V2_DSP2_20260917: only materialize the transient noise buffers if a voice
+			 * actually consumes them; otherwise advance exact internal state. */
+			if(uNoiseEnable)
+				OutputNoise(m_iNoiseSample, m_iNoiseFrac, nSamples, nSampleRate);
+			else
+				OutputNoise(NULL, NULL, nSamples, nSampleRate);
 			PROF_LEAVE("SNSpcDspOutputNoise");
 		}
 
-		// check mute
-		if (!(m_pDsp->GetReg(SNSPCDSP_REG_FLG) & 0x40)) 
+		/* MUTE gates DAC output, not internal DSP state. */
+		if (TRUE)
 		{
 			for (iChannel=0; iChannel < SNSPCDSP_CHANNEL_NUM; iChannel++)
 			{
@@ -1615,7 +1695,7 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 						const SNSpcVoiceRegsT *pRegs = m_pDsp->GetVoiceRegs(iChannel);
 
 						// is noise enabled for this channel?
-						if (m_pDsp->GetReg(SNSPCDSP_REG_NOV) & (1<<iChannel))
+						if (uNoiseEnable & (1<<iChannel))
 						{
 							// use pre-generated noise channel data instead of pcm data
 							pSampleData = m_iNoiseSample;
@@ -1666,11 +1746,8 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 				}
 			}
 
-			if (!(m_pDsp->GetReg(SNSPCDSP_REG_FLG) & 0x20))
-			{
-				// filter echo output to echo buffer
-				FilterEcho(pData->Echo[0], pData->Echo[1], nSamples, nSampleRate, FALSE);
-			}
+			/* FLG.5 protects echo writes only; read/FIR/address continue. */
+			FilterEcho(pData->Echo[0], pData->Echo[1], nSamples, nSampleRate, (m_pDsp->GetReg(SNSPCDSP_REG_FLG)&0x20)==0);
 		}
 
 		// mix main + echo to output buffer
@@ -1680,6 +1757,11 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 		_MixEcho(OutRightData, pData->Main[1], pData->Echo[1], nSamples, 
 			(Int8)m_pDsp->GetReg(SNSPCDSP_REG_MVOLR), (Int8)m_pDsp->GetReg(SNSPCDSP_REG_EVOLR));
 		PROF_LEAVE("SNSpcDspMixEcho");
+		if (m_pDsp->GetReg(SNSPCDSP_REG_FLG)&0x40)
+		{
+			memset(OutLeftData,0,(size_t)nSamples*sizeof(*OutLeftData));
+			memset(OutRightData,0,(size_t)nSamples*sizeof(*OutRightData));
+		}
 
 		// output buffer to sound hardware
 		if (nSampleChannels == 2)
@@ -1695,6 +1777,7 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 	}
 
 	// flush sample data to output
+	/* V6D: no routine MIX completion record. */
 	pMixBuf->Flush();
 }
 
@@ -1715,7 +1798,7 @@ void SNSpcDspMixSilent::FetchBlock(Int32 iChannel)
 	{
 		Uint8 uFlags = 0;
 
-		uFlags = m_pDsp->GetMem()[pChannel->uBlockAddr];
+		uFlags = m_pDsp->ReadRAM(pChannel->uBlockAddr);
 		pChannel->uBlockAddr += 9;
 
 		// end of sample reached?
@@ -1791,7 +1874,7 @@ Int32 SNSpcDspMixSilent::OutputSample(Int32 iChannel, Int32 nSamples, Int32 nSam
 	}
 
 	// set outx to be envx for now
-	pChannel->outx = pChannel->envx;
+	pChannel->outx = (pChannel->uBlockAddr == 0) ? 0 : pChannel->envx;
 
 	pChannel->uOldBlockAddr = pChannel->uBlockAddr;
 	pChannel->iPhase = iPhase;
@@ -1823,7 +1906,8 @@ void SNSpcDspMixSilent::Mix(CMixBuffer *pMixBuf)
 		m_nSampleRate = nSampleRate;
 	}
 
-	if (!(m_pDsp->GetReg(SNSPCDSP_REG_FLG) & 0x40)) // check mute
+	/* Deterministic state advances while DAC is muted. */
+	if (TRUE)
 	{
 		for (iChannel=0; iChannel < SNSPCDSP_CHANNEL_NUM; iChannel++)
 		{

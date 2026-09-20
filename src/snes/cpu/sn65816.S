@@ -3,6 +3,10 @@
 #include "sncpudefs.h"
 #include "ps2reg.h"
 
+#ifndef AURORA_RUNTIME_TRACE
+#define AURORA_RUNTIME_TRACE 0
+#endif
+
 
 		.file		1 "sn65816.S"
     	.text	
@@ -123,6 +127,53 @@
 
 #define R_PCCycles		$30
 
+/* AURORA_SNES_BINARY_TRACE_V6_20260918_MACRO: pre-dispatch context ring, runtime gated. */
+#if AURORA_RUNTIME_TRACE
+#define AURORA_TRACE_SCPU_INSN() \
+        la      t0,g_AuroraTraceEnabled       ;\
+        lw      t1,0(t0)                      ;\
+        beqz    t1,9f                         ;\
+        nop                                   ;\
+        la      t0,g_AuroraTraceSeq           ;\
+        lw      t1,0(t0)                      ;\
+        addiu   t1,t1,1                       ;\
+        sw      t1,0(t0)                      ;\
+        la      t0,g_AuroraTraceSCPUWrite     ;\
+        lw      t2,0(t0)                      ;\
+        addiu   t2,t2,1                       ;\
+        sw      t2,0(t0)                      ;\
+        addiu   t2,t2,-1                      ;\
+        andi    t2,t2,0x07FF                  ;\
+        sll     t2,t2,5                       ;\
+        la      t0,g_AuroraTraceSCPU          ;\
+        addu    t0,t0,t2                      ;\
+        sw      t1,0(t0)                      ;\
+        lwu     t2,SP_PCBank                  ;\
+        subu    t2,R_PC,t2                    ;\
+        addiu   t2,t2,-1                      ;\
+        sw      t2,4(t0)                      ;\
+        lw      t2,SNCPU_Counter1             ;\
+        subu    t2,t2,R_Cycles                ;\
+        sw      t2,8(t0)                      ;\
+        lw      t2,SNCPU_Counter2             ;\
+        subu    t2,t2,R_Cycles                ;\
+        sw      t2,12(t0)                     ;\
+        sw      R_Cycles,16(t0)               ;\
+        sh      R_A,20(t0)                    ;\
+        sh      R_X,22(t0)                    ;\
+        sh      R_Y,24(t0)                    ;\
+        sh      R_S,26(t0)                    ;\
+        sb      R_Data,28(t0)                 ;\
+        sb      R_P,29(t0)                    ;\
+        lbu     t2,SNCPU_uSignal              ;\
+        sb      t2,30(t0)                     ;\
+        lbu     t2,SNCPU_rE                   ;\
+        sb      t2,31(t0)                     ;\
+9:
+#else
+#define AURORA_TRACE_SCPU_INSN()
+#endif
+
 
 
 
@@ -216,18 +267,19 @@
 		andi	t0,t0,0x00FF		;\
 		subu	R_Cycles,R_Cycles,t0
 
+/* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916
+ * Same r19 timing rule, one fewer host instruction in every case.
+ * R5900 branch-likely annuls the delay slot when the branch is not taken. */
 #define SNCPU_INDEX_READ_PENALTY(_base,_index) \
 		andi	t0,R_P,SNCPU_FLAG_X	;\
-		beq		t0,zr,1f			;\
+		beql	t0,zr,2f			;\
+		addiu	R_Cycles,R_Cycles,-SNCPU_CYCLE_FAST ;\
 		addu	t1,_base,_index		;\
 		xor		t0,t1,_base			;\
 		andi	t0,t0,0xFF00			;\
-		beq		t0,zr,2f			;\
-		nop							;\
-1:		addiu	R_Cycles,R_Cycles,-SNCPU_CYCLE_FAST ;\
+		bnel	t0,zr,2f			;\
+		addiu	R_Cycles,R_Cycles,-SNCPU_CYCLE_FAST ;\
 2:
-
-
 #define SNCPU_ADC8(_dest,_src)					\
 		jal		_SNCPU_ADC8						;\
         nop
@@ -262,6 +314,28 @@
 		sw		t2,SNCPU_nAbortCycles				;\
 		move	R_Cycles,zr						;\
 9:
+
+/* AURORA_CPU_BLOCKMOVE_PBR_V7_FASTPATH_20260916
+ * V7 keeps V6's PBR-safe MVN/MVP rewind, but fills both R5900 branch delay
+ * slots with useful work.  The overwhelmingly common same-descriptor repeat
+ * falls from 8 host instructions to 6 (including A--), close to the old fast
+ * path, while the rare descriptor/trap path still writes only PC.low16 back
+ * to SNCpuT before remapping so a 0000->FFFF rewind can never change PBR. */
+#define SNCPU_BLOCKMOVE_REPEAT() \
+        beq     R_A,zr,9f                       ;\
+        sltiu   t0,R_PCCount,8189               ;\
+        bne     t0,zr,8f                        ;\
+        addiu   R_PC,R_PC,-3                    ;\
+        lw      t0,SP_PCBank                    ;\
+        subu    t0,R_PC,t0                      ;\
+        sh      t0,SNCPU_rPC                    ;\
+        sw      zr,SP_PCBank                    ;\
+        lui     R_PCCount,0xC000                ;\
+        lwu     R_PC,SNCPU_rPC                  ;\
+        b       9f                              ;\
+        nop                                     ;\
+8:      addiu   R_PCCount,R_PCCount,3           ;\
+9:      SNCPU_ADDI(R_A,-1)
 
 #define SNCPU_SETFLAG_I()   		ori		R_P,R_P,SNCPU_FLAG_I
 #define SNCPU_CLRFLAG_I()   						\
@@ -388,24 +462,21 @@
 		addu	R_PC,R_PC,_rel							;\
         movz	R_PCCount,t1,t0 
 
-/* Taken 8-bit branches cost another cycle on an emulation-mode page cross.
-   Compare logical PCs, not host pointers, because the mapped bank base is not
-   guaranteed to be 256-byte aligned. */
-#define SNCPU_BREL8_PC16(_rel)				\
+/* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916
+ * Opcode dispatch already separates E=0/E=1, so native mode does not
+ * pay emulation-only page-cross bookkeeping. E=1 preserves the exact
+ * one-fast-cycle penalty, using R5900 branch-likely to annul the -6
+ * delay slot when no page crossing occurred. */
+#define SNCPU_BREL8_E1_PC16(_rel) \
 		lwu		t2,SP_PCBank						;\
 		subu	t2,R_PC,t2						;\
 		SNCPU_BREL_PC16(_rel)					;\
 		addu	t0,t2,_rel						;\
 		xor		t0,t0,t2						;\
 		andi	t0,t0,0xFF00						;\
-		sltu	t0,zr,t0						;\
-		lbu		t1,SNCPU_rE						;\
-		and		t0,t0,t1						;\
-		sll		t1,t0,1						;\
-		addu	t0,t0,t1						;\
-		sll		t0,t0,1						;\
-		subu	R_Cycles,R_Cycles,t0
-
+		bnel	t0,zr,8f						;\
+		addiu	R_Cycles,R_Cycles,-SNCPU_CYCLE_FAST ;\
+8:
 
 #define SNCPU_FETCH8(_dest)  		   \
 		jal		_SNCPU_Fetch8		;  \
@@ -784,6 +855,7 @@ _SNCPU_Write16:
 _SNCPU_Write16_Fast:
         addiu	t1,R_Addr,1								// t1 = addr + 1
 		srl		t2,R_Addr,SNCPU_BANK_SHIFT				// t2 = bank 
+_SNCPU_Write16_AfterAddrBank: /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 */
 
         srl		t1,t1,SNCPU_BANK_SHIFT					// t1 = second bank
         sll		t0,t2,4									// t0 = (bank << 4) & bank mask
@@ -856,10 +928,11 @@ _SNCPU_Write16Trap:
    This is the 65816 rule for 16-bit direct, stack-relative, and indirect
    bank-zero accesses at $FFFF. */
 _SNCPU_Write16Wrap16:
-		andi	t0,R_Addr,0xFFFF
-		xori	t0,t0,0xFFFF
-		bne		t0,zr,_SNCPU_Write16
-		nop
+        /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916: prepare normal Write16 setup while testing FFFF. */
+		addiu	t1,R_Addr,1
+		andi	t0,t1,0xFFFF
+		bne		t0,zr,_SNCPU_Write16_AfterAddrBank
+		srl		t2,R_Addr,SNCPU_BANK_SHIFT
 
 		sw		ra,SP_RA0
 		sw		R_Data,SP_Data0
@@ -999,6 +1072,7 @@ _SNCPU_Read16:
 _SNCPU_Read16_Fast:
         addiu	t1,R_Addr,1								// t1 = addr + 1
 		srl		t2,R_Addr,SNCPU_BANK_SHIFT				// t2 = bank 
+_SNCPU_Read16_AfterAddrBank: /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 */
 
         srl		t1,t1,SNCPU_BANK_SHIFT					// t1 = second bank
         sll		t0,t2,4									// t0 = (bank << 4) & bank mask
@@ -1079,6 +1153,7 @@ _SNCPU_Read16Trap:
 
 _SNCPU_Read24:
 		sw		ra, SP_RA0
+_SNCPU_Read24_AfterSaveRA: /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 */
         sw		zr,SP_Data0
 
 		jal		_SNCPU_Read8		// read addr + 0  (0000XX)
@@ -1104,10 +1179,11 @@ _SNCPU_Read24:
    preserving the bank.  The normal path still uses the original fast reader;
    only the one or two boundary addresses take the byte-wise path. */
 _SNCPU_Read16Wrap16:
-		andi	t0,R_Addr,0xFFFF
-		xori	t0,t0,0xFFFF
-		bne		t0,zr,_SNCPU_Read16
-		nop
+        /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916: (addr+1).low16 != 0 iff not the FFFF wrap case. */
+		addiu	t1,R_Addr,1
+		andi	t0,t1,0xFFFF
+		bne		t0,zr,_SNCPU_Read16_AfterAddrBank
+		srl		t2,R_Addr,SNCPU_BANK_SHIFT
 
 		sw		ra,SP_RA0
 		jal		_SNCPU_Read8
@@ -1136,8 +1212,8 @@ _SNCPU_Read16DP:
 		andi	t1,t1,0xFF00
 		or		t0,t0,t1
 		addiu	t1,R_Addr,1
-		beq		t0,t1,_SNCPU_Read16
-		nop
+		beq		t0,t1,_SNCPU_Read16_AfterAddrBank
+		srl		t2,R_Addr,SNCPU_BANK_SHIFT /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 */
 
 		sw		ra,SP_RA0
 		sw		t0,SP_SaveTrap
@@ -1159,10 +1235,9 @@ _SNCPU_Read24Wrap16:
 		andi	t0,R_Addr,0xFFFF
 		li		t1,0xFFFE
 		sltu	t0,t0,t1
-		bne		t0,zr,_SNCPU_Read24
-		nop
+		bne		t0,zr,_SNCPU_Read24_AfterSaveRA
+		sw		ra,SP_RA0 /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 */
 
-		sw		ra,SP_RA0
 		sw		R_Addr,SP_SaveTrap
 		sw		zr,SP_Data0
 		jal		_SNCPU_Read8
@@ -1763,6 +1838,8 @@ bltz	R_PCCount,_SNCPU_ExecuteFetchUpdate
 		addiu	R_PCCount,R_PCCount,-1
 
 lbu		R_Data,-1(R_PC)
+        /* AURORA_SNES_BINARY_TRACE_V6_20260918_FAST */
+        AURORA_TRACE_SCPU_INSN()
 
 
 		sll		t0, R_Data, 2							// R_Data = opcode * 4
@@ -1782,6 +1859,8 @@ _SNCPU_ExecuteFetchUpdate:
 
 		jal		_SNCPU_Fetch8Update				// reads data, pc+=1
         addiu	R_PC,R_PC,-1
+        /* AURORA_SNES_BINARY_TRACE_V6_20260918_REMAP */
+        AURORA_TRACE_SCPU_INSN()
         
 
 		sll		t0, R_Data, 2							// R_Data = opcode * 4
@@ -1987,122 +2066,236 @@ _SNCPUExecute_DoneNoRewind:
 
 
 
-	SNCPU_OP_ALL(10);
+	SNCPU_OP_E0(10);
 		// BPL N=0
         SNCPU_GETFLAG_N(R_t1);
 		SNCPU_FETCH8(R_t0)
-        
+
         SNCPU_BREAK_TRUE(R_t1)
-        
+
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
 
-		SNCPU_BREL8_PC16(R_t0);
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E1(10);
+		// BPL N=0
+        SNCPU_GETFLAG_N(R_t1);
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_TRUE(R_t1)
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
 	SNCPU_ENDOP(1)
 
 
 
-	SNCPU_OP_ALL(30);
+	SNCPU_OP_E0(30);
 		// BMI N=1
         SNCPU_GETFLAG_N(R_t1);
 		SNCPU_FETCH8(R_t0)
-        
+
         SNCPU_BREAK_FALSE(R_t1);
-        
+
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
 
-		SNCPU_BREL8_PC16(R_t0);
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
 	SNCPU_ENDOP(1)
 
-	SNCPU_OP_ALL(f0);
+	SNCPU_OP_E1(30);
+		// BMI N=1
+        SNCPU_GETFLAG_N(R_t1);
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_FALSE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E0(f0);
 		// BEQ Z=1
         SNCPU_GETFLAG_Z(R_t1);
 		SNCPU_FETCH8(R_t0)
-        
+
         SNCPU_BREAK_FALSE(R_t1);
-        
+
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
 
-		SNCPU_BREL8_PC16(R_t0);
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
 	SNCPU_ENDOP(1)
 
-	SNCPU_OP_ALL(d0);
+	SNCPU_OP_E1(f0);
+		// BEQ Z=1
+        SNCPU_GETFLAG_Z(R_t1);
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_FALSE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E0(d0);
 		// BNE Z=0
         SNCPU_GETFLAG_Z(R_t1);
 		SNCPU_FETCH8(R_t0)
-        
+
         SNCPU_BREAK_TRUE(R_t1);
-        
+
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
 
-		SNCPU_BREL8_PC16(R_t0);
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E1(d0);
+		// BNE Z=0
+        SNCPU_GETFLAG_Z(R_t1);
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_TRUE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
 	SNCPU_ENDOP(1)
 
 
-	SNCPU_OP_ALL(90);
+	SNCPU_OP_E0(90);
 		// BCC
         SNCPU_GETFLAG_C(R_t1);
 		SNCPU_FETCH8(R_t0)
-        
+
         SNCPU_BREAK_TRUE(R_t1);
-        
+
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
 
-		SNCPU_BREL8_PC16(R_t0);
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
 	SNCPU_ENDOP(1)
 
-	SNCPU_OP_ALL(b0);
+	SNCPU_OP_E1(90);
+		// BCC
+        SNCPU_GETFLAG_C(R_t1);
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_TRUE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E0(b0);
 		// BCS
         SNCPU_GETFLAG_C(R_t1);
 		SNCPU_FETCH8(R_t0)
-        
+
         SNCPU_BREAK_FALSE(R_t1);
-        
+
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
 
-		SNCPU_BREL8_PC16(R_t0);
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
 	SNCPU_ENDOP(1)
 
-	SNCPU_OP_ALL(50);
+	SNCPU_OP_E1(b0);
+		// BCS
+        SNCPU_GETFLAG_C(R_t1);
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_FALSE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E0(50);
 		// BVC
         SNCPU_GETFLAG_V(R_t1);
 		SNCPU_FETCH8(R_t0)
-        
+
         SNCPU_BREAK_TRUE(R_t1);
-        
+
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
 
-		SNCPU_BREL8_PC16(R_t0);
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
 	SNCPU_ENDOP(1)
 
-	SNCPU_OP_ALL(70);
+	SNCPU_OP_E1(50);
+		// BVC
+        SNCPU_GETFLAG_V(R_t1);
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_TRUE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E0(70);
 		// BVS
         SNCPU_GETFLAG_V(R_t1);
 		SNCPU_FETCH8(R_t0)
-        
+
         SNCPU_BREAK_FALSE(R_t1);
-        
+
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
 
-		SNCPU_BREL8_PC16(R_t0);
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E1(70);
+		// BVS
+        SNCPU_GETFLAG_V(R_t1);
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_BREAK_FALSE(R_t1);
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
 	SNCPU_ENDOP(1)
 
 
-	SNCPU_OP_ALL(80);
+	SNCPU_OP_E0(80);
 		// BRA
 		SNCPU_FETCH8(R_t0)
 
         SNCPU_SHLI(R_t0,24)
         SNCPU_SRAI(R_t0,24)
 
-		SNCPU_BREL8_PC16(R_t0);
+		SNCPU_BREL_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E0: no page-cross penalty */
+	SNCPU_ENDOP(1)
+
+	SNCPU_OP_E1(80);
+		// BRA
+		SNCPU_FETCH8(R_t0)
+
+        SNCPU_SHLI(R_t0,24)
+        SNCPU_SRAI(R_t0,24)
+
+		SNCPU_BREL8_E1_PC16(R_t0); /* AURORA_CPU_COMMON_HOTPATH_PERF_V3_20260916 E1 */
 	SNCPU_ENDOP(1)
         
 
@@ -2144,12 +2337,7 @@ _SNCPUExecute_DoneNoRewind:
         SNCPU_ANDI(R_X,0xFFFF)
         SNCPU_ANDI(R_Y,0xFFFF)
         
-        addiu	t0,R_PC,-3			// if A!=0, PC-=3
-        addiu	t1,R_PCCount, 3		//  PCCount+=3 also
-        movn	R_PC,t0,R_A
-        movn	R_PCCount,t1,R_A
-        
-        SNCPU_ADDI(R_A, -1)
+        SNCPU_BLOCKMOVE_REPEAT()
 	SNCPU_ENDOP(2)
         
 
@@ -2175,12 +2363,7 @@ _SNCPUExecute_DoneNoRewind:
         SNCPU_ANDI(R_X,0xFF)
         SNCPU_ANDI(R_Y,0xFF)
         
-        addiu	t0,R_PC,-3			// if A!=0, PC-=3
-        addiu	t1,R_PCCount, 3		//  PCCount+=3 also
-        movn	R_PC,t0,R_A
-        movn	R_PCCount,t1,R_A
-        
-        SNCPU_ADDI(R_A, -1)
+        SNCPU_BLOCKMOVE_REPEAT()
 	SNCPU_ENDOP(2)
 
 
@@ -2206,12 +2389,7 @@ _SNCPUExecute_DoneNoRewind:
         SNCPU_ANDI(R_X,0xFFFF)
         SNCPU_ANDI(R_Y,0xFFFF)
         
-        addiu	t0,R_PC,-3			// if A!=0, PC-=3
-        addiu	t1,R_PCCount, 3		//  PCCount+=3 also
-        movn	R_PC,t0,R_A
-        movn	R_PCCount,t1,R_A
-        
-        SNCPU_ADDI(R_A, -1)
+        SNCPU_BLOCKMOVE_REPEAT()
 	SNCPU_ENDOP(2)
         
 
@@ -2237,12 +2415,7 @@ _SNCPUExecute_DoneNoRewind:
         SNCPU_ANDI(R_X,0xFF)
         SNCPU_ANDI(R_Y,0xFF)
         
-        addiu	t0,R_PC,-3			// if A!=0, PC-=3
-        addiu	t1,R_PCCount, 3		//  PCCount+=3 also
-        movn	R_PC,t0,R_A
-        movn	R_PCCount,t1,R_A
-        
-        SNCPU_ADDI(R_A, -1)
+        SNCPU_BLOCKMOVE_REPEAT()
 	SNCPU_ENDOP(2)
 
 

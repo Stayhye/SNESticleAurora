@@ -57,6 +57,11 @@ Bool _MainLoopSaveState();
 void MainLoopStateSettingsLoad();
 Bool MainLoopStateSettingsSave();
 void MainLoopStateOnRomChanged();
+
+/* AURORA_GBA_STATE_LIFECYCLE_V2_20260916 */
+Bool MainLoopStateReserveGbaScratch(Uint32 nStateBytes);
+void MainLoopStateReleaseGbaScratch();
+
 void MainLoopStatePrimeRomIdentityCRC(Uint32 uCRC);
 /* AURORA_PD_MEGA_FIX_20260820 */
 Bool MainLoopStateHasDeviceChoice();

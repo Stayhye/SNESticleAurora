@@ -10,6 +10,8 @@ extern "C" {
 #include "snspc.h"
 };
 #include "snspcdsp.h"
+#include "platform/ps2/system/aurora_runtime_trace.h"
+/* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918 */
 
 #define SNES_DEBUGSPCIO (CODE_DEBUG && FALSE)
 
@@ -106,6 +108,7 @@ extern "C" Bool g_bStateDebug;
 Uint8 SNSpcIO::Read8Trap(SNSpcT *pSpc, Uint32 uAddr)
 {
 	SNSpcIO *pIO = (SNSpcIO *)pSpc->pUserData;
+	/* AURORA_SNES_BINARY_TRACE_V7_VISUAL_BREADCRUMBS_20260918_SPCIO_READ: no USB event; SPC ring is sampled by frame/critical breadcrumbs. */
 
 #if SNES_STATEDEBUG
 	if (g_bStateDebug)
@@ -113,11 +116,28 @@ Uint8 SNSpcIO::Read8Trap(SNSpcT *pSpc, Uint32 uAddr)
 #endif
 	switch (uAddr)
 	{
+	/* AURORA_SPC700_MEGA_ACCURACY_V1_20260916 */
+	case 0xF0:
+	case 0xF1:
+	case 0xFA:
+	case 0xFB:
+	case 0xFC:
+		return 0x00;
+
 	case 0xF2:
+		/* AURORA_SPC_DSPADDR_F2_READBACK_FIX_V1_20260919
+		 * DSPADDR is an 8-bit S-SMP latch.  Bit 7 controls whether
+		 * a write through DSPDATA ($F3) is accepted, but it must not
+		 * be discarded from the DSPADDR value stored/read at $F2.
+		 * The S-DSP register index itself remains 7-bit at $F3.
+		 */
 		return pSpc->Mem[uAddr];
 
 	case 0xF3:
-		pIO->m_pSpcDsp->Sync();
+		/* AURORA_HW_ACCURACY_DSPDATA_ORDER_V1_20260916
+		 * Do not make future S-DSP writes visible to an $F3 read. */
+		pIO->m_pSpcDsp->Sync(
+			SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME));
 		return pIO->m_pSpcDsp->Read8(pSpc->Mem[0xF2]);
 	case 0xF4: // port 0-4
 	case 0xF5:
@@ -151,9 +171,16 @@ Uint8 SNSpcIO::Read8Trap(SNSpcT *pSpc, Uint32 uAddr)
 void SNSpcIO::Write8Trap(SNSpcT *pSpc, Uint32 uAddr, Uint8 uData)
 {
 	SNSpcIO *pIO = (SNSpcIO *)pSpc->pUserData;
-	Int32 iCycle;
-
-	iCycle = SNSPCGetCounter(pSpc, SNSPC_COUNTER_TOTAL);
+	/* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918_SPCIO_W */
+	if (uAddr >= 0xF4 && uAddr <= 0xF7)
+	{
+		AuroraTraceRecord(
+		    ATR_SPCIO_W, ATR_F_PRE, (Uint16)uAddr,
+		    (Uint32)uData, (Uint32)pSpc->Regs.rPC,
+		    ATR_P_NONE);
+	}/* AURORA_TOPGEAR_SPCIO_TIMESTAMP_V3_20260917
+	 * TOTAL time is observable here only by timer-control/target writes.
+	 * DSP and CPU/APU port writes do not consume this timestamp. */
 
 #if SNES_STATEDEBUG
 	if (g_bStateDebug)
@@ -163,32 +190,43 @@ void SNSpcIO::Write8Trap(SNSpcT *pSpc, Uint32 uAddr, Uint8 uData)
 	{
 	case 0xF1:	// control
 		{
-			if (uData&0x10)
-			{
-				pSpc->Mem[0xf4] = pIO->m_Regs.apu_w[0] = 0x00;
-				pSpc->Mem[0xf5] = pIO->m_Regs.apu_w[1] = 0x00;
-			}
-			if (uData&0x20)
-			{
-				pSpc->Mem[0xf6] = pIO->m_Regs.apu_w[2] = 0x00;
-				pSpc->Mem[0xf7] = pIO->m_Regs.apu_w[3] = 0x00;
-			}		
+			const Int32 iCycle = SNSPCGetCounter(pSpc, SNSPC_COUNTER_TOTAL);
+			#if SNSPCIO_WRITEQUEUE
+			if (uData & 0x30) pIO->SyncQueue(SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME));
+			#endif
+			if (uData&0x10) { pIO->m_Regs.apu_w[0]=0; pIO->m_Regs.apu_w[1]=0; }
+			if (uData&0x20) { pIO->m_Regs.apu_w[2]=0; pIO->m_Regs.apu_w[3]=0; }
 			SNSpcTimerSetEnable(&pIO->m_Regs.spc_timer[0], iCycle, (uData & 1));
 			SNSpcTimerSetEnable(&pIO->m_Regs.spc_timer[1], iCycle, (uData & 2));
 			SNSpcTimerSetEnable(&pIO->m_Regs.spc_timer[2], iCycle, (uData & 4));
-
-			// set rom enable
 			SNSPCSetRomEnable(pSpc, uData & 0x80);
 		}
 		break;
 	case 0xF2:	// dsp addr
 		break;
 	case 0xF3:  // dsp data
-		while (!pIO->m_pSpcDsp->EnqueueWrite(SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME), pSpc->Mem[0xF2] & 0x7F, uData))
+		if (!(pSpc->Mem[0xF2] & 0x80))
 		{
-			pIO->m_pSpcDsp->Sync();
+			Uint32 uDspCycle = (Uint32)SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME);
+			/* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918_DSPQ */
+			{
+				const Uint8 r = (Uint8)(pSpc->Mem[0xF2] & 0x7Fu);
+				if (r == 0x4C || r == 0x5C || r == 0x5D ||
+				    r == 0x6C || r == 0x6D || r == 0x7C ||
+				    r == 0x7D)
+				{
+					AuroraTraceRecord(
+					    ATR_DSP_Q, ATR_F_PRE, (Uint16)r,
+					    (Uint32)uData,
+					    ((Uint32)(Uint16)pSpc->Regs.rPC << 16) |
+					        (uDspCycle & 0xFFFFu),
+					    ATR_P_NONE);
+				}
+			}
+			while (!pIO->m_pSpcDsp->EnqueueWrite(uDspCycle, pSpc->Mem[0xF2] & 0x7F, uData))
+				/* AURORA_SPC_DSP_QUEUE_FULL_DEADLOCK_FIX_V2_20260918: queue-full retry must guarantee progress. */
+				pIO->m_pSpcDsp->Sync();
 		}
-		//pIO->m_pSpcDsp->Write8(pSpc->Mem[0xF2] & 0x7F, uData);
 		break;
 
 	case 0xF4:
@@ -202,16 +240,25 @@ void SNSpcIO::Write8Trap(SNSpcT *pSpc, Uint32 uAddr, Uint8 uData)
 		break;
 
 	case 0xFA:	// timer0
-		SNSpcTimerSync(&pIO->m_Regs.spc_timer[0], iCycle);
-		SNSpcTimerSetTimer(&pIO->m_Regs.spc_timer[0], uData);
+		{
+			const Int32 iCycle = SNSPCGetCounter(pSpc, SNSPC_COUNTER_TOTAL);
+			SNSpcTimerSync(&pIO->m_Regs.spc_timer[0], iCycle);
+			SNSpcTimerSetTimer(&pIO->m_Regs.spc_timer[0], uData);
+		}
 		break;
 	case 0xFB:	// timer1
-		SNSpcTimerSync(&pIO->m_Regs.spc_timer[1], iCycle);
-		SNSpcTimerSetTimer(&pIO->m_Regs.spc_timer[1], uData);
+		{
+			const Int32 iCycle = SNSPCGetCounter(pSpc, SNSPC_COUNTER_TOTAL);
+			SNSpcTimerSync(&pIO->m_Regs.spc_timer[1], iCycle);
+			SNSpcTimerSetTimer(&pIO->m_Regs.spc_timer[1], uData);
+		}
 		break;
 	case 0xFC:	// timer2
-		SNSpcTimerSync(&pIO->m_Regs.spc_timer[2], iCycle);
-		SNSpcTimerSetTimer(&pIO->m_Regs.spc_timer[2], uData);
+		{
+			const Int32 iCycle = SNSPCGetCounter(pSpc, SNSPC_COUNTER_TOTAL);
+			SNSpcTimerSync(&pIO->m_Regs.spc_timer[2], iCycle);
+			SNSpcTimerSetTimer(&pIO->m_Regs.spc_timer[2], uData);
+		}
 		break;
 
 	default:
