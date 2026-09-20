@@ -24,6 +24,13 @@ class SNSpcIO
 	SNSpc_t			*m_pSpc;
 	SNSpcDsp		*m_pSpcDsp;
 
+	/* AURORA_ZENKI_APUIO_F1_COLLISION_V1_1_20260920
+	 * Transient same-SPC-cycle latch-reset stamps.  These are scheduler/bus
+	 * state, not architectural save-state payload. */
+	Uint32			m_uPortResetTotal01;
+	Uint32			m_uPortResetTotal23;
+	Uint8			m_uPortResetValid;
+
 public:
 	SNSpcIORegsT	m_Regs;
 
@@ -44,7 +51,7 @@ public:
 	void	RestoreState(struct SNStateSPCIOT *pState);
 
 	#if SNSPCIO_WRITEQUEUE
-	Bool	EnqueueWrite(Uint32 uCycle, Uint32 uAddr, Uint8 uData);
+	Bool	EnqueueWrite(Uint32 uCycle, Uint32 uTotalCycle, Uint32 uAddr, Uint8 uData);
 	void	SyncQueue(Uint32 uCycle);
 	void	SyncQueueAll();
 	#endif

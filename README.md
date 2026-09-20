@@ -91,7 +91,10 @@ User interface:
 * Secret of Mana (SNES) mode 5 rendering, also fixes other games that rely on it
 * Addams Family (SNES) graphical glitches and timing issues fixed
 * The Lost Vikings 1 and 2 (SNES) black screen fixed
+* J.R.R. Tolkien's The Lord of the Rings (SNES) black screen fixed
 * Blackthorne (SNES) black screen fixed
+* Kishin Douji Zenki: Tenchi Meidou (SNES) black screen fixed
+* Magical Pop'n (SNES) freeze fixed
 * Accele Brid (SNES) freeze fixed
 * Speedy Gonzales in Los Gatos Banditos (SNES) performance fixed *(with special safe frameskip)*
 * Top Gear (SNES) performance fixed *(with special safe frameskip)*
@@ -106,8 +109,6 @@ User interface:
 * SMB (ethernet crossover cable) connection
 * Krazy Creatures (NES) minor graphical glitches
 * Super Mario World 2 (SNES) performance (Super FX2)
-* Magical Pop'n (SNES) black screen
-* Kishin Douji Zenki: Tenchi Meidou black screen
 * Sunset Riders (SNES) graphical glitches
 * Sonic Blast Man (SNES) wrong colors
 * Any other games with performance or graphical issues

@@ -51,8 +51,36 @@ static void _SpcDebugWrite(SNSpcT *pSpc, Uint32 uAddr, Uint32 uData)
 }
 #endif
 
-Bool SNSpcIO::EnqueueWrite(Uint32 uCycle, Uint32 uAddr, Uint8 uData)
+/* AURORA_ZENKI_APUIO_F1_COLLISION_V1_1_20260920
+ * A latch reset through SPC $F1 wins over a 65816 APUIO write which lands
+ * in that same SPC700 cycle.  The existing queue already handles the other
+ * ordering (CPU write queued first, then $F1 clears it); this closes the
+ * reverse host-ordering hole where $F1 executes first and an equal-cycle CPU
+ * write would otherwise be enqueued/published afterwards.
+ *
+ * SNSPC_CYCLE is expressed in the same SNES master-clock domain as TOTAL.
+ * Unsigned subtraction intentionally makes the comparison wrap-safe. */
+Bool SNSpcIO::EnqueueWrite(
+	Uint32 uCycle, Uint32 uTotalCycle, Uint32 uAddr, Uint8 uData)
 {
+	const Uint8 uGroup = (uAddr & 2u) ? 0x02u : 0x01u;
+	const Uint32 uResetTotal = (uGroup == 0x01u)
+		? m_uPortResetTotal01 : m_uPortResetTotal23;
+
+	if (m_uPortResetValid & uGroup)
+	{
+		const Uint32 uDelta = uTotalCycle - uResetTotal;
+		if (uDelta < (Uint32)SNSPC_CYCLE)
+		{
+			/* Hardware reset wins.  TRUE means the write was handled, so the
+			 * caller must not fall back to an immediate apu_w assignment. */
+			return TRUE;
+		}
+
+		/* The first write outside that SPC cycle retires this transient stamp. */
+		m_uPortResetValid &= (Uint8)~uGroup;
+	}
+
 	return m_Queue.Enqueue(uCycle, uAddr, uData);
 }
 
@@ -96,6 +124,11 @@ void SNSpcIO::Reset()
 	memset(&m_Regs, 0, sizeof(m_Regs));
 
 	m_Queue.Reset();
+
+	/* AURORA_ZENKI_APUIO_F1_COLLISION_V1_1_20260920_RESET */
+	m_uPortResetTotal01 = 0;
+	m_uPortResetTotal23 = 0;
+	m_uPortResetValid = 0;
 
 	SNSpcTimerReset(&m_Regs.spc_timer[0], 128 * SNSPC_CYCLE); //SNES_MASTERCLOCKRATE / 8000);
 	SNSpcTimerReset(&m_Regs.spc_timer[1], 128 * SNSPC_CYCLE); //SNES_MASTERCLOCKRATE / 8000);
@@ -197,8 +230,21 @@ void SNSpcIO::Write8Trap(SNSpcT *pSpc, Uint32 uAddr, Uint8 uData)
 			#if SNSPCIO_WRITEQUEUE
 			if (uData & 0x30) pIO->SyncQueue(SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME));
 			#endif
-			if (uData&0x10) { pIO->m_Regs.apu_w[0]=0; pIO->m_Regs.apu_w[1]=0; }
-			if (uData&0x20) { pIO->m_Regs.apu_w[2]=0; pIO->m_Regs.apu_w[3]=0; }
+			if (uData&0x10)
+			{
+				pIO->m_Regs.apu_w[0]=0;
+				pIO->m_Regs.apu_w[1]=0;
+				/* AURORA_ZENKI_APUIO_F1_COLLISION_V1_1_20260920_F1 */
+				pIO->m_uPortResetTotal01 = (Uint32)iCycle;
+				pIO->m_uPortResetValid |= 0x01u;
+			}
+			if (uData&0x20)
+			{
+				pIO->m_Regs.apu_w[2]=0;
+				pIO->m_Regs.apu_w[3]=0;
+				pIO->m_uPortResetTotal23 = (Uint32)iCycle;
+				pIO->m_uPortResetValid |= 0x02u;
+			}
 			SNSpcTimerSetEnable(&pIO->m_Regs.spc_timer[0], iCycle, (uData & 1));
 			SNSpcTimerSetEnable(&pIO->m_Regs.spc_timer[1], iCycle, (uData & 2));
 			SNSpcTimerSetEnable(&pIO->m_Regs.spc_timer[2], iCycle, (uData & 4));

@@ -1842,10 +1842,31 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 		const Uint32 uAPUIOWriteCycle =
 			(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_FRAME) +
 			(Uint32)SNES_SPCWRITE_LATENCY;
+		/* AURORA_ZENKI_APUIO_F1_COLLISION_V1_1_20260920
+		 * Keep a monotonic companion timestamp for same-SPC-cycle $F1 reset
+		 * arbitration; queue ordering itself remains in FRAME time. */
+		const Uint32 uAPUIOTotalWriteCycle =
+			(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_TOTAL) +
+			(Uint32)SNES_SPCWRITE_LATENCY;
 		#if SNSPCIO_WRITEQUEUE
 		SNQueueElementT *pPendingAPUIO = pSnes->m_SpcIO.m_Queue.Peek();
 		if (pPendingAPUIO && pPendingAPUIO->uCycle < uAPUIOWriteCycle)
+		{
+			/* AURORA_VIKINGS_APUIO_PREPUBLISH_V2_20260919
+			 * SyncSPC() executes the SPC before its normal due-write drain, and
+			 * that drain is skipped entirely when no positive SPC budget is
+			 * available.  Therefore an older APUIO edge can remain queued until
+			 * after a newer edge is appended, allowing 02 -> 00 -> 01 style
+			 * handshakes to collapse.
+			 *
+			 * The current APUIO write latency is zero, so every timestamp strictly
+			 * below uAPUIOWriteCycle is already due at this S-CPU bus access.
+			 * Publish only those older timestamps BEFORE SPC catch-up.  Equality
+			 * is intentionally excluded: same-instruction $2140/$2141 writes
+			 * (Blackthorne) remain one atomic timestamp group. */
+			pSnes->m_SpcIO.SyncQueue(uAPUIOWriteCycle - 1u);
 			pSnes->SyncSPC(0, FALSE);
+		}
 		#endif
 		/* AURORA_SNES_BINARY_TRACE_V7_VISUAL_BREADCRUMBS_20260918_APUIO_W */
 		AuroraTraceBreadcrumb(
@@ -1859,6 +1880,7 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 		#if SNSPCIO_WRITEQUEUE
 		if (!pSnes->m_SpcIO.EnqueueWrite(
 		        uAPUIOWriteCycle,
+		        uAPUIOTotalWriteCycle,
 		        uAddr & 3, uData))
 		#endif
 		{

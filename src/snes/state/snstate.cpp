@@ -798,6 +798,12 @@ void SNSpcIO::SaveState(struct SNStateSPCIOT *pState)
 void SNSpcIO::RestoreState(struct SNStateSPCIOT *pState)
 {
 	m_Regs = pState->Regs;
+	/* AURORA_ZENKI_APUIO_F1_COLLISION_V1_1_20260920_STATE
+	 * Collision stamps are transient scheduler state and are intentionally
+	 * absent from the legacy save-state layout. */
+	m_uPortResetTotal01 = 0;
+	m_uPortResetTotal23 = 0;
+	m_uPortResetValid = 0;
 }
 
 void SnesDMAC::SaveState(struct SNStateDMACT *pState)
