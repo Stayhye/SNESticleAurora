@@ -2654,10 +2654,14 @@ static Bool _MainLoopStateIsSgb()
 
 static void _MainLoopStateReleaseSegaScratch()
 {
-    /* Save/Load guards must not surrender the GBA pre-reserved workspace.
-     * _MainLoopUnloadRom() sets _pSystem=NULL before
-     * MainLoopStateOnRomChanged(), so real teardown still frees it. */
-    if (_MainLoop_GbaStateScratchPinned && _pSystem == _pGba)
+    /* AURORA_D88_GBA_LIFECYCLE_FIX_V1_20260920
+     * Keep the pinned GBA workspace only while a REAL live GBA core is the
+     * active system. During _MainLoopUnloadRom(), both _pSystem and _pGba
+     * are NULL by the time MainLoopStateOnRomChanged() runs; comparing only
+     * the two pointers made NULL == NULL look like an active GBA session and
+     * leaked the pinned savestate workspace across ROM/core switches. */
+    if (_MainLoop_GbaStateScratchPinned &&
+        _pGba && _pSystem == _pGba)
         return;
 
     _MainLoop_GbaStateScratchPinned = FALSE;
