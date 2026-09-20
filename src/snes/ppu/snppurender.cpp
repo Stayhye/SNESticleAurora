@@ -13,6 +13,7 @@
 #include "snmaskop.h"
 #include "prof.h"
 #include "sndbglog.h"
+#include "platform/ps2/system/aurora_snes_cost_profiler.h" /* AURORA_SNES_PPU_BREAKDOWN_V2_20260920 */
 #if CODE_PLATFORM == CODE_PS2
 #include "ps2mem.h"
 #include "ps2dma.h"
@@ -247,6 +248,8 @@ void _DrawMask2(Uint32 *pDest, SNMaskT *pMask1, SNMaskT *pMask2, Int32 nPixels)
 
 void SnesPPURender::RenderLine(Int32 iLine)
 {
+	/* AURORA_SNES_PPU_BREAKDOWN_V2_20260920: RenderLine remainder after child phases. */
+	AURORA_SNES_PPU_DETAIL_AUTO(AURORA_SNES_PPU_DETAIL_RENDER);
 	/* AURORA_OBJ_STAT77_V2_RENDERCPP_20260915
 	 * Safe Frameskip may remove the host target, but Range/Time Over are
 	 * emulated PPU state and can be read by game code. Keep only the cheap
@@ -259,6 +262,8 @@ void SnesPPURender::RenderLine(Int32 iLine)
 			if ((m_UpdateFlags & SNESPPURENDER_UPDATE_OBJ) ||
 			    g_SnesObjLimitVisibilityDirty)
 			{
+				/* PPU detail: no-target OBJ maintenance */
+				AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ);
 				UpdateOBJ(m_pRenderInfo->uObjY, m_pRenderInfo->uObjSize);
 				/* AURORA_SNES_SAFE_PERF_V4_20260919: pRegs already points at this same register image. */
 				UpdateOBJVisibility(m_pRenderInfo->uObjY,
@@ -266,6 +271,7 @@ void SnesPPURender::RenderLine(Int32 iLine)
 					SNESPPU_OBJ_NUM);
 				m_UpdateFlags &= ~SNESPPURENDER_UPDATE_OBJ;
 				g_SnesObjLimitVisibilityDirty = FALSE;
+				AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_OBJ);
 			}
 			if ((Uint32)iLine < SNPPU_MAXLINE)
 				m_pPPU->SetObjOverflow(
@@ -494,6 +500,8 @@ static Bool bPrint = TRUE;
 	{
 		SNMaskT ColorMask[3];
 		Bool bDirectMain = FALSE;
+		/* PPU detail: pre-raster setup */
+		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_PREP);
 		/* AURORA_SNES_SAFE_PERF_V4_20260919
 		 * CGRAM storage and fixed-color register belong to this PPU instance;
 		 * this synchronous scanline routine does not replace their addresses. */
@@ -513,6 +521,8 @@ static Bool bPrint = TRUE;
 #if SNDBG_LOG
 			Uint32 _tObjUpdate = ProfCtrGetCycle();
 #endif
+			/* PPU detail: presented OBJ update */
+			AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ);
 			UpdateOBJ(pRenderInfo->uObjY, pRenderInfo->uObjSize);
 
             PROF_ENTER("UpdateOBJVisibility");
@@ -528,6 +538,7 @@ static Bool bPrint = TRUE;
 
 			m_UpdateFlags &= ~SNESPPURENDER_UPDATE_OBJ;
 			g_SnesObjLimitVisibilityDirty = FALSE;
+			AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_OBJ);
 		}
 
 		/* Tiles and decoded character rows are cached across scanlines. A VRAM
@@ -554,8 +565,17 @@ static Bool bPrint = TRUE;
     		m_UpdateFlags &= ~SNESPPURENDER_UPDATE_WINDOW;
         }
 
+		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_PREP);
+
 		// render line
+		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_RASTER);
 		RenderLine8(iLine, pRenderInfo);
+		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_RASTER);
+
+		/* PPU detail: post-raster color math / blender / GS submission. */
+		/* AURORA_SNES_PPU_FOCUS_V3_20260920: split COLOR/GS into masks, blend/GS and remainder. */
+		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_COLOR_OTHER);
+		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_COLOR_MASK);
 
 #if CODE_PLATFORM == CODE_PS2
 		/* AURORA_V8_MODE7_RELEASE_AUDIT_20260915
@@ -670,11 +690,14 @@ static Bool bPrint = TRUE;
 			}
 		}
 
+		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_COLOR_MASK);
+
 		// perform color blending of main+sub
 #if SNDBG_LOG
 		g_TmgCycColorMath += ProfCtrGetCycle() - _tColorMath;
 		Uint32 _tBlend = ProfCtrGetCycle();
 #endif
+		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_BLEND);
 #if CODE_PLATFORM == CODE_PS2
 		if (bBG1DirectPixels)
 		{
@@ -726,6 +749,8 @@ static Bool bPrint = TRUE;
 #if SNDBG_LOG
 		g_TmgCycBlend += ProfCtrGetCycle() - _tBlend;
 #endif
+		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_BLEND);
+		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_COLOR_OTHER);
 	}
 }
 

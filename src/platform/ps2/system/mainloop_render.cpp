@@ -18,6 +18,7 @@
 #include "mainloop_menu.h" /* AURORA_FINAL_V1_5_RENDER_MENU_API_INCLUDE_20260901 */
 #include "mainloop_bgm.h"
 #include "mainloop_safe_frameskip.h" /* AURORA_SAFE_FRAMESKIP_GG_ZOOM_V2_2 */
+#include "platform/ps2/system/aurora_snes_cost_profiler.h" /* AURORA_SNES_COST_PROFILER_V1_20260920 */
 #include "sega/picodrive/picodrive_bridge.h"
 /* AURORA_ALLCORES_PERF_V5_20260824 */
 #include "nes/quicknes/quicknes_bridge.h"
@@ -849,6 +850,11 @@ void MainLoopRender()
     if (!_bMenu)
     {	
 	
+#if AURORA_SNES_COST_PROFILER
+		if (_pSystem == _pSnes)
+			AuroraSnesCostProfilerDrawOverlay();
+#endif
+
 		if (s_pMovieClip->IsPlaying())
 		{
 	        FontSelect(2);

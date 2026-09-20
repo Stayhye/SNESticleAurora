@@ -14,6 +14,7 @@
 #include "sndebug.h"
 #include "sndbglog.h"
 #include "platform/ps2/system/aurora_runtime_trace.h"
+#include "platform/ps2/system/aurora_snes_cost_profiler.h"
 #include "platform/ps2/system/aurora_ee_crash_diag.h"
 
 /* AURORA_SNES_NATIVE_32K_V1_20260822
@@ -1287,6 +1288,8 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
     {
         //SnesDebug("SNSPCExec: %d\n", nCycles);
         // execute SPC
+        /* profiler: SPC700 execution */
+        AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_SPC);
         PROF_ENTER("SNSpcExecute");
 #if SNDBG_LOG
         Uint32 _tAPU = ProfCtrGetCycle();
@@ -1303,6 +1306,7 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
         g_TmgCycAPU += ProfCtrGetCycle() - _tAPU;
 #endif
         PROF_LEAVE("SNSpcExecute");
+        AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_SPC);
 
 #if SNSPCIO_WRITEQUEUE
         /* AURORA_BLIZZARD_APUIO_QUEUE_ORDER_V1_20260914
@@ -1386,6 +1390,7 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
 
 inline void SnesSystem::SyncPPU()
 {
+	AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_PPU);
 #if SNDBG_LOG
 	Uint32 _tSync = ProfCtrGetCycle();
 	g_DbgPPUSyncCalls++;
@@ -1412,6 +1417,7 @@ inline void SnesSystem::SyncPPU()
 #if SNDBG_LOG
 	g_TmgCycPPUSync += ProfCtrGetCycle() - _tSync;
 #endif
+	AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_PPU);
 }
 
 
@@ -3285,6 +3291,7 @@ void SnesSystem::MarkSA1BWRAMDirty(void)
 
 void SnesSystem::ExecuteCPU(Int32 nCycles)
 {
+    AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_CPU);
     // increment cycle counter
     SNCPUAddCycles( &m_Cpu, nCycles );
     Int32 nSA1Synced = 0; /* AURORA_SA1_INTERLEAVED_CHUNK_SCHEDULER_V7_2_20260903 */
@@ -3314,6 +3321,8 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
                 // sync up PPU before DMA (only necessary for read dmas?)
                 SyncPPU();
 
+                /* profiler: MDMA is bus/raster work */
+                AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_RASTER);
                 PROF_ENTER("ProcessMDMA");
 #if SNDBG_LOG
 				Uint32 _tMDMA = ProfCtrGetCycle();
@@ -3335,6 +3344,7 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
 				g_TmgCycMDMA += ProfCtrGetCycle() - _tMDMA;
 #endif
                 PROF_LEAVE("ProcessMDMA");
+                AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_RASTER);
 
                 // are all MDMAs complete?
                 if (m_DMAC.GetMDMAEnable() == 0)
@@ -3506,6 +3516,10 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
         if (nElapsed > 0)
             m_SA1.Run(nElapsed);
     }
+
+    AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_CPU);
+
+
 
     if (bSGBActive)
         SyncSuperGameBoy();
@@ -3748,6 +3762,7 @@ static _INLINE Int32 SnesAutoJoyEndCycle(const SnesPPU &ppu,
 
 void SnesSystem::ExecuteLine()
 {
+	AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_RASTER);
 	/* AURORA_SNES_BINARY_TRACE_V7_R9_DKC_PHASEPROBE_20260918_LINE */
 	AuroraTraceLinePhase(
 	    m_uLine,
@@ -3962,6 +3977,7 @@ void SnesSystem::ExecuteLine()
 	m_nLineIRQClock = nLineClocks;
 #endif
 
+	AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_RASTER);
 	PROF_LEAVE("ExecLine");
 }
 
@@ -3971,6 +3987,8 @@ void SnesSystem::ExecuteLine()
 void SnesSystem::ExecuteFrame(Emu::SysInputT  *pInput, CRenderSurface *pTarget, CMixBuffer *pSound, ModeE eMode)
 {
 Bool bPAL = FALSE;
+
+	AuroraSnesCostProfilerFrameBegin();
 
 /* AURORA_SNES_BINARY_TRACE_V7_R9_DKC_PHASEPROBE_20260918_FRAME */
 /* AURORA_SNES_BINARY_TRACE_V7_R10_RETURN_BOUNDARY_20260918 */
@@ -4193,6 +4211,8 @@ m_PPU.SetRegionPAL(bPAL);
 	AuroraTracePhase(ATR_PHASE_MIX_BEGIN, m_uLine,
 	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 	// mix non-deterministic mixer
+	/* profiler: S-DSP mixer */
+	AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_DSP);
 	PROF_ENTER("SNSpcDspUpdate");
 #if SNDBG_LOG
 	Uint32 _tMix = ProfCtrGetCycle();
@@ -4210,6 +4230,7 @@ m_PPU.SetRegionPAL(bPAL);
 	g_TmgCycMix += ProfCtrGetCycle() - _tMix;
 #endif
 	PROF_LEAVE("SNSpcDspUpdate");
+	AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_DSP);
 	AuroraTracePhase(ATR_PHASE_MIX_END, m_uLine,
 	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 
@@ -4227,6 +4248,8 @@ m_PPU.SetRegionPAL(bPAL);
 			break;
 		case MODE_ACCURATEDETERMINISTIC:
 			// mix silent mixer
+			/* profiler: deterministic S-DSP mixer */
+			AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_DSP);
 			PROF_ENTER("SNSpcDspUpdateSilent");
 #if SNDBG_LOG
 			_tMix = ProfCtrGetCycle();
@@ -4236,6 +4259,7 @@ m_PPU.SetRegionPAL(bPAL);
 			g_TmgCycMix += ProfCtrGetCycle() - _tMix;
 #endif
 			PROF_LEAVE("SNSpcDspUpdateSilent");
+			AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_DSP);
 
 			// update spc flags based on deterministic mixer
 			m_SpcDsp.UpdateFlags(&m_SpcDspSilentMixer);
@@ -4598,6 +4622,8 @@ m_PPU.SetRegionPAL(bPAL);
 		g_DbgCaptureActive = FALSE;
 	}
 #endif
+
+	AuroraSnesCostProfilerFrameEnd();
 
 	AuroraTracePhase(ATR_PHASE_FRAME_EXIT, m_uLine,
 	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));

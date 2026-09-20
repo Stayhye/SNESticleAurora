@@ -34,6 +34,7 @@ extern "C" {
 #include "pce/beetle/pce_bridge.h" /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
 #include "mainloop_safe_frameskip.h" /* AURORA_SAFE_FRAMESKIP_GG_ZOOM_V2_2 */
 #include "platform/ps2/system/aurora_runtime_trace.h" /* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919 */
+#include "platform/ps2/system/aurora_snes_cost_profiler.h" /* AURORA_SNES_COST_PROFILER_V1_20260920 */
 
 /* mc0:/SNESticle (defined in mainloop_globals.cpp). */
 extern Char _SramPath[256];
@@ -1421,6 +1422,16 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 		_VideoRow(vy, 38, m_iSelect, "Debugger",
 			AuroraTraceIsEnabled() ? "On" : "Off"); vy += 12;
 #endif
+#if AURORA_SNES_COST_PROFILER
+		/* AURORA_SNES_COST_PROFILER_V1_20260920: runtime-only; no VideoCfgT field. */
+		#if AURORA_RUNTIME_TRACE
+		_VideoRow(vy, 39, m_iSelect, "SNES Profiler",
+			AuroraSnesCostProfilerIsEnabled() ? "On" : "Off"); vy += 12;
+		#else
+		_VideoRow(vy, 38, m_iSelect, "SNES Profiler",
+			AuroraSnesCostProfilerIsEnabled() ? "On" : "Off"); vy += 12;
+		#endif
+#endif
 
 	}
 	else if (iPage == 3)
@@ -1462,8 +1473,9 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 {
 	int dir = 0;
-#if AURORA_RUNTIME_TRACE
-	/* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919: only trace-capable builds gain the extra Performance row. */
+#if AURORA_RUNTIME_TRACE && AURORA_SNES_COST_PROFILER
+	const int perfHi = 39;
+#elif AURORA_RUNTIME_TRACE || AURORA_SNES_COST_PROFILER
 	const int perfHi = 38;
 #else
 	const int perfHi = 37;
@@ -1804,6 +1816,15 @@ case 17: /* Famiclone Audio */
 			Aud_SetRuntimeTraceMute(on ? 1 : 0);
 			break;
 		}
+#endif
+#if AURORA_SNES_COST_PROFILER
+		#if AURORA_RUNTIME_TRACE
+		case 39:
+		#else
+		case 38:
+		#endif
+			AuroraSnesCostProfilerSetEnabled(dir > 0 ? TRUE : FALSE);
+			break;
 #endif
 		case 40:
 			InputSnesMouseCycleModeDir(dir);

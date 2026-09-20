@@ -8,6 +8,7 @@
 #include "sntiming.h"
 #include "sndebug.h"
 #include "sndbglog.h"
+#include "platform/ps2/system/aurora_snes_cost_profiler.h" /* AURORA_SNES_PPU_BREAKDOWN_V2_20260920 */
 
 /* AURORA_CPU_SPC_DSP_PPU_HOST_WORK_REDUCTION_V4_20260920 */
 #define SNPPU_VERSION_5C77 (0x01)
@@ -1095,6 +1096,8 @@ void SnesPPU::ApplyQueuedWritesBefore(Uint32 uRasterTime)
 
 void SnesPPU::Sync(Uint32 uLine, Uint32 uHClock)
 {
+    /* AURORA_SNES_PPU_BREAKDOWN_V2_20260920: exclusive PPU sync/queue parent. */
+    AURORA_SNES_PPU_DETAIL_AUTO(AURORA_SNES_PPU_DETAIL_SYNC);
     /* AURORA_DOT_RASTER_V6_PPU_20260915
      * The old queue tagged only V and therefore every write made on line N
      * became visible on N+1. V6 retains the scanline renderer but timestamps

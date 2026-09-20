@@ -447,6 +447,14 @@ AURORA_RUNTIME_TRACE ?= 0
 CFLAGS   += -DAURORA_RUNTIME_TRACE=$(AURORA_RUNTIME_TRACE)
 CXXFLAGS += -DAURORA_RUNTIME_TRACE=$(AURORA_RUNTIME_TRACE)
 
+# AURORA_SNES_COST_PROFILER_V1_20260920
+# Build capability only. Runtime starts OFF. With =1, Video Settings ->
+# Performance exposes SNES Profiler immediately after Debugger (when the
+# latter exists). The selection is diagnostic-only and is not persisted.
+AURORA_SNES_COST_PROFILER ?= 0
+CFLAGS   += -DAURORA_SNES_COST_PROFILER=$(AURORA_SNES_COST_PROFILER)
+CXXFLAGS += -DAURORA_SNES_COST_PROFILER=$(AURORA_SNES_COST_PROFILER)
+
 # AURORA_EE_CRASH_DIAG_DKC_V1_20260918
 # EE exception capture follows the runtime trace switch by default.
 # AURORA_TRACE_LOST_VIKINGS_LOG_ONLY_V2_20260918
@@ -585,6 +593,7 @@ SRCS := \
     src/platform/ps2/ps2sdk_stubs.c \
     src/platform/ps2/system/cdda_async_filexio.c \
 	src/platform/ps2/system/aurora_runtime_trace.c \
+	src/platform/ps2/system/aurora_snes_cost_profiler.cpp \
 	src/platform/ps2/system/aurora_ee_crash_diag.c \
 	src/common/media/bmpfile.cpp \
 	src/platform/ps2/cdvd/cd.c \
