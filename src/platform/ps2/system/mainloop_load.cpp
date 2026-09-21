@@ -1716,16 +1716,8 @@ void _MainLoopUnloadRom()
         ConPrint("GB savedata unload flush: %s\n", bSaved ? "saved" : "FAILED");
     }
 
-    /* AURORA_GAMBATTE_STANDALONE_V2_20260908
-     * Persist SRAM+RTC at the cartridge lifetime boundary. Force the bundle
-     * when one exists so RTC-only games are not dependent on RAM dirty bits. */
-    if (_pSystem == _pGb && _pGb && _pGb->IsGameLoaded() &&
-        _pGb->GetSavedataBytes() > 0)
-    {
-        _MainLoop_SRAMUpdated = TRUE;
-        Bool bSaved = _MainLoopSaveSRAM(TRUE);
-        ConPrint("GB savedata unload flush: %s\n", bSaved ? "saved" : "FAILED");
-    }
+    /* AURORA_D88_GBA_LIFECYCLE_FIX_V1_20260920: the preceding Gambatte block is the single
+     * SRAM/RTC/Turbo File unload persistence boundary. */
 
     /* AURORA_GPSP_GBA_V1_20260911
      * gpSP exposes one fixed 128 KiB save-RAM window. Persist it before core
@@ -3901,6 +3893,42 @@ static Bool _MainLoopSwcInsertDisk(const char *pPath)
 }
 
 
+/* AURORA_D88_GBA_LIFECYCLE_FIX_V1_20260920
+ * Standalone D88 is disk-only at boot. Reserve only the copier's real
+ * 4 MiB DRAM here; Game Pak backing remains lazy until a cartridge is
+ * actually inserted. This restores the contract documented by the SWC
+ * backing layer and avoids parking the 8 MiB DRAM+future-cart arena before
+ * the first SnesSystem construction. */
+static Bool _MainLoopSwcPrepareDiskOnlyDram()
+{
+    if (_pSnes && _pSnes->IsSuperWildCard())
+        return TRUE;
+
+    s_bSwcDramReserveLoaned = FALSE;
+    _MainLoopSwcReleaseCartReserve();
+    _MainLoopSwcReleaseDramReserve();
+    return _MainLoopSwcEnsureDramReserve();
+}
+
+/* A standalone .d88 reaches _MainLoopExecuteSwcDisk only after the normal
+ * launcher teardown. If cold boot fails after recreating SnesSystem, undo
+ * that partial lifetime here instead of returning with core/DRAM resident. */
+static void _MainLoopSwcAbortStandaloneDiskBoot()
+{
+    _pSystem = NULL;
+
+    if (_pSnes)
+    {
+        delete _pSnes;
+        _pSnes = NULL;
+    }
+
+    s_bSwcDramReserveLoaned = FALSE;
+    _MainLoopSwcReleaseCartReserve();
+    _MainLoopSwcReleaseDramReserve();
+    s_SwcExternalCartPath[0] = 0;
+}
+
 static Bool _MainLoopExecuteSwcDisk(const char *pMappedPath,
                                     const char *pOriginalPath,
                                     Bool bLoadSRAM)
@@ -3959,15 +3987,19 @@ static Bool _MainLoopExecuteSwcDisk(const char *pMappedPath,
         }
     }
 
-    if (!bMagicom)
-        (void)_MainLoopSwcPrepareCartHeadroom();
+    /* AURORA_D88_GBA_LIFECYCLE_FIX_V1_20260920: a bare D88 has no Game Pak yet. */
+    if (!bMagicom && !_MainLoopSwcPrepareDiskOnlyDram())
+    {
+        MainLoopModalPrintf(
+            60 * 4, "ERROR: not enough memory for SWC copier DRAM");
+        return FALSE;
+    }
 
     if (!(bMagicom
             ? _MainLoopEnsureSnesSystem()
             : _MainLoopEnsureSnesSystemWithSwcHeadroom()))
     {
-        if (!bMagicom)
-            _MainLoopSwcReleaseCartReserve();
+        _MainLoopSwcAbortStandaloneDiskBoot();
         MainLoopModalPrintf(60 * 3, "ERROR: not enough memory for SNES core");
         return FALSE;
     }
@@ -3976,9 +4008,20 @@ static Bool _MainLoopExecuteSwcDisk(const char *pMappedPath,
             ? MainLoopEnsureGameplayRasterWidth(256)
             : _MainLoopEnsureSwcRasterWithHeadroom()))
     {
-        if (!bMagicom)
-            _MainLoopSwcReleaseCartReserve();
+        _MainLoopSwcAbortStandaloneDiskBoot();
         MainLoopModalPrintf(60 * 3, "ERROR: cannot configure SWC SNES raster");
+        return FALSE;
+    }
+
+    /* _MainLoopEnsureSnesSystemWithSwcHeadroom() and the raster fallback are
+     * allowed to surrender parked memory in order to construct/reconfigure
+     * the core. Before handing the DRAM pointer to the copier, restore only
+     * the 4 MiB physical DRAM requirement -- never the future cart half. */
+    if (!bMagicom && !_MainLoopSwcEnsureDramReserve())
+    {
+        _MainLoopSwcAbortStandaloneDiskBoot();
+        MainLoopModalPrintf(
+            60 * 4, "ERROR: not enough memory for SWC copier DRAM");
         return FALSE;
     }
 
@@ -3995,12 +4038,14 @@ static Bool _MainLoopExecuteSwcDisk(const char *pMappedPath,
 
     if (!bD88Booted)
     {
-        if (!bMagicom)
-            _MainLoopSwcReleaseCartReserve();
+        Char ErrorText[256];
+        snprintf(
+            ErrorText, sizeof(ErrorText), "%s",
+            _pSnes ? _pSnes->GetSuperWildCardError()
+                   : "unknown copier boot error");
+        _MainLoopSwcAbortStandaloneDiskBoot();
         MainLoopModalPrintf(
-            60 * 5,
-            "SWC boot failed: %s",
-            _pSnes->GetSuperWildCardError());
+            60 * 5, "SWC boot failed: %s", ErrorText);
         return FALSE;
     }
 

@@ -124,7 +124,10 @@ enum
 };
 
 /* Engine lifecycle / capture ownership. */
+/* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919
+ * Toggle remains as the engine primitive; UI uses the idempotent setter. */
 Bool AuroraTraceToggleRuntime(void);
+Bool AuroraTraceSetEnabled(Bool enabled);
 Bool AuroraTraceIsEnabled(void);
 const char *AuroraTraceProfileName(void);
 void AuroraTraceBeginGame(const char *game, const char *core);
@@ -156,6 +159,7 @@ void AuroraRuntimeTraceSPC(struct SNSpc_t *cpu, Uint16 pc, Uint8 opcode);
 
 #define g_AuroraTraceEnabled 0u
 #define AuroraTraceToggleRuntime() FALSE
+#define AuroraTraceSetEnabled(_enabled) FALSE
 #define AuroraTraceIsEnabled() FALSE
 #define AuroraTraceProfileName() "disabled"
 #define AuroraTraceBeginGame(...) ((void)0)

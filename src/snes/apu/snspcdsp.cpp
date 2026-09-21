@@ -7,6 +7,7 @@
 #include "platform/ps2/system/aurora_runtime_trace.h"
 /* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918 */
 
+/* AURORA_CPU_SPC_DSP_HOST_WORK_REDUCTION_V3_20260920 */
 #define SNSPCDSP_DETERMINISMSAFE (0)
 #define SNSPCDSP_DEBUGPRINT (CODE_DEBUG && FALSE)
 
@@ -40,15 +41,20 @@ void SNSpcDsp::Write8(Uint32 uAddr, Uint8 uData)
 	Int32 iChannel;
 
 	uAddr &= 0x7F;
-	/* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918_DSPW */
-	if (uAddr == 0x4C || uAddr == 0x5C || uAddr == 0x5D ||
-	    uAddr == 0x6C || uAddr == 0x6D || uAddr == 0x7C ||
-	    uAddr == 0x7D)
+	/* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918_DSPW
+	 * AURORA_TRACE_OFF_PERF_V6_20260919: when Debugger is Off, avoid the seven-address diagnostic
+	 * chain and the trace call. The register write below is untouched. */
+#if AURORA_RUNTIME_TRACE
+	if (g_AuroraTraceEnabled &&
+	    (uAddr == 0x4C || uAddr == 0x5C || uAddr == 0x5D ||
+	     uAddr == 0x6C || uAddr == 0x6D || uAddr == 0x7C ||
+	     uAddr == 0x7D))
 	{
 		AuroraTraceRecord(
 		    ATR_DSP_W, ATR_F_PRE, (Uint16)uAddr,
 		    (Uint32)uData, (Uint32)m_Regs[uAddr], ATR_P_NONE);
 	}
+#endif
 
 //	if (uAddr==SNSPCDSP_REG_FLG) // && uData != m_Regs[uAddr])
 //		ConDebug("flg %02X\n", uData);
@@ -59,6 +65,11 @@ void SNSpcDsp::Write8(Uint32 uAddr, Uint8 uData)
 #endif
 
 	m_Regs[uAddr] = uData;
+
+	/* Ordinary parameter writes have no immediate semantic side effect here.
+	 * Only $4C/$5C/$6C/$7C enter the special path below. */
+	if ((uAddr & 0x0Fu) != 0x0Cu || uAddr < 0x4Cu)
+		return;
 
 	switch (uAddr)
 	{
@@ -84,10 +95,15 @@ void SNSpcDsp::Write8(Uint32 uAddr, Uint8 uData)
 			ConDebug("kon: %02X\n", uData);
 #endif
 
-			for (iChannel=0; iChannel < SNSPCDSP_CHANNEL_NUM; iChannel++)
 			{
-				if ((uData>>iChannel)&1)
-					KeyOn(iChannel);
+				Uint32 uMask = uData;
+				iChannel = 0;
+				while (uMask)
+				{
+					if (uMask & 1u) KeyOn(iChannel);
+					uMask >>= 1;
+					iChannel++;
+				}
 			}
 		}
 		break;
@@ -99,10 +115,15 @@ void SNSpcDsp::Write8(Uint32 uAddr, Uint8 uData)
 		//ConDebug("koff: %02X\n", uData);
 		if (uData != 0)
 		{
-			for (iChannel=0; iChannel < SNSPCDSP_CHANNEL_NUM; iChannel++)
 			{
-				if ((uData>>iChannel)&1)
-					KeyOff(iChannel);
+				Uint32 uMask = uData;
+				iChannel = 0;
+				while (uMask)
+				{
+					if (uMask & 1u) KeyOff(iChannel);
+					uMask >>= 1;
+					iChannel++;
+				}
 			}
 		}
 		break;
@@ -166,12 +187,15 @@ Uint16 SNSpcDsp::GetSampleDir(Uint8 uSrcN, Uint32 uOffset)
 {
 	Uint16 uSampleDir;
 	Uint16 uData;
+	Uint8 *pSpan;
 
-	// get sample dir address
 	uSampleDir =  m_Regs[SNSPCDSP_REG_DIR] * 0x100 + uSrcN * 0x04;
 	uSampleDir+= uOffset;
 
-	// S-DSP reads physical APURAM; 16-bit address bus wraps naturally.
+	pSpan = GetRAMSpan(uSampleDir, 2);
+	if (pSpan)
+		return (Uint16)((Uint16)pSpan[0] | ((Uint16)pSpan[1] << 8));
+
 	uData = ReadRAM((Uint16)(uSampleDir + 0)) << 0;
 	uData|= ReadRAM((Uint16)(uSampleDir + 1)) << 8;
 	return uData;
@@ -180,11 +204,17 @@ Uint16 SNSpcDsp::GetSampleDir(Uint8 uSrcN, Uint32 uOffset)
 
 void SNSpcDsp::KeyOn(Int32 iChannel)
 {
-	/* AURORA_SNES_BINARY_TRACE_V6_20260918_KON */
-	AuroraTraceRecord(
-	    ATR_KON, ATR_F_PRE, (Uint16)iChannel,
-	    (Uint32)m_Regs[SNSPCDSP_REG_ENDX], 0, ATR_P_FLUSH);
-	AuroraTraceArmVoice(iChannel);
+	/* AURORA_SNES_BINARY_TRACE_V6_20260918_KON
+	 * AURORA_TRACE_OFF_PERF_V6_20260919: KON trace is host-only; emulated ENDX/mixer work is below. */
+#if AURORA_RUNTIME_TRACE
+	if (g_AuroraTraceEnabled)
+	{
+		AuroraTraceRecord(
+		    ATR_KON, ATR_F_PRE, (Uint16)iChannel,
+		    (Uint32)m_Regs[SNSPCDSP_REG_ENDX], 0, ATR_P_FLUSH);
+		AuroraTraceArmVoice(iChannel);
+	}
+#endif
 	// clear endx
 	m_Regs[SNSPCDSP_REG_ENDX] &=  ~(1 << iChannel);
 
@@ -198,10 +228,16 @@ void SNSpcDsp::KeyOn(Int32 iChannel)
 
 void SNSpcDsp::KeyOff(Int32 iChannel)
 {
-	/* AURORA_SNES_BINARY_TRACE_V6_20260918_KOFF */
-	AuroraTraceRecord(
-	    ATR_KOFF, ATR_F_PRE, (Uint16)iChannel,
-	    0, 0, ATR_P_FLUSH);
+	/* AURORA_SNES_BINARY_TRACE_V6_20260918_KOFF
+	 * AURORA_TRACE_OFF_PERF_V6_20260919: KOFF trace is host-only. */
+#if AURORA_RUNTIME_TRACE
+	if (g_AuroraTraceEnabled)
+	{
+		AuroraTraceRecord(
+		    ATR_KOFF, ATR_F_PRE, (Uint16)iChannel,
+		    0, 0, ATR_P_FLUSH);
+	}
+#endif
 	// tell mixer(s) to key off
 	if (m_pMixer[0])
 		m_pMixer[0]->KeyOff(iChannel);
@@ -218,6 +254,8 @@ Bool SNSpcDsp::EnqueueWrite(Uint32 uCycle, Uint32 uAddr, Uint8 uData)
 void SNSpcDsp::Sync(Uint32 uCycle)
 {
 	SNQueueElementT *pElement;
+
+	if (m_Queue.IsEmpty()) return;
 
 	// dequeue all pending writes  up to cycle time
 	while ( (pElement=m_Queue.Dequeue(uCycle)) != NULL)

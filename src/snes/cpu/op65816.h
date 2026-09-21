@@ -5065,7 +5065,14 @@ SNCPU_OP(0x26b)
 SNCPU_OP(0x36b)
 SNCPU_OP(0x46b)
 	SNCPU_POP24_RAW(R_t0)
+	/* AURORA_CPU_RTL_BANK_WRAP_V1_20260920
+	 * 65C816 RTL increments only the pulled 16-bit PC.  PBR is pulled
+	 * separately and must not receive the carry from PC=$FFFF -> $0000. */
+	SNCPU_GETI(R_t1,0xFF0000)
+	SNCPU_AND(R_t1,R_t0)
 	SNCPU_ADDI(R_t0,1)
+	SNCPU_ANDI(R_t0,0xFFFF)
+	SNCPU_OR(R_t0,R_t1)
 	SNCPU_SET_PC24(R_t0)
 	SNCPU_ENDOP(2)
 

@@ -8,7 +8,9 @@
 #include "sntiming.h"
 #include "sndebug.h"
 #include "sndbglog.h"
+#include "platform/ps2/system/aurora_snes_cost_profiler.h" /* AURORA_SNES_PPU_BREAKDOWN_V2_20260920 */
 
+/* AURORA_CPU_SPC_DSP_PPU_HOST_WORK_REDUCTION_V4_20260920 */
 #define SNPPU_VERSION_5C77 (0x01)
 #define SNPPU_VERSION_5C78 (0x01)
 
@@ -1073,6 +1075,14 @@ void SnesPPU::AdvanceField()
 void SnesPPU::ApplyQueuedWritesBefore(Uint32 uRasterTime)
 {
     SNQueueElementT *pElement;
+
+    /* V4: preserve the old post-loop transient-bus reset even on no-op. */
+    if (m_Queue.IsEmpty())
+    {
+        m_uMemoryAccessFlags = 0;
+        return;
+    }
+
     while ((pElement = m_Queue.Dequeue(uRasterTime)) != NULL)
     {
         m_uMemoryAccessFlags = pElement->uPad;
@@ -1086,6 +1096,8 @@ void SnesPPU::ApplyQueuedWritesBefore(Uint32 uRasterTime)
 
 void SnesPPU::Sync(Uint32 uLine, Uint32 uHClock)
 {
+    /* AURORA_SNES_PPU_BREAKDOWN_V2_20260920: exclusive PPU sync/queue parent. */
+    AURORA_SNES_PPU_DETAIL_AUTO(AURORA_SNES_PPU_DETAIL_SYNC);
     /* AURORA_DOT_RASTER_V6_PPU_20260915
      * The old queue tagged only V and therefore every write made on line N
      * became visible on N+1. V6 retains the scanline renderer but timestamps
@@ -1099,6 +1111,11 @@ void SnesPPU::Sync(Uint32 uLine, Uint32 uHClock)
     if (m_bVBlank)
     {
         SNQueueElementT *pElement;
+        if (m_Queue.IsEmpty())
+        {
+            m_uMemoryAccessFlags = 0;
+            return;
+        }
         while ((pElement = m_Queue.Dequeue()) != NULL)
         {
             m_uMemoryAccessFlags = pElement->uPad;
@@ -1107,6 +1124,15 @@ void SnesPPU::Sync(Uint32 uLine, Uint32 uHClock)
             g_DbgPPUAppliedWrites++;
 #endif
         }
+        m_uMemoryAccessFlags = 0;
+        return;
+    }
+
+    /* Same-line no-op proof: empty queue plus either an already-rendered
+     * line or a pre-H=512 target cannot change any PPU-visible state. */
+    if (m_uLine == uLine && m_Queue.IsEmpty() &&
+        (m_bRasterLineRendered || uHClock < SNESPPU_RASTER_SNAPSHOT_H))
+    {
         m_uMemoryAccessFlags = 0;
         return;
     }

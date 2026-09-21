@@ -13,6 +13,7 @@
 #include "snmaskop.h"
 #include "prof.h"
 #include "sndbglog.h"
+#include "platform/ps2/system/aurora_snes_cost_profiler.h" /* AURORA_SNES_PPU_BREAKDOWN_V2_20260920 */
 #if CODE_PLATFORM == CODE_PS2
 #include "ps2mem.h"
 #include "ps2dma.h"
@@ -166,6 +167,12 @@ void SNPPURenderSetObjLimitMode(Uint8 uMode)
 SnesChrLookupT _SnesPPU_PlaneLookup[2] _ALIGN(32);
 Uint8 _SnesPPU_HFlipLookup[2][256] _ALIGN(32);
 
+#if CODE_PLATFORM == CODE_PS2
+/* AURORA_SNES_BG_LOOKUP_SCRATCHPAD_V2_20260920: only PlaneLookup[0] is published to scratchpad. */
+typedef char SNPPULookupScratchSizeCheck[
+    (sizeof(_SnesPPU_PlaneLookup[0]) == PS2MEM_SNES_LOOKUP_SIZE) ? 1 : -1];
+#endif
+
 static Bool _SnesPPU_bInitialized=FALSE;
 
 //
@@ -208,6 +215,14 @@ static void _BuildPlaneLookup()
 		_SnesPPU_HFlipLookup[0][i] = i;
 		_SnesPPU_HFlipLookup[1][i] = _HFlipBits(i);
 	}
+
+#if CODE_PLATFORM == CODE_PS2
+	/* AURORA_SNES_BG_LOOKUP_SCRATCHPAD_V2_20260920
+	 * Build all tables in ordinary storage exactly as before, then publish
+	 * only PlaneLookup[0] once to the disjoint 14..16 KiB scratch region. */
+	memcpy((void *)PS2MEM_SNES_LOOKUP_ADDR,
+	       _SnesPPU_PlaneLookup[0], sizeof(_SnesPPU_PlaneLookup[0]));
+#endif
 }
 
 void _DrawMask(Uint32 *pDest, SNMaskT *pMask, Int32 nPixels)
@@ -247,6 +262,8 @@ void _DrawMask2(Uint32 *pDest, SNMaskT *pMask1, SNMaskT *pMask2, Int32 nPixels)
 
 void SnesPPURender::RenderLine(Int32 iLine)
 {
+	/* AURORA_SNES_PPU_BREAKDOWN_V2_20260920: RenderLine remainder after child phases. */
+	AURORA_SNES_PPU_DETAIL_AUTO(AURORA_SNES_PPU_DETAIL_RENDER);
 	/* AURORA_OBJ_STAT77_V2_RENDERCPP_20260915
 	 * Safe Frameskip may remove the host target, but Range/Time Over are
 	 * emulated PPU state and can be read by game code. Keep only the cheap
@@ -259,12 +276,16 @@ void SnesPPURender::RenderLine(Int32 iLine)
 			if ((m_UpdateFlags & SNESPPURENDER_UPDATE_OBJ) ||
 			    g_SnesObjLimitVisibilityDirty)
 			{
+				/* PPU detail: no-target OBJ maintenance */
+				AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ_UPDATE);
 				UpdateOBJ(m_pRenderInfo->uObjY, m_pRenderInfo->uObjSize);
+				/* AURORA_SNES_SAFE_PERF_V4_20260919: pRegs already points at this same register image. */
 				UpdateOBJVisibility(m_pRenderInfo->uObjY,
-					m_pRenderInfo->uObjSize, m_pPPU->GetRegs()->oampri.w,
+					m_pRenderInfo->uObjSize, pRegs->oampri.w,
 					SNESPPU_OBJ_NUM);
 				m_UpdateFlags &= ~SNESPPURENDER_UPDATE_OBJ;
 				g_SnesObjLimitVisibilityDirty = FALSE;
+				AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_OBJ_UPDATE);
 			}
 			if ((Uint32)iLine < SNPPU_MAXLINE)
 				m_pPPU->SetObjOverflow(
@@ -347,8 +368,12 @@ static Bool _SnesPPUHasMode34DirectPixels(const SNPPUBlendInfoT *pInfo)
 	const Uint64 uDirectMask = 0x8888888888888888ULL;
 	Uint32 i;
 
-	for (i = 0; i < 256 / 8; i++)
-		if (pAttrib64[i] & uDirectMask)
+	/* AURORA_SNES_SAFE_PERF_V4_20260919: 32 valid words, exactly divisible by four. */
+	for (i = 0; i < 256 / 8; i += 4)
+		if ((pAttrib64[i + 0] |
+		     pAttrib64[i + 1] |
+		     pAttrib64[i + 2] |
+		     pAttrib64[i + 3]) & uDirectMask)
 			return TRUE;
 	return FALSE;
 }
@@ -368,19 +393,22 @@ static void _SnesPPUBuildMode34DirectLine(Uint16 *pOut,
 	for (i = 0; i < 256; i++)
 	{
 		Uint8 uMeta = pInfo->uAttrib8[i];
+		/* AURORA_SNES_SAFE_PERF_V4_20260919: all three SNMask tests address the same pixel bit. */
+		const Uint32 iMaskByte = i >> 3;
+		const Uint8 uMaskBit = (Uint8)(1u << (i & 7));
 		Uint16 uMain = _SnesPPUResolveMode34Color15(
 			pInfo->uMain8[i], (Uint8)(uMeta & 0x0F), pCGRAM);
 		Uint16 uResult;
 
-		if (!_SnesPPUMaskPixel(&pColorMask[0], i))
+		if (!(pColorMask[0].uMask8[iMaskByte] & uMaskBit))
 			uMain = 0;
 
-		if (_SnesPPUMaskPixel(&pColorMask[1], i))
+		if (pColorMask[1].uMask8[iMaskByte] & uMaskBit)
 		{
 			Uint16 uSub;
 			Int32 r, g, b;
 			Int32 sr, sg, sb;
-			Bool bHalf = _SnesPPUMaskPixel(&pColorMask[2], i);
+			Bool bHalf = (pColorMask[2].uMask8[iMaskByte] & uMaskBit) != 0;
 
 			if (bUseSubscreen)
 			{
@@ -443,7 +471,9 @@ void SnesPPURender::RenderLine32(Int32 iLine, Bool bPlanar)
 	 * This scanline render is synchronous. Cache exact immutable fields
 	 * from the already-snapshotted register image. */
 	const Uint8 uBGMode = (Uint8)(pRegs->bgmode & 7);
-	const Uint32 uIntensity = (Uint32)(pRegs->inidisp & 0x0F);
+	/* AURORA_SNES_SAFE_PERF_V4_20260919: both brightness and force-blank come from the same byte. */
+	const Uint8 uINIDISP = pRegs->inidisp;
+	const Uint32 uIntensity = (Uint32)(uINIDISP & 0x0F);
 	/* AURORA_V85_EFFECTIVE_COLOR_PATH
 	 * Derive renderer-only values. Never mutate emulated PPU registers. */
 	const Uint8 uHackFlags = SNPPURenderGetSoftwareHackFlags();
@@ -477,17 +507,24 @@ static Bool bPrint = TRUE;
 	}
 #endif
 
-	if (pRegs->inidisp & 0x80)
+	if (uINIDISP & 0x80)
 	{
         m_pBlend->Clear(pBlendInfo, iLine);
 	} else
 	{
 		SNMaskT ColorMask[3];
 		Bool bDirectMain = FALSE;
+		/* PPU detail: pre-raster setup */
+		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_PREP);
+		/* AURORA_SNES_SAFE_PERF_V4_20260919
+		 * CGRAM storage and fixed-color register belong to this PPU instance;
+		 * this synchronous scanline routine does not replace their addresses. */
+		SnesColor16T *pCGData = m_pPPU->GetCGData();
+		const Uint16 uFixedColor = pRegs->coldata;
 
 		if (m_UpdateFlags & SNESPPURENDER_UPDATE_PAL)
 		{
-            m_pBlend->UpdatePalette(pBlendInfo, m_pPPU->GetCGData(), uIntensity);
+            m_pBlend->UpdatePalette(pBlendInfo, pCGData, uIntensity);
 
 			m_UpdateFlags &= ~SNESPPURENDER_UPDATE_PAL;
 		}
@@ -498,6 +535,8 @@ static Bool bPrint = TRUE;
 #if SNDBG_LOG
 			Uint32 _tObjUpdate = ProfCtrGetCycle();
 #endif
+			/* PPU detail: presented OBJ update */
+			AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ_UPDATE);
 			UpdateOBJ(pRenderInfo->uObjY, pRenderInfo->uObjSize);
 
             PROF_ENTER("UpdateOBJVisibility");
@@ -513,6 +552,7 @@ static Bool bPrint = TRUE;
 
 			m_UpdateFlags &= ~SNESPPURENDER_UPDATE_OBJ;
 			g_SnesObjLimitVisibilityDirty = FALSE;
+			AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_OBJ_UPDATE);
 		}
 
 		/* Tiles and decoded character rows are cached across scanlines. A VRAM
@@ -539,8 +579,17 @@ static Bool bPrint = TRUE;
     		m_UpdateFlags &= ~SNESPPURENDER_UPDATE_WINDOW;
         }
 
+		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_PREP);
+
 		// render line
+		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_RASTER);
 		RenderLine8(iLine, pRenderInfo);
+		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_RASTER);
+
+		/* PPU detail: post-raster color math / blender / GS submission. */
+		/* AURORA_SNES_PPU_FOCUS_V3_20260920: split COLOR/GS into masks, blend/GS and remainder. */
+		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_COLOR_OTHER);
+		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_COLOR_MASK);
 
 #if CODE_PLATFORM == CODE_PS2
 		/* AURORA_V8_MODE7_RELEASE_AUDIT_20260915
@@ -576,7 +625,11 @@ static Bool bPrint = TRUE;
         // 1 = enabled
 		if (!bDirectMain)
 		{
-			switch ((uEffectiveCGWSEL >> 6) & 3)
+			/* AURORA_SNES_SAFE_PERF_V10_20260919 / AURORA_SNES_SAFE_PERF_V10_HALF_MASK_20260919: this selector also proves
+			 * whether the later half-color AND sees an all-one/all-zero main mask. */
+			const Uint8 uMainColorWindowMode =
+				(Uint8)((uEffectiveCGWSEL >> 6) & 3);
+			switch (uMainColorWindowMode)
 			{
 			case 0:	// all the time
 				SNMaskSet(&ColorMask[0]);
@@ -623,8 +676,27 @@ static Bool bPrint = TRUE;
 			{
 				// 0 = disabled
 				// 1 = 1/2 add sub enabled
-				SNMaskAND(&ColorMask[2], &pRenderInfo->SubAddSubMask, &ColorMask[1]);
-				SNMaskAND(&ColorMask[2], &ColorMask[2], &ColorMask[0]);
+				/* AURORA_SNES_SAFE_PERF_V10_20260919 / AURORA_SNES_SAFE_PERF_V10_HALF_MASK_20260919
+				 * Old result:
+				 *   SubAddSubMask & ColorMask[1] & ColorMask[0]
+				 * CGWSEL mode 0 makes ColorMask[0] all ones; mode 3 makes
+				 * it all zeros. Modes 1/2 keep the original two-AND path. */
+				switch (uMainColorWindowMode)
+				{
+				case 0:
+					SNMaskAND(&ColorMask[2],
+						&pRenderInfo->SubAddSubMask, &ColorMask[1]);
+					break;
+				case 3:
+					SNMaskClear(&ColorMask[2]);
+					break;
+				case 1:
+				case 2:
+					SNMaskAND(&ColorMask[2],
+						&pRenderInfo->SubAddSubMask, &ColorMask[1]);
+					SNMaskAND(&ColorMask[2], &ColorMask[2], &ColorMask[0]);
+					break;
+				}
 			} else
 			{
 				// 1/2 disabled
@@ -632,11 +704,14 @@ static Bool bPrint = TRUE;
 			}
 		}
 
+		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_COLOR_MASK);
+
 		// perform color blending of main+sub
 #if SNDBG_LOG
 		g_TmgCycColorMath += ProfCtrGetCycle() - _tColorMath;
 		Uint32 _tBlend = ProfCtrGetCycle();
 #endif
+		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_BLEND);
 #if CODE_PLATFORM == CODE_PS2
 		if (bBG1DirectPixels)
 		{
@@ -644,7 +719,7 @@ static Bool bPrint = TRUE;
 			Int32 iPixel;
 
 			_SnesPPUBuildMode34DirectLine(DirectLine, pBlendInfo,
-				m_pPPU->GetCGData(), pRegs->coldata, ColorMask,
+				pCGData, uFixedColor, ColorMask,
 				(uEffectiveCGWSEL & 0x02) != 0,
 				(uEffectiveCGADSUB & 0x80) != 0);
 
@@ -670,7 +745,7 @@ static Bool bPrint = TRUE;
 			/* Exec stages its source before returning. Restore the real CGRAM
 			 * master palette immediately and mark it dirty for the next normal
 			 * scanline; the in-flight GIF chain owns its scratchpad copy. */
-			m_pBlend->UpdatePalette(pBlendInfo, m_pPPU->GetCGData(),
+			m_pBlend->UpdatePalette(pBlendInfo, pCGData,
 				uIntensity);
 		}
 		else
@@ -679,7 +754,7 @@ static Bool bPrint = TRUE;
         m_pBlend->Exec(
             pBlendInfo,
             iLine,
-            pRegs->coldata,
+            uFixedColor,
 			bDirectMain ? NULL : ColorMask,
             (uEffectiveCGADSUB & 0x80),
             uIntensity
@@ -688,6 +763,8 @@ static Bool bPrint = TRUE;
 #if SNDBG_LOG
 		g_TmgCycBlend += ProfCtrGetCycle() - _tBlend;
 #endif
+		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_BLEND);
+		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_COLOR_OTHER);
 	}
 }
 
@@ -765,9 +842,14 @@ void SnesPPURender::BeginRender(CRenderSurface *pTarget)
 		pTarget->Lock();
 		pTarget->SetLineOffset(1);
         m_pBlend->Begin(pTarget);
-	}
 
-    SetUpdateFlags(SNESPPURENDER_UPDATE_ALL);
+        /* AURORA_SNES_SAFE_FRAMESKIP_VIDEO_ONLY_V1_20260920
+         * UPDATE_ALL is host-render state.  A NULL target is an intentional
+         * Safe Frameskip frame: CPU/SPC/DSP and emulated PPU state still run,
+         * but there is no image to rebuild.  Dirty host state is rebuilt in
+         * full on the next real target. */
+        SetUpdateFlags(SNESPPURENDER_UPDATE_ALL);
+	}
 
     if (!_SnesPPU_bInitialized)
     {

@@ -24,6 +24,14 @@ class SNSpcIO
 	SNSpc_t			*m_pSpc;
 	SNSpcDsp		*m_pSpcDsp;
 
+	/* AURORA_CPU_SPC_HOST_WORK_REDUCTION_V2_20260920_HEADER */
+/* AURORA_ZENKI_APUIO_F1_COLLISION_V1_1_20260920
+	 * Transient same-SPC-cycle latch-reset stamps.  These are scheduler/bus
+	 * state, not architectural save-state payload. */
+	Uint32			m_uPortResetTotal01;
+	Uint32			m_uPortResetTotal23;
+	Uint8			m_uPortResetValid;
+
 public:
 	SNSpcIORegsT	m_Regs;
 
@@ -44,7 +52,16 @@ public:
 	void	RestoreState(struct SNStateSPCIOT *pState);
 
 	#if SNSPCIO_WRITEQUEUE
-	Bool	EnqueueWrite(Uint32 uCycle, Uint32 uAddr, Uint8 uData);
+	/* AURORA_CPU_SPC_HOST_WORK_REDUCTION_V2_20260920
+	 * Single-threaded scheduler: this query and the immediately following
+	 * EnqueueWrite observe the same transient reset-valid state. */
+	inline Bool NeedsPortResetCollisionCheck(Uint32 uAddr) const
+	{
+		const Uint8 uGroup = (uAddr & 2u) ? 0x02u : 0x01u;
+		return (m_uPortResetValid & uGroup) ? TRUE : FALSE;
+	}
+
+	Bool	EnqueueWrite(Uint32 uCycle, Uint32 uTotalCycle, Uint32 uAddr, Uint8 uData);
 	void	SyncQueue(Uint32 uCycle);
 	void	SyncQueueAll();
 	#endif

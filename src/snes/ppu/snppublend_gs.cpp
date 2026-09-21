@@ -32,9 +32,13 @@ extern "C" {
 #define SNPPU_DMA_BLENDINFO_ADDR \
 	(PS2MEM_SCRATCHPAD + SNPPU_DMA_BLENDINFO_OFFSET)
 
+/* AURORA_SNES_BG_LOOKUP_SCRATCHPAD_V2_20260920: renderer + DMA staging must stay below the 14 KiB
+ * lookup reservation, which itself must end exactly within scratchpad. */
 typedef char SNPPUScratchLayoutCheck[
 	(sizeof(SnesRender8pInfoT) <= SNPPU_DMA_BLENDINFO_OFFSET &&
-	 SNPPU_DMA_BLENDINFO_OFFSET + sizeof(SNPPUBlendInfoT) <= 16 * 1024)
+	 SNPPU_DMA_BLENDINFO_OFFSET + sizeof(SNPPUBlendInfoT) <=
+		PS2MEM_SNES_LOOKUP_OFFSET &&
+	 PS2MEM_SNES_LOOKUP_OFFSET + PS2MEM_SNES_LOOKUP_SIZE <= 16 * 1024)
 		? 1 : -1];
 
 /* AURORA_TOPGEAR_GS_LINE_PAYLOAD_COPY_V4_20260917
@@ -160,7 +164,9 @@ static Uint32 _SNPPUBlend_AttribSubPal[256] _ALIGN(64) =
 static void _PlanarTo3(Uint8 *pDest, SNMaskT *pSrc0, SNMaskT *pSrc1, SNMaskT *pSrc2)
 {
 	Uint32 nBytes = 256 / 8;
-	SnesChrLookup64T *pLookup64 = (SnesChrLookup64T *)&_SnesPPU_PlaneLookup[1];
+	/* AURORA_SNES_BG_LOOKUP_SCRATCHPAD_V2_20260920: PlanarTo3 uses PlaneLookup[1], which remains in ordinary RAM. */
+	SnesChrLookup64T *pLookup64 =
+		(SnesChrLookup64T *)&_SnesPPU_PlaneLookup[1];
 	Uint64 *pDest64 = (Uint64 *)pDest;
 	const Uint8 *pSrc8_0 = pSrc0->uMask8;
 	const Uint8 *pSrc8_1 = pSrc1->uMask8;

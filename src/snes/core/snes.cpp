@@ -14,6 +14,7 @@
 #include "sndebug.h"
 #include "sndbglog.h"
 #include "platform/ps2/system/aurora_runtime_trace.h"
+#include "platform/ps2/system/aurora_snes_cost_profiler.h"
 #include "platform/ps2/system/aurora_ee_crash_diag.h"
 
 /* AURORA_SNES_NATIVE_32K_V1_20260822
@@ -1213,6 +1214,7 @@ static Uint32 SnesDbgHash32(const void *pData, Uint32 nBytes)
 
 
 #define SNES_SYNCPPUEVERYLINE (CODE_DEBUG && 0) 
+/* AURORA_CPU_SPC_DSP_PPU_HOST_WORK_REDUCTION_V4_20260920_RASTER */
 
 /* AURORA_SGB_AUDIO_V0_5_20260904
  * Transparent per-frame proxy used only while a real SGB firmware/game is
@@ -1271,6 +1273,7 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
     }
 #endif */     
 
+    /* AURORA_CPU_SPC_HOST_WORK_REDUCTION_V2_20260920_SCHED */
     /* AURORA_TOPGEAR_SPC_SYNC_ALGEBRA_V3_20260917
      * SNSPCGetCounter(FRAME) is Counter[FRAME] - Cycles. The legacy
      * expression subtracted that getter and then subtracted Cycles
@@ -1285,6 +1288,8 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
     {
         //SnesDebug("SNSPCExec: %d\n", nCycles);
         // execute SPC
+        /* profiler: SPC700 execution */
+        AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_SPC);
         PROF_ENTER("SNSpcExecute");
 #if SNDBG_LOG
         Uint32 _tAPU = ProfCtrGetCycle();
@@ -1301,6 +1306,7 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
         g_TmgCycAPU += ProfCtrGetCycle() - _tAPU;
 #endif
         PROF_LEAVE("SNSpcExecute");
+        AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_SPC);
 
 #if SNSPCIO_WRITEQUEUE
         /* AURORA_BLIZZARD_APUIO_QUEUE_ORDER_V1_20260914
@@ -1319,7 +1325,7 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
             (Uint32)SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
         if (bFlushAll)
             m_SpcIO.SyncQueueAll();
-        else
+        else if (!m_SpcIO.m_Queue.IsEmpty())
             m_SpcIO.SyncQueue(SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
         AuroraEECrashDiagBreadcrumb(
             AED_APUIO_QUEUE_RETURN,
@@ -1384,6 +1390,7 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
 
 inline void SnesSystem::SyncPPU()
 {
+	AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_PPU);
 #if SNDBG_LOG
 	Uint32 _tSync = ProfCtrGetCycle();
 	g_DbgPPUSyncCalls++;
@@ -1410,6 +1417,7 @@ inline void SnesSystem::SyncPPU()
 #if SNDBG_LOG
 	g_TmgCycPPUSync += ProfCtrGetCycle() - _tSync;
 #endif
+	AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_PPU);
 }
 
 
@@ -1501,7 +1509,16 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 	SnesPPURegsT *pPPURegs = (SnesPPURegsT *)pSnes->m_PPU.GetRegs();
 
-	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	/* V4: duplicate only the catch-up routine's pure rejection predicates
+	 * here, so a proven no-op does not pay the call on common MMIO traffic. */
+	if (pCpu == &pSnes->m_Cpu &&
+	    pSnes->m_bRasterLineActive &&
+	    !pSnes->m_bRasterCatchupActive &&
+	    !(pCpu->uSignal & SNCPU_SIGNAL_DMA) &&
+	    (!pSnes->m_bRasterHBlankDone || !pSnes->m_bRasterHDMADone))
+	{
+		pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	}
 	uAddr &= 0xFFFF;
 
 	/* AURORA_TOPGEAR_COMMON_MMIO_GATE_V2_20260917
@@ -1768,7 +1785,16 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 {
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 
-	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	/* V4: duplicate only the catch-up routine's pure rejection predicates
+	 * here, so a proven no-op does not pay the call on common MMIO traffic. */
+	if (pCpu == &pSnes->m_Cpu &&
+	    pSnes->m_bRasterLineActive &&
+	    !pSnes->m_bRasterCatchupActive &&
+	    !(pCpu->uSignal & SNCPU_SIGNAL_DMA) &&
+	    (!pSnes->m_bRasterHBlankDone || !pSnes->m_bRasterHDMADone))
+	{
+		pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	}
 	uAddr &= 0xFFFF;
 
 	/* AURORA_TOPGEAR_COMMON_MMIO_GATE_V2_20260917
@@ -1830,13 +1856,41 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 		 * sequences such as 02 -> 00 -> 01 can collapse to 01 before the SPC
 		 * executes, deadlocking handshakes such as The Lost Vikings.
 		 *
-		 * Only pay this synchronization cost when an older APUIO write is
-		 * actually pending.  SyncSPC(0,FALSE) advances the SPC to the current
-		 * S-CPU time and publishes only writes whose SPC timestamp is due.
-		 * The newer write is queued only after that window has been created. */
+		 * AURORA_BLACKTHORNE_APUIO_SAMECYCLE_V1_WRITE_20260919
+		 * Blackthorne's IPL uploader uses 16-bit STA.l $2140. Because Aurora's
+		 * S-CPU trap timestamp is instruction-granular, the $2140 and $2141
+		 * byte callbacks have the SAME timestamp. They are one timestamp group,
+		 * not an older transition followed by a later one.
+		 *
+		 * Preserve the Lost Vikings protection only when the oldest queued
+		 * transition is genuinely older. Never run the SPC between two bytes
+		 * which Aurora itself timestamps identically. */
+		const Uint32 uAPUIOWriteCycle =
+			(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_FRAME) +
+			(Uint32)SNES_SPCWRITE_LATENCY;
+		/* AURORA_ZENKI_APUIO_F1_COLLISION_V1_1_20260920
+		 * V5.1: declaration stays here, but the lazy TOTAL decision is
+		 * deliberately deferred until after every possible SyncSPC(). */
+		Uint32 uAPUIOTotalWriteCycle = 0;
 		#if SNSPCIO_WRITEQUEUE
-		if (!pSnes->m_SpcIO.m_Queue.IsEmpty())
+		SNQueueElementT *pPendingAPUIO = pSnes->m_SpcIO.m_Queue.Peek();
+		if (pPendingAPUIO && pPendingAPUIO->uCycle < uAPUIOWriteCycle)
+		{
+			/* AURORA_VIKINGS_APUIO_PREPUBLISH_V2_20260919
+			 * SyncSPC() executes the SPC before its normal due-write drain, and
+			 * that drain is skipped entirely when no positive SPC budget is
+			 * available.  Therefore an older APUIO edge can remain queued until
+			 * after a newer edge is appended, allowing 02 -> 00 -> 01 style
+			 * handshakes to collapse.
+			 *
+			 * The current APUIO write latency is zero, so every timestamp strictly
+			 * below uAPUIOWriteCycle is already due at this S-CPU bus access.
+			 * Publish only those older timestamps BEFORE SPC catch-up.  Equality
+			 * is intentionally excluded: same-instruction $2140/$2141 writes
+			 * (Blackthorne) remain one atomic timestamp group. */
+			pSnes->m_SpcIO.SyncQueue(uAPUIOWriteCycle - 1u);
 			pSnes->SyncSPC(0, FALSE);
+		}
 		#endif
 		/* AURORA_SNES_BINARY_TRACE_V7_VISUAL_BREADCRUMBS_20260918_APUIO_W */
 		AuroraTraceBreadcrumb(
@@ -1847,10 +1901,22 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 		    (Uint32)uData,
 		    (Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_FRAME),
 		    ATR_P_FLUSH);
+		/* AURORA_APUIO_LAZY_TOTAL_RACE_FIX_V1_20260920
+		 * SyncSPC() above may itself execute SPC $F1 and create a
+		 * collision stamp. Query that state only now, immediately
+		 * before enqueue, so a newly-created stamp receives a valid
+		 * monotonic TOTAL timestamp instead of zero. */
 		#if SNSPCIO_WRITEQUEUE
+		if (pSnes->m_SpcIO.NeedsPortResetCollisionCheck(uAddr & 3u))
+		{
+			uAPUIOTotalWriteCycle =
+				(Uint32)SNCPUGetCounter(pCpu, SNCPU_COUNTER_TOTAL) +
+				(Uint32)SNES_SPCWRITE_LATENCY;
+		}
 		if (!pSnes->m_SpcIO.EnqueueWrite(
-		        SNCPUGetCounter(pCpu, SNCPU_COUNTER_FRAME) + SNES_SPCWRITE_LATENCY,
-		        uAddr & 3, uData))
+				uAPUIOWriteCycle,
+				uAPUIOTotalWriteCycle,
+				uAddr & 3u, uData))
 		#endif
 		{
 			pSnes->SyncSPC(SNES_SPCWRITE_LATENCY);
@@ -1963,7 +2029,16 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read4000(SNCpuT *pCpu, Uint32 uAddr)
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 	SnesIO *pIO = &pSnes->m_IO;
 
-	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	/* V4: duplicate only the catch-up routine's pure rejection predicates
+	 * here, so a proven no-op does not pay the call on common MMIO traffic. */
+	if (pCpu == &pSnes->m_Cpu &&
+	    pSnes->m_bRasterLineActive &&
+	    !pSnes->m_bRasterCatchupActive &&
+	    !(pCpu->uSignal & SNCPU_SIGNAL_DMA) &&
+	    (!pSnes->m_bRasterHBlankDone || !pSnes->m_bRasterHDMADone))
+	{
+		pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	}
 
 	/* AURORA_TOPGEAR_CPU_IO_LOW_FAST_GATE_V3_20260917
 	 * Common CPU I/O ($4016/$4017/$4200-$421f) is below every auxiliary
@@ -2121,7 +2196,16 @@ void SNCPU_TRAPFUNC SnesSystem::Write4000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 {
 	SnesSystem *pSnes = (SnesSystem *)pCpu->pUserData;
 
-	pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	/* V4: duplicate only the catch-up routine's pure rejection predicates
+	 * here, so a proven no-op does not pay the call on common MMIO traffic. */
+	if (pCpu == &pSnes->m_Cpu &&
+	    pSnes->m_bRasterLineActive &&
+	    !pSnes->m_bRasterCatchupActive &&
+	    !(pCpu->uSignal & SNCPU_SIGNAL_DMA) &&
+	    (!pSnes->m_bRasterHBlankDone || !pSnes->m_bRasterHDMADone))
+	{
+		pSnes->CatchUpRasterEventsForCpuMMIO(pCpu);
+	}
 
 	/* AURORA_TOPGEAR_CPU_IO_LOW_FAST_GATE_V3_20260917
 	 * See Read4000(): common low CPU-I/O cannot hit MCC/DMA/S-DD1. */
@@ -3207,6 +3291,7 @@ void SnesSystem::MarkSA1BWRAMDirty(void)
 
 void SnesSystem::ExecuteCPU(Int32 nCycles)
 {
+    AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_CPU);
     // increment cycle counter
     SNCPUAddCycles( &m_Cpu, nCycles );
     Int32 nSA1Synced = 0; /* AURORA_SA1_INTERLEAVED_CHUNK_SCHEDULER_V7_2_20260903 */
@@ -3236,6 +3321,8 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
                 // sync up PPU before DMA (only necessary for read dmas?)
                 SyncPPU();
 
+                /* profiler: MDMA is bus/raster work */
+                AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_RASTER);
                 PROF_ENTER("ProcessMDMA");
 #if SNDBG_LOG
 				Uint32 _tMDMA = ProfCtrGetCycle();
@@ -3257,6 +3344,7 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
 				g_TmgCycMDMA += ProfCtrGetCycle() - _tMDMA;
 #endif
                 PROF_LEAVE("ProcessMDMA");
+                AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_RASTER);
 
                 // are all MDMAs complete?
                 if (m_DMAC.GetMDMAEnable() == 0)
@@ -3428,6 +3516,10 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
         if (nElapsed > 0)
             m_SA1.Run(nElapsed);
     }
+
+    AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_CPU);
+
+
 
     if (bSGBActive)
         SyncSuperGameBoy();
@@ -3670,6 +3762,7 @@ static _INLINE Int32 SnesAutoJoyEndCycle(const SnesPPU &ppu,
 
 void SnesSystem::ExecuteLine()
 {
+	AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_RASTER);
 	/* AURORA_SNES_BINARY_TRACE_V7_R9_DKC_PHASEPROBE_20260918_LINE */
 	AuroraTraceLinePhase(
 	    m_uLine,
@@ -3884,6 +3977,7 @@ void SnesSystem::ExecuteLine()
 	m_nLineIRQClock = nLineClocks;
 #endif
 
+	AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_RASTER);
 	PROF_LEAVE("ExecLine");
 }
 
@@ -3893,6 +3987,8 @@ void SnesSystem::ExecuteLine()
 void SnesSystem::ExecuteFrame(Emu::SysInputT  *pInput, CRenderSurface *pTarget, CMixBuffer *pSound, ModeE eMode)
 {
 Bool bPAL = FALSE;
+
+	AuroraSnesCostProfilerFrameBegin();
 
 /* AURORA_SNES_BINARY_TRACE_V7_R9_DKC_PHASEPROBE_20260918_FRAME */
 /* AURORA_SNES_BINARY_TRACE_V7_R10_RETURN_BOUNDARY_20260918 */
@@ -4115,6 +4211,8 @@ m_PPU.SetRegionPAL(bPAL);
 	AuroraTracePhase(ATR_PHASE_MIX_BEGIN, m_uLine,
 	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 	// mix non-deterministic mixer
+	/* profiler: S-DSP mixer */
+	AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_DSP);
 	PROF_ENTER("SNSpcDspUpdate");
 #if SNDBG_LOG
 	Uint32 _tMix = ProfCtrGetCycle();
@@ -4132,6 +4230,7 @@ m_PPU.SetRegionPAL(bPAL);
 	g_TmgCycMix += ProfCtrGetCycle() - _tMix;
 #endif
 	PROF_LEAVE("SNSpcDspUpdate");
+	AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_DSP);
 	AuroraTracePhase(ATR_PHASE_MIX_END, m_uLine,
 	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 
@@ -4149,6 +4248,8 @@ m_PPU.SetRegionPAL(bPAL);
 			break;
 		case MODE_ACCURATEDETERMINISTIC:
 			// mix silent mixer
+			/* profiler: deterministic S-DSP mixer */
+			AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_DSP);
 			PROF_ENTER("SNSpcDspUpdateSilent");
 #if SNDBG_LOG
 			_tMix = ProfCtrGetCycle();
@@ -4158,6 +4259,7 @@ m_PPU.SetRegionPAL(bPAL);
 			g_TmgCycMix += ProfCtrGetCycle() - _tMix;
 #endif
 			PROF_LEAVE("SNSpcDspUpdateSilent");
+			AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_DSP);
 
 			// update spc flags based on deterministic mixer
 			m_SpcDsp.UpdateFlags(&m_SpcDspSilentMixer);
@@ -4520,6 +4622,8 @@ m_PPU.SetRegionPAL(bPAL);
 		g_DbgCaptureActive = FALSE;
 	}
 #endif
+
+	AuroraSnesCostProfilerFrameEnd();
 
 	AuroraTracePhase(ATR_PHASE_FRAME_EXIT, m_uLine,
 	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
