@@ -842,9 +842,14 @@ void SnesPPURender::BeginRender(CRenderSurface *pTarget)
 		pTarget->Lock();
 		pTarget->SetLineOffset(1);
         m_pBlend->Begin(pTarget);
-	}
 
-    SetUpdateFlags(SNESPPURENDER_UPDATE_ALL);
+        /* AURORA_SNES_SAFE_FRAMESKIP_VIDEO_ONLY_V1_20260920
+         * UPDATE_ALL is host-render state.  A NULL target is an intentional
+         * Safe Frameskip frame: CPU/SPC/DSP and emulated PPU state still run,
+         * but there is no image to rebuild.  Dirty host state is rebuilt in
+         * full on the next real target. */
+        SetUpdateFlags(SNESPPURENDER_UPDATE_ALL);
+	}
 
     if (!_SnesPPU_bInitialized)
     {

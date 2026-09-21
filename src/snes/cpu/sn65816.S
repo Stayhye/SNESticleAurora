@@ -769,7 +769,13 @@
 _SNCPU_Write8:
 		srl		t0,R_Addr,SNCPU_BANK_SHIFT				// t0 = bank 
 
-		beq		t0,zr,_SNCPU_Write8ZeroBank
+		/* AURORA_CPU_PAGE0_BRANCHLIKELY_V2_20260920
+		 * Descriptor zero ($0000-$1FFF) is hot for direct-page/stack work.
+		 * BEQL executes the existing pMem load only when zero is taken; when
+		 * nonzero, that delay slot is annulled and the original SLL below runs.
+		 * This removes one host instruction from page-0 accesses only. */
+		beql		t0,zr,_SNCPU_Write8ZeroBank
+        lw      t1,SNCPU_pMem(R_pCpu)
         sll		t0,t0,4									// t0 = (bank << 4) 
 
         addu	t0,t0,R_pCpu							// t0 -> Bank[bank]
@@ -788,7 +794,6 @@ _SNCPU_Write8:
         
 
 _SNCPU_Write8ZeroBank:
-        lw      t1,SNCPU_pMem(R_pCpu)
         beq     t1,zr,_SNCPU_Write8ZeroBankTrap
         addu    t0,t1,R_Addr
         addiu   R_Cycles,R_Cycles,-SNCPU_CYCLE_SLOW
@@ -985,7 +990,9 @@ _SNCPU_Write16Wrap16:
 _SNCPU_Read8:
 		srl		t0,R_Addr,SNCPU_BANK_SHIFT				// t0 = bank 
         
-        beq		t0,zr,_SNCPU_Read8ZeroBank
+        /* AURORA_CPU_PAGE0_BRANCHLIKELY_V2_20260920: same taken-only page-0 delay-slot reuse as Write8. */
+        beql		t0,zr,_SNCPU_Read8ZeroBank
+        lw      t1,SNCPU_pMem(R_pCpu)
         sll		t0,t0,4									// t0 = (bank << 4) & bank mask
 
         addu	t0,t0,R_pCpu							// t0 -> Bank[bank]
@@ -1003,7 +1010,6 @@ _SNCPU_Read8:
 
 
 _SNCPU_Read8ZeroBank:
-        lw      t1,SNCPU_pMem(R_pCpu)
         beq     t1,zr,_SNCPU_Read8ZeroBankTrap
         addu    t0,t1,R_Addr
         addiu   R_Cycles,R_Cycles,-SNCPU_CYCLE_SLOW

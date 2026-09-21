@@ -2041,6 +2041,14 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 			iColStep = 1;
 		}
 
+#if SNPPU_OBJ_CACHE && SNPPU_CHR_CACHE_HFLIP
+		/* AURORA_SNES_OBJ_TRIPLE_HOTPATH_V1_20260920: choose canonical or pre-flipped cache arrays once per OBJ.
+		 * uValid4 remains shared, so store/invalidation semantics are identical. */
+		SnesPPUChrCache4ViewT ObjCacheView;
+		SnesPPUChrCacheSelect4View(
+			&_SnesPPU_ChrCache, bObjHFlip, &ObjCacheView);
+#endif
+
 		while (nTileCount > 0)
 		{
 			{
@@ -2055,8 +2063,13 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 				{
 					Uint64 uRowData;
 
+#if SNPPU_CHR_CACHE_HFLIP
+					if (SnesPPUChrCacheLookup4View(
+						&ObjCacheView, uRowAddr, &uRowData, &uOpaque))
+#else
 					if (SnesPPUChrCacheLookup4(&_SnesPPU_ChrCache,
 						uRowAddr, bObjHFlip, &uRowData, &uOpaque))
+#endif
 					{
 #if SNDBG_LOG
 						uCacheHits++;
@@ -2083,8 +2096,10 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 						if (bObjHFlip)
 						{
 #if SNPPU_CHR_CACHE_HFLIP
-							SnesPPUChrCacheLoad4HFlip(
-								&_SnesPPU_ChrCache,
+							/* Orientation was selected once per OBJ. This branch
+							 * now exists only on a cache MISS, not every tile hit. */
+							SnesPPUChrCacheLoad4View(
+								&ObjCacheView,
 								uRowAddr, &uRowData, &uOpaque);
 #else
 							SnesPPUChrCacheFlipRow(&uRowData, &uOpaque);
