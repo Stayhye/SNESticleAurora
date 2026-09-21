@@ -1909,26 +1909,32 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 		pObj = pObjBase + pObjList[nObjList];
 
 		/* AURORA_SNES_OBJ_FETCH_HOTPATH_V2_20260920: immutable for every fetched tile of this OBJ. */
+		const Uint16 uObjPosX = pObj->uPosX;
+		const Uint8 uObjPosY = pObj->uPosY;
 		const Uint8 uObjWidth = pObj->uWidth;
+		const Uint8 uObjHeight = pObj->uHeight;
 		const Uint8 uObjPal = pObj->uPal;
 		const Uint8 uObjPri = pObj->uPri;
 		const Bool bObjHFlip = pObj->bHFlip;
+		const Uint8 uObjVXOR = pObj->uVXOR;
 		const Uint16 uObjTile = pObj->uTile;
+		const Uint32 uObjTilesWide = (Uint32)uObjWidth >> 3;
 
+		/* AURORA_SNES_OBJ_VISIBLE_RANGE_WRAP_FAST_V1_20260921
+		 * Host-only: retain per-OBJ fields across the tile loop. */
 
 		// get obj position
-		ObjX = pObj->uPosX;
-		ObjX<<=32-9;
-		ObjX>>=32-9;
-		ObjY = (iLine - pObj->uPosY) & 0xFF;
+		/* AURORA_SNES_OBJ_TRANSPARENT_ROW_ELIDE_V3_20260921: exact defined 9-bit sign extension; no signed left-shift UB. */
+		ObjX = (Int32)((uObjPosX ^ 0x100u) - 0x100u);
+		ObjY = (iLine - uObjPosY) & 0xFF;
 		if (bObjInterlace)
 		{
 			/* One display line addresses two source rows. Vertical flip is
 			 * resolved before field parity; on the flipped field hardware
 			 * subtracts the field bit instead of adding it. */
 			ObjY <<= 1;
-			ObjY ^= pObj->uVXOR;
-			if (pObj->uVXOR)
+			ObjY ^= uObjVXOR;
+			if (uObjVXOR)
 				ObjY -= bField ? 1 : 0;
 			else
 				ObjY += bField ? 1 : 0;
@@ -1936,8 +1942,8 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 		}
 		else
 		{
-			ObjY ^= pObj->uVXOR;
-			ObjY &= pObj->uHeight - 1;
+			ObjY ^= uObjVXOR;
+			ObjY &= uObjHeight - 1;
 		}
 
 		Uint32 uTile0, uTile1, uOpaque;
@@ -1971,9 +1977,13 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 		Uint32 uRow  = ((uObjTile >> 4) + (ObjY >> 3)) & 0x0F;
 		Uint32 uCol0 = uObjTile & 0x0F;
 		Uint32 uYoff = ObjY & 7;
-		/* AURORA_SNES_OBJ_FETCH_HOTPATH_V2_20260920: row + OBSEL table base is constant for this OBJ. */
+		/* AURORA_SNES_OBJ_FETCH_HOTPATH_V2_20260920: row + OBSEL table base is constant for this OBJ.
+		 * AURORA_SNES_OBJ_VISIBLE_RANGE_WRAP_FAST_V1_20260921: base components are 0x100-aligned, so the 15-bit
+		 * VRAM wrap can be folded once here. The later column is <=0xF0 and
+		 * yoff <=7, therefore this row cannot cross 0x8000 afterward. */
 		const Uint32 uObjRowBase =
-			uBaseAddr + (uRow << 8) + (bSecondTable ? uNameSelect : 0);
+			(uBaseAddr + (uRow << 8) +
+			 (bSecondTable ? uNameSelect : 0)) & 0x7FFFu;
 		Int32 iTileX;
 		Int32 nTileCount;
 		Int32 iCol;
@@ -2024,15 +2034,26 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 #endif
 
 		/* AURORA_REVIVE_A06DD_OBJ_HOTPATH_20260829
-		 * Recorta a faixa uma vez e elimina teste/source-column por tile. */
-		_SnesPPUOBJCountedTileRange(pObj->uPosX, ObjX, uObjWidth,
-			&iTileX, &nTileCount);
+		 * Recorta a faixa uma vez e elimina teste/source-column por tile.
+		 * AURORA_SNES_OBJ_VISIBLE_RANGE_WRAP_FAST_V1_20260921: fully-onscreen OBJ bypasses the clipping helper.
+		 * Negative X (including hardware X=$100 -> -256) fails the unsigned
+		 * test and keeps the exact old helper path. */
+		if ((Uint32)ObjX <= (Uint32)(256 - uObjWidth))
+		{
+			iTileX = 0;
+			nTileCount = (Int32)uObjTilesWide;
+		}
+		else
+		{
+			_SnesPPUOBJCountedTileRange(uObjPosX, ObjX, uObjWidth,
+				&iTileX, &nTileCount);
+		}
 		ObjX += iTileX << 3;
 		/* AURORA_SNES_OBJ_BG_PURE_HOTPATH_V4_1_20260920: nTileCount already is the exact loop trip count.
 		 * Do not convert it to pixels only to subtract eight each iteration. */
 		if (bObjHFlip)
 		{
-			iCol = (uObjWidth >> 3) - 1 - iTileX;
+			iCol = (Int32)uObjTilesWide - 1 - iTileX;
 			iColStep = -1;
 		}
 		else
@@ -2056,8 +2077,9 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 				 * Fold one-use tile/address temporaries into the wrapped row address. */
 				const Uint32 uTileColumn =
 				    (Uint32)((uCol0 + iCol) & 0x0F);
+				/* AURORA_SNES_OBJ_VISIBLE_RANGE_WRAP_FAST_V1_20260921: row base is already wrapped and cannot overflow. */
 				const Uint32 uRowAddr =
-				    ((uObjRowBase + (uTileColumn << 4)) & 0x7FFF) + uYoff;
+				    uObjRowBase + (uTileColumn << 4) + uYoff;
 
 #if SNPPU_OBJ_CACHE
 				{
@@ -2121,18 +2143,22 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 						uPlane2, uPlane3, &uTile0, &uTile1, &uOpaque);
 				}
 #endif
-				uTile0 |= uPalette;
-				uTile1 |= uPalette;
-
-				// store tile data
-				((Uint32 *)pObjLine->uData)[0] = uTile0;
-				((Uint32 *)pObjLine->uData)[1] = uTile1;
+				/* AURORA_SNES_OBJ_TRANSPARENT_ROW_ELIDE_V3_20260921
+				 * Transparent rows still count toward the physical 34-tile fetch
+				 * budget, but no later stage may observe their pixel metadata.
+				 * Store only the one byte the compositor needs to reject them. */
 				pObjLine->uData[SNPPU_BGPLANE_OPAQUE] = (Uint8)uOpaque;
+				if (uOpaque)
+				{
+					uTile0 |= uPalette;
+					uTile1 |= uPalette;
+					((Uint32 *)pObjLine->uData)[0] = uTile0;
+					((Uint32 *)pObjLine->uData)[1] = uTile1;
+					pObjLine->uPri  = uObjPri;
+					pObjLine->uPal  = uObjPal;
+					pObjLine->iPosX = ObjX;
+				}
 
-				// store objline
-				pObjLine->uPri  = uObjPri;
-				pObjLine->uPal  = uObjPal;
-				pObjLine->iPosX = ObjX;
 				pObjLine++;
 				nObjLine++;
 				if (nObjLine >= MaxObj8Line) goto FetchOBJDone;
@@ -2188,6 +2214,12 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 	 * scanline. Snapshot fields repeatedly used across helper calls. */
 	const Uint8 uBGModeReg = pRegs->bgmode;
 	const Uint8 uBGMode = (Uint8)(uBGModeReg & 7);
+	/* AURORA_SNES_PSEUDOHIRES_CRT_MERGE_V2_20260921
+	 * SETINI.3 pseudo-hires displays the sub screen and main screen as
+	 * alternating half-pixels. Modes 5/6 are already native hires. */
+	const Bool bPseudoHires =
+		((pRegs->setini & SNESPPU_SETINI_PSEUDOHIR) != 0) &&
+		(uBGMode != 5) && (uBGMode != 6);
 	const Bool bMode7ExtBG =
 		(uBGMode == 7) && ((pRegs->setini & 0x40) != 0);
 	const Uint8 uOBSEL = pRegs->obsel;
@@ -2267,10 +2299,10 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		tsw &= uMode7LayerMask;
 	}
 
-	/* Fixed-color math never samples the sub screen.  With no CGADSUB target,
-	   color math cannot affect a pixel at all.  Apply both facts before
-	   tile/OBJ fetch so disabled layers do no invisible EE work. */
-	if (!(cgwsel & 0x02) || cgadsub == 0)
+	/* Fixed-color math normally makes TS invisible host work, but
+	 * AURORA_SNES_PSEUDOHIRES_CRT_MERGE_V2_20260921: pseudo-hires physically displays TS as every other half-pixel,
+	 * independently of CGADSUB. Never elide it in that mode. */
+	if (!bPseudoHires && (!(cgwsel & 0x02) || cgadsub == 0))
 		ts = 0;
 	uFetchLayers = tm | ts;
 
@@ -2670,8 +2702,11 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 	AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_BG_MAIN);
 
 #if CODE_PLATFORM == CODE_PS2
-	/* AURORA_DIRECT_MAIN_SUB_ELIDE_V3 */
-	if (cgadsub==0 && (cgwsel&0xC0)==0 && m_pPPU->GetIntensity()==15)
+	/* AURORA_DIRECT_MAIN_SUB_ELIDE_V3
+	 * AURORA_SNES_PSEUDOHIRES_CRT_MERGE_V2_20260921: pseudo-hires needs the rendered sub screen even when ordinary
+	 * color math is idle, so the direct-main early return is ineligible. */
+	if (!bPseudoHires &&
+	    cgadsub==0 && (cgwsel&0xC0)==0 && m_pPPU->GetIntensity()==15)
 	{
 		PROF_LEAVE("RenderBG");
 		/* PPU detail: close BG before direct-main return */

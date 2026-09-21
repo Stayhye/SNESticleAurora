@@ -50,8 +50,6 @@ void PicoDriveAurora_RunFrameNative(
     int skip_video,
     int refresh_variables);
 void PicoDriveAurora_SetSpriteLimiter(int level, int mode); /* AURORA_V15_MULTICORE_SPRITE_LIMIT_20260824 */
-/* AURORA_V4_4_BUILD_FIX_32X_VIDEO_FIRST_20260830 */
-void PicoDriveAurora_Set32xAudioSacrifice(int enabled);
 /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830 */
 void PicoDriveAurora_SetCdAudioSafeWindow(int allowed);
 int PicoDriveAurora_ConsumeCdAudioRefillRequest(void);
@@ -1819,13 +1817,12 @@ void PicoDriveBridge_SetSkipVideo(bool skip)
     s_SkipVideoNext = skip;
 }
 
-/* AURORA_V4_4_BUILD_FIX_32X_VIDEO_FIRST_20260830
- * Hard hardware gate: no MCD/MD/SMS/GG/Pico behavior is changed. */
+/* AURORA_NO_32X_ELF_V4_20260921
+ * Public ABI shell retained for existing frontend call sites. The native 32X
+ * core is not linked, so there is deliberately no state to arm or clean up. */
 void PicoDriveBridge_Set32xAudioSacrifice(bool sacrifice)
 {
-    const bool active =
-        sacrifice && s_GameLoaded && ((PicoIn.AHW & PAHW_32X) != 0);
-    PicoDriveAurora_Set32xAudioSacrifice(active ? 1 : 0);
+    (void)sacrifice;
 }
 
 /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830 */
@@ -1967,8 +1964,6 @@ void PicoDriveBridge_RunFrame(Emu::SysInputT *pInput,
 
     /* One actual emulated frame only. Never leak sacrifice to a later
      * frame, a 0-frame cadence tick, or subsequently loaded Sega hardware. */
-    PicoDriveAurora_Set32xAudioSacrifice(0);
-
     if (s_pMix)
         s_pMix->Flush();
     s_pMix = NULL;
@@ -1989,7 +1984,7 @@ enum
 
 bool PicoDriveBridge_Is32X(void)
 {
-    return s_GameLoaded && ((PicoIn.AHW & PAHW_32X) != 0);
+    return false;
 }
 
 /* AURORA_V4_11_CD_REALTIME_PACING_PCE_TOC_OFFSETS_20260830 */

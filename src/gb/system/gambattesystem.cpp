@@ -64,7 +64,7 @@ typedef char AuroraGbBiosAudioQueueMustCoverOneFrame[
       AURORA_GB_AUDIO_DECIMATION - 1U) / AURORA_GB_AUDIO_DECIMATION) ? 1 : -1];
 static const Uint32 AURORA_GB_STATE_PAYLOAD = 0x20000U;
 static const Uint32 AURORA_GB_STATE_MAGIC = 0x32534247U; /* "GBS2" LE */
-static const Uint32 AURORA_GB_STATE_VERSION = 2U; /* AURORA_GB_STANDALONE_DYNAMIC_R4_20260909 */
+static const Uint32 AURORA_GB_STATE_VERSION = 3U; /* AURORA_NO32X_SGB_AUDIT_V4_1_20260921: short CGB-only state ABI */
 /* AURORA_GB_ASCII_TURBO_FILE_R8_20260909 */
 static const Uint32 AURORA_GB_TURBO_FILE_BYTES = 0x200000U;
 static const Uint32 AURORA_GB_TURBO_FILE_BANK_BYTES = 0x2000U;
@@ -83,40 +83,16 @@ private:
     unsigned m_State;
 };
 
-struct AuroraGbSgbHostT
-{
-    Uint16 palette[16];
-    Uint8 attr[20U * 18U];
-    Uint8 palRam[0x1000U];
-    Uint8 attrFiles[0x1000U];
-    Uint8 command[16U * 7U];
-    Uint8 joyPacket[16U];
-    Int16 sgbBit;
-    Uint8 currentBits;
-    Uint8 commandPackets;
-    Uint8 expectedPackets;
-    Uint8 transferType;
-    Uint8 transferDelay;
-    Uint8 maskMode;
-    Uint8 controllers;
-    Uint8 currentController;
-    Bool controllerIncrement;
-    Bool hasDynamicPalette;
-};
-
 struct AuroraGbStateT
 {
     Uint32 Magic;
     Uint32 Version;
     Uint32 CoreBytes;
     Uint32 TurboFrame;
-    Int64 ClockCredit;
+    Int64 ClockCredit; /* legacy V1/V2 ABI slot; V4_1 always writes zero */
     Uint32 Reserved[4];
     Uint8 Core[AURORA_GB_STATE_PAYLOAD];
-    /* AURORA_GB_STANDALONE_DYNAMIC_R4_20260909: appended so v1 prefix size
-     * remains exactly offsetof(AuroraGbStateT, Sgb). */
-    AuroraGbSgbHostT Sgb;
-};
+}; /* AURORA_NO_SGB_ELF_V4_20260921: no SGB tail/state allocation. */
 
 /* AURORA_GB_ASCII_TURBO_FILE_R8_20260909
  * ASCII Turbo File GB, following the documented byte protocol used by
@@ -443,12 +419,9 @@ struct GambatteSystem::Impl
     AuroraGbInputGetter input;
     AuroraAsciiTurboFileGb turboFile;
     Bool loaded;
-    StandaloneModeE mode;
-    AuroraGbSgbHostT sgb; /* AURORA_GB_STANDALONE_DYNAMIC_R4_20260909 */
     Bool hasCgbBootRom;
     Uint32 romBytes;
     Uint32 romCRC;
-    Int64 clockCredit;
     Uint32 turboFrame;
     /* AURORA_GB_HOTFIX_R13D_COLOR_AUDIO_LIFECYCLE_20260909: normal runFor() 32:1 carry state; keeps box-filter phase across calls. */
     Int64 audioSumL;
@@ -465,14 +438,13 @@ struct GambatteSystem::Impl
     mutable CRenderSurface *clearedTarget1;
 
     Impl()
-        : loaded(FALSE), mode(STANDALONE_CGB),
+        : loaded(FALSE),
           hasCgbBootRom(FALSE), romBytes(0), romCRC(0),
-          clockCredit(0), turboFrame(0),
+          turboFrame(0),
           audioSumL(0), audioSumR(0), audioPhase(0), biosHostFast(FALSE),
           clearedTarget0(NULL), clearedTarget1(NULL)
     {
         memset(biosAudio, 0, sizeof(biosAudio));
-        memset(&sgb, 0, sizeof(sgb));
         memset(cgbBootRom, 0, sizeof(cgbBootRom));
         memset(screen, 0, sizeof(screen));
         memset(audioScratch, 0, sizeof(audioScratch));
@@ -496,584 +468,14 @@ static bool AuroraGbCgbBootloaderGetter(
     return true;
 }
 
-/* AURORA_GB_STANDALONE_DYNAMIC_R4_20260909
- * Standalone SGB command host.
- *
- * Gambatte itself remains a DMG CPU/PPU/APU/MBC emulator.  Aurora advertises
- * the SGB post-boot registers, observes FF00 P14/P15 transitions through the
- * existing Gambatte callback, and applies the resulting four SGB palettes and
- * 20x18 attribute map when copying Gambatte's framebuffer to the PS2 surface.
- * No SNES, SGB ROM, or ICD2 object participates in this path.
- *
- * The private Gambatte DMG palette is deliberately four neutral marker values.
- * This preserves the final 2-bit DMG shade in RGB32.  Aurora can therefore
- * recover shade 0..3 losslessly for both dynamic recoloring and the standard
- * 4 KiB PAL_TRN / ATTR_TRN screen transfer. */
-static const Uint32 AURORA_GB_SGB_TILES_X = 20U;
-static const Uint32 AURORA_GB_SGB_TILES_Y = 18U;
-static const Uint32 AURORA_GB_SGB_ATTR_CELLS = 20U * 18U;
-static const Uint32 AURORA_GB_SGB_TRANSFER_BYTES = 0x1000U;
-static const Uint32 AURORA_GB_SGB_PACKET_BYTES = 16U;
-static const Uint32 AURORA_GB_SGB_MAX_PACKETS = 7U;
-static const Uint32 AURORA_GB_SGB_COMMAND_BYTES = 16U * 7U;
-
-enum AuroraGbSgbTransferE {
-    AURORA_GB_SGB_TRANSFER_NONE = 0,
-    AURORA_GB_SGB_TRANSFER_PAL = 1,
-    AURORA_GB_SGB_TRANSFER_ATTR = 2
-};
-
-static Uint16 AuroraGbSgbRead16(const Uint8 *p)
-{
-    return (Uint16)((Uint16)p[0] | ((Uint16)p[1] << 8));
-}
-
-static void AuroraGbSgbSetAttr(GambatteSystem::Impl *p,
-                               Uint32 x, Uint32 y, Uint8 pal)
-{
-    if (!p || x >= AURORA_GB_SGB_TILES_X || y >= AURORA_GB_SGB_TILES_Y)
-        return;
-    p->sgb.attr[y * AURORA_GB_SGB_TILES_X + x] = (Uint8)(pal & 3U);
-}
-
-static void AuroraGbSgbLoadAttrFile(GambatteSystem::Impl *p, Uint8 index)
-{
-    Uint32 i;
-    Uint32 base;
-    if (!p || index > 0x2cU)
-        return;
-    base = (Uint32)index * 90U;
-    if (base + 90U > AURORA_GB_SGB_TRANSFER_BYTES)
-        return;
-    for (i = 0; i < AURORA_GB_SGB_ATTR_CELLS; ++i)
-    {
-        Uint8 packed = p->sgb.attrFiles[base + (i >> 2)];
-        Uint8 shift = (Uint8)(6U - ((i & 3U) << 1));
-        p->sgb.attr[i] = (Uint8)((packed >> shift) & 3U);
-    }
-}
-
-static void AuroraGbSgbResetHost(GambatteSystem::Impl *p)
-{
-    static const Uint16 gray[4] = {
-        0x7fffU, 0x56b5U, 0x294aU, 0x0000U
-    };
-    Uint32 pal, shade;
-    if (!p) return;
-    memset(&p->sgb, 0, sizeof(p->sgb));
-    p->sgb.sgbBit = -1;
-    /* Gambatte's DMG post-boot JOYP is 0xCF (P14/P15 both low), so the
-     * standalone SGB parser must begin at selector state 00. The first
-     * 00->30 edge then clocks packet bit 0 exactly like real SGB hosts. */
-    p->sgb.currentBits = 0U;
-    p->sgb.controllers = 0U;
-    p->sgb.currentController = 0U;
-    p->sgb.controllerIncrement = FALSE;
-    for (pal = 0; pal < 4U; ++pal)
-        for (shade = 0; shade < 4U; ++shade)
-            p->sgb.palette[pal * 4U + shade] = gray[shade];
-}
-
-static void AuroraGbSgbDirectPalette(GambatteSystem::Impl *p,
-                                     Uint8 command, const Uint8 *d)
-{
-    Uint32 i;
-    Uint16 common;
-    if (!p || !d) return;
-
-    if (command == 0U || command == 2U)
-    {
-        for (i = 0; i < 4U; ++i)
-            p->sgb.palette[i] = AuroraGbSgbRead16(d + 1U + i * 2U);
-        common = p->sgb.palette[0];
-        p->sgb.palette[4] = common;
-        p->sgb.palette[8] = common;
-        p->sgb.palette[12] = common;
-        if (command == 0U)
-        {
-            for (i = 1; i < 4U; ++i)
-                p->sgb.palette[4U + i] = AuroraGbSgbRead16(d + 7U + i * 2U);
-        }
-        else
-        {
-            for (i = 1; i < 4U; ++i)
-                p->sgb.palette[12U + i] = AuroraGbSgbRead16(d + 7U + i * 2U);
-        }
-    }
-    else if (command == 1U)
-    {
-        for (i = 1; i < 4U; ++i)
-        {
-            p->sgb.palette[8U + i] = AuroraGbSgbRead16(d + 1U + i * 2U);
-            p->sgb.palette[12U + i] = AuroraGbSgbRead16(d + 7U + i * 2U);
-        }
-    }
-    else if (command == 3U)
-    {
-        for (i = 1; i < 4U; ++i)
-        {
-            p->sgb.palette[4U + i] = AuroraGbSgbRead16(d + 1U + i * 2U);
-            p->sgb.palette[8U + i] = AuroraGbSgbRead16(d + 7U + i * 2U);
-        }
-    }
-    p->sgb.hasDynamicPalette = TRUE;
-}
-
-static void AuroraGbSgbAttrBlock(GambatteSystem::Impl *p,
-                                 const Uint8 *d, Uint32 bytes)
-{
-    Uint32 pos = 2U;
-    Uint32 sets;
-    if (!p || !d || bytes < 2U) return;
-    sets = d[1];
-    while (sets-- && pos + 5U < bytes)
-    {
-        Uint8 control = d[pos + 0U];
-        Uint8 pals = d[pos + 1U];
-        Uint8 x0 = d[pos + 2U], y0 = d[pos + 3U];
-        Uint8 x1 = d[pos + 4U], y1 = d[pos + 5U];
-        Uint8 pIn = pals & 3U;
-        Uint8 pPerim = (pals >> 2) & 3U;
-        Uint8 pOut = (pals >> 4) & 3U;
-        Uint32 x, y;
-        for (y = 0; y < AURORA_GB_SGB_TILES_Y; ++y)
-        {
-            for (x = 0; x < AURORA_GB_SGB_TILES_X; ++x)
-            {
-                if (y > y0 && y < y1 && x > x0 && x < x1)
-                {
-                    if (control & 1U) AuroraGbSgbSetAttr(p, x, y, pIn);
-                }
-                else if (y < y0 || y > y1 || x < x0 || x > x1)
-                {
-                    if (control & 4U) AuroraGbSgbSetAttr(p, x, y, pOut);
-                }
-                else
-                {
-                    if (control & 2U) AuroraGbSgbSetAttr(p, x, y, pPerim);
-                    else if (control & 1U) AuroraGbSgbSetAttr(p, x, y, pIn);
-                    else if (control & 4U) AuroraGbSgbSetAttr(p, x, y, pOut);
-                }
-            }
-        }
-        pos += 6U;
-    }
-}
-
-static void AuroraGbSgbAttrLine(GambatteSystem::Impl *p,
-                                const Uint8 *d, Uint32 bytes)
-{
-    Uint32 pos = 2U;
-    Uint32 sets;
-    if (!p || !d || bytes < 2U) return;
-    sets = d[1];
-    while (sets-- && pos < bytes)
-    {
-        Uint8 v = d[pos++];
-        Uint8 line = v & 0x1fU;
-        Uint8 pal = (v >> 5) & 3U;
-        Uint32 i;
-        if (v & 0x80U)
-        {
-            if (line < AURORA_GB_SGB_TILES_Y)
-                for (i = 0; i < AURORA_GB_SGB_TILES_X; ++i)
-                    AuroraGbSgbSetAttr(p, i, line, pal);
-        }
-        else if (line < AURORA_GB_SGB_TILES_X)
-        {
-            for (i = 0; i < AURORA_GB_SGB_TILES_Y; ++i)
-                AuroraGbSgbSetAttr(p, line, i, pal);
-        }
-    }
-}
-
-static void AuroraGbSgbAttrDiv(GambatteSystem::Impl *p, const Uint8 *d)
-{
-    Uint8 pAfter, pBefore, pDiv, line;
-    Uint32 x, y;
-    if (!p || !d) return;
-    pAfter = d[1] & 3U;
-    pBefore = (d[1] >> 2) & 3U;
-    pDiv = (d[1] >> 4) & 3U;
-    line = d[2];
-
-    for (y = 0; y < AURORA_GB_SGB_TILES_Y; ++y)
-    {
-        for (x = 0; x < AURORA_GB_SGB_TILES_X; ++x)
-        {
-            Uint8 pal;
-            if (d[1] & 0x40U)
-                pal = (y < line) ? pBefore : ((y == line) ? pDiv : pAfter);
-            else
-                pal = (x < line) ? pBefore : ((x == line) ? pDiv : pAfter);
-            AuroraGbSgbSetAttr(p, x, y, pal);
-        }
-    }
-}
-
-static void AuroraGbSgbAttrChr(GambatteSystem::Impl *p,
-                               const Uint8 *d, Uint32 bytes)
-{
-    Uint32 x, y, count, pos = 6U;
-    Bool vertical;
-    if (!p || !d || bytes < 6U) return;
-    x = d[1];
-    y = d[2];
-    if (x >= AURORA_GB_SGB_TILES_X) x = 0;
-    if (y >= AURORA_GB_SGB_TILES_Y) y = 0;
-    count = (Uint32)d[3] | ((Uint32)d[4] << 8);
-    vertical = d[5] ? TRUE : FALSE;
-
-    while (count && pos < bytes)
-    {
-        Uint8 packed = d[pos++];
-        Uint32 j;
-        for (j = 0; j < 4U && count; ++j, --count)
-        {
-            AuroraGbSgbSetAttr(p, x, y,
-                (Uint8)((packed >> (6U - j * 2U)) & 3U));
-            if (vertical)
-            {
-                if (++y >= AURORA_GB_SGB_TILES_Y)
-                {
-                    y = 0;
-                    if (++x >= AURORA_GB_SGB_TILES_X) x = 0;
-                }
-            }
-            else
-            {
-                if (++x >= AURORA_GB_SGB_TILES_X)
-                {
-                    x = 0;
-                    if (++y >= AURORA_GB_SGB_TILES_Y) y = 0;
-                }
-            }
-        }
-    }
-}
-
-static void AuroraGbSgbPaletteSet(GambatteSystem::Impl *p, const Uint8 *d)
-{
-    Uint32 pal, shade;
-    if (!p || !d) return;
-    for (pal = 0; pal < 4U; ++pal)
-    {
-        Uint32 index = AuroraGbSgbRead16(d + 1U + pal * 2U) & 0x1ffU;
-        Uint32 base = index * 8U;
-        if (base + 7U >= AURORA_GB_SGB_TRANSFER_BYTES)
-            continue;
-        for (shade = 0; shade < 4U; ++shade)
-            p->sgb.palette[pal * 4U + shade] =
-                AuroraGbSgbRead16(p->sgb.palRam + base + shade * 2U);
-    }
-    p->sgb.hasDynamicPalette = TRUE;
-    if (d[9] & 0x80U)
-        AuroraGbSgbLoadAttrFile(p, d[9] & 0x3fU);
-    if (d[9] & 0x40U)
-        p->sgb.maskMode = 0U;
-}
-
-static void AuroraGbSgbCapture4K(const GambatteSystem::Impl *p, Uint8 *dst);
-
-static void AuroraGbSgbProcessCommand(GambatteSystem::Impl *p)
-{
-    Uint8 command;
-    Uint32 bytes;
-    const Uint8 *d;
-    if (!p || !p->sgb.commandPackets) return;
-    d = p->sgb.command;
-    command = (Uint8)(d[0] >> 3);
-    bytes = (Uint32)p->sgb.commandPackets * AURORA_GB_SGB_PACKET_BYTES;
-
-    switch (command)
-    {
-        case 0x00U: case 0x01U: case 0x02U: case 0x03U:
-            AuroraGbSgbDirectPalette(p, command, d);
-            break;
-        case 0x04U:
-            AuroraGbSgbAttrBlock(p, d, bytes);
-            break;
-        case 0x05U:
-            AuroraGbSgbAttrLine(p, d, bytes);
-            break;
-        case 0x06U:
-            AuroraGbSgbAttrDiv(p, d);
-            break;
-        case 0x07U:
-            AuroraGbSgbAttrChr(p, d, bytes);
-            break;
-        case 0x0aU: /* PAL_SET */
-            /* If the game consumes PAL_TRN immediately at the next boundary,
-             * finish from the last completed marker framebuffer before using
-             * palette RAM. This makes correctness independent of runFor()
-             * host chunk size. */
-            if (p->sgb.transferType == AURORA_GB_SGB_TRANSFER_PAL)
-            {
-                AuroraGbSgbCapture4K(p, p->sgb.palRam);
-                p->sgb.transferType = AURORA_GB_SGB_TRANSFER_NONE;
-                p->sgb.transferDelay = 0U;
-            }
-            AuroraGbSgbPaletteSet(p, d);
-            break;
-        case 0x0bU: /* PAL_TRN */
-            p->sgb.transferType = AURORA_GB_SGB_TRANSFER_PAL;
-            p->sgb.transferDelay = 1U;
-            break;
-        case 0x15U: /* ATTR_TRN */
-            p->sgb.transferType = AURORA_GB_SGB_TRANSFER_ATTR;
-            p->sgb.transferDelay = 1U;
-            break;
-        case 0x16U: /* ATTR_SET */
-            if (p->sgb.transferType == AURORA_GB_SGB_TRANSFER_ATTR)
-            {
-                AuroraGbSgbCapture4K(p, p->sgb.attrFiles);
-                p->sgb.transferType = AURORA_GB_SGB_TRANSFER_NONE;
-                p->sgb.transferDelay = 0U;
-            }
-            AuroraGbSgbLoadAttrFile(p, d[1] & 0x3fU);
-            if (d[1] & 0x40U) p->sgb.maskMode = 0U;
-            break;
-        case 0x11U: /* MLT_REQ */
-            /* SGB software (including Pokemon Red/Blue) uses this response
-             * path to prove that an SGB is present before enabling PAL/ATTR
-             * commands. Mirror the mature host behavior: request value is
-             * controller-mask 0/1/3, with the value 2 quirk advancing once. */
-            if ((d[1] & 3U) == 2U)
-                ++p->sgb.currentController;
-            p->sgb.controllers = d[1] & 3U;
-            p->sgb.currentController &= p->sgb.controllers;
-            break;
-        case 0x17U: /* MASK_EN */
-            p->sgb.maskMode = d[1] & 3U;
-            break;
-        default:
-            /* SOUND/DATA/border transfers do not affect the 160x144
-             * standalone color plane and are intentionally ignored here. */
-            break;
-    }
-}
-
-static void AuroraGbSgbCommitPacket(GambatteSystem::Impl *p)
-{
-    Uint32 dst;
-    if (!p) return;
-
-    if (!p->sgb.commandPackets)
-    {
-        p->sgb.expectedPackets = p->sgb.joyPacket[0] & 7U;
-        if (!p->sgb.expectedPackets ||
-            p->sgb.expectedPackets > AURORA_GB_SGB_MAX_PACKETS)
-        {
-            p->sgb.expectedPackets = 0;
-            return;
-        }
-        memset(p->sgb.command, 0, sizeof(p->sgb.command));
-    }
-
-    if (p->sgb.commandPackets >= p->sgb.expectedPackets ||
-        p->sgb.commandPackets >= AURORA_GB_SGB_MAX_PACKETS)
-    {
-        p->sgb.commandPackets = 0;
-        p->sgb.expectedPackets = 0;
-        return;
-    }
-
-    dst = (Uint32)p->sgb.commandPackets * AURORA_GB_SGB_PACKET_BYTES;
-    memcpy(p->sgb.command + dst, p->sgb.joyPacket,
-           AURORA_GB_SGB_PACKET_BYTES);
-    ++p->sgb.commandPackets;
-
-    if (p->sgb.commandPackets == p->sgb.expectedPackets)
-    {
-        AuroraGbSgbProcessCommand(p);
-        p->sgb.commandPackets = 0;
-        p->sgb.expectedPackets = 0;
-    }
-}
-
-static Uint8 AuroraGbSgbJoyLow(const GambatteSystem::Impl *p, Uint8 selector)
-{
-    unsigned input;
-    Uint8 low = 0x0fU;
-    if (!p) return low;
-
-    /* MLT_REQ is part of SGB presence detection. With both select lines high,
-     * hardware reports the active controller ID in active-low form. Nonzero
-     * virtual controllers have no physical pad connected in this standalone
-     * single-pad frontend, matching the usual SGB host behavior. */
-    if (selector == 0x30U)
-        return (Uint8)(0x0fU ^ (p->sgb.currentController & 3U));
-    if (p->sgb.currentController != 0U)
-        return 0x0fU;
-
-    input = p->input.State();
-
-    /* Active-low JOYP. P14 low selects directions, P15 low buttons. */
-    if (!(selector & 0x10U))
-        low &= (Uint8)(0x0fU ^ ((input >> 4) & 0x0fU));
-    if (!(selector & 0x20U))
-        low &= (Uint8)(0x0fU ^ (input & 0x0fU));
-    return low;
-}
-
-static unsigned char AuroraGbSgbJoypCallback(void *userdata,
-                                             unsigned char p14p15,
-                                             bool write)
-{
-    GambatteSystem::Impl *p = (GambatteSystem::Impl *)userdata;
-    Uint8 selector = (Uint8)(p14p15 & 0x30U);
-    Uint8 bits = (Uint8)(selector >> 4);
-
-    if (!p)
-        return 0x0fU;
-    if (p->mode != GambatteSystem::STANDALONE_SGB1_DYNAMIC &&
-        p->mode != GambatteSystem::STANDALONE_SGB2_DYNAMIC)
-        return AuroraGbSgbJoyLow(p, selector);
-    if (!write)
-        return AuroraGbSgbJoyLow(p, selector);
-
-    /* AURORA_GB_STANDALONE_R6_JOYP_RESET_20260909
-     * Match mature SGB parser ordering exactly:
-     *   1) 00 always resets packet assembly, even if it is a repeated level;
-     *   2) repeated non-reset selector levels are ignored;
-     *   3) only real selector edges advance MLT_REQ controller sequencing.
-     * The old ICD-oriented bridge delivered transitions only, which made a
-     * repeated reset disappear before the standalone parser could see it. */
-    if (bits == 0U)
-    {
-        p->sgb.sgbBit = -1;
-        memset(p->sgb.joyPacket, 0, sizeof(p->sgb.joyPacket));
-    }
-    if (bits == p->sgb.currentBits)
-        return AuroraGbSgbJoyLow(p, selector);
-
-    if (bits & 2U)
-    {
-        if (p->sgb.controllerIncrement)
-        {
-            p->sgb.controllerIncrement = FALSE;
-            p->sgb.currentController =
-                (Uint8)((p->sgb.currentController + 1U) &
-                        p->sgb.controllers);
-        }
-    }
-    else if (p->sgb.currentBits & 2U)
-    {
-        p->sgb.controllerIncrement =
-            p->sgb.controllerIncrement ? FALSE : TRUE;
-    }
-
-    /* 10 represents data 1, 20 data 0, 30 clocks a bit; the 20 transition
-     * following bit 127 commits the completed 16-byte packet. */
-    p->sgb.currentBits = bits;
-
-    if (p->sgb.sgbBit == 128 && bits == 2U)
-    {
-        AuroraGbSgbCommitPacket(p);
-        ++p->sgb.sgbBit;
-    }
-    if (p->sgb.sgbBit < 128)
-    {
-        if (bits == 1U)
-        {
-            if (p->sgb.sgbBit >= 0)
-                p->sgb.joyPacket[(Uint32)p->sgb.sgbBit >> 3] |=
-                    (Uint8)(1U << ((Uint32)p->sgb.sgbBit & 7U));
-        }
-        else if (bits == 3U)
-        {
-            ++p->sgb.sgbBit;
-        }
-    }
-    return AuroraGbSgbJoyLow(p, selector);
-}
-
-static Uint8 AuroraGbSgbMarkerShade(Uint32 rgb)
-{
-    /* Marker bytes are FF/AA/55/00, so bits 7:6 distinguish all four. */
-    return (Uint8)((((rgb >> 6) & 3U) ^ 3U) & 3U);
-}
-
-static void AuroraGbSgbCapture4K(const GambatteSystem::Impl *p, Uint8 *dst)
-{
-    Uint32 y, x;
-    if (!p || !dst) return;
-    memset(dst, 0, AURORA_GB_SGB_TRANSFER_BYTES);
-
-    /* Layout matches the SGB 4 KiB screen transfer: 20 sequential 2bpp tiles
-     * per 8-line tile row, truncated at 0x1000 bytes. */
-    for (y = 0; y < 144U; ++y)
-    {
-        Uint32 offset = 2U * ((y & 7U) + (y >> 3) * 160U);
-        if (offset >= AURORA_GB_SGB_TRANSFER_BYTES)
-            break;
-        for (x = 0; x < 160U; x += 8U)
-        {
-            Uint32 pos = offset + (x << 1);
-            Uint8 lo = 0, hi = 0;
-            Uint32 k;
-            if (pos + 1U >= AURORA_GB_SGB_TRANSFER_BYTES)
-                break;
-            for (k = 0; k < 8U; ++k)
-            {
-                Uint8 shade = AuroraGbSgbMarkerShade(
-                    (Uint32)p->screen[y * 160U + x + k]);
-                Uint8 bit = (Uint8)(0x80U >> k);
-                if (shade & 1U) lo |= bit;
-                if (shade & 2U) hi |= bit;
-            }
-            dst[pos + 0U] = lo;
-            dst[pos + 1U] = hi;
-        }
-    }
-}
-
-static void AuroraGbSgbAdvanceTransfer(GambatteSystem::Impl *p)
-{
-    if (!p || p->sgb.transferType == AURORA_GB_SGB_TRANSFER_NONE)
-        return;
-    if (p->sgb.transferDelay)
-    {
-        --p->sgb.transferDelay;
-        return;
-    }
-
-    if (p->sgb.transferType == AURORA_GB_SGB_TRANSFER_PAL)
-        AuroraGbSgbCapture4K(p, p->sgb.palRam);
-    else if (p->sgb.transferType == AURORA_GB_SGB_TRANSFER_ATTR)
-        AuroraGbSgbCapture4K(p, p->sgb.attrFiles);
-    p->sgb.transferType = AURORA_GB_SGB_TRANSFER_NONE;
-}
-
+/* AURORA_NO_SGB_ELF_V4_20260921: dynamic SGB frontend removed. */
+/* AURORA_NO32X_SGB_AUDIT_V4_1_20260921: lifecycle/state audit only. */
 static void AuroraGbConfigureVideo(GambatteSystem::Impl *p)
 {
     if (!p) return;
-
-    /* AURORA_GB_HOTFIX_R13D_COLOR_AUDIO_LIFECYCLE_20260909
-     * GBC keeps colour correction, but uses Gambatte's integer fast path.
-     * This removes the pow()-heavy gold-standard palette conversion from the
-     * CGB boot animation while preserving correction. Brightness/dark filter
-     * remain disabled. */
-    if (p->mode == GambatteSystem::STANDALONE_CGB)
-    {
-        p->gb.setColorCorrectionMode(1U);
-        p->gb.setColorCorrection(true);
-        p->gb.setColorCorrectionBrightness(0.0f);
-    }
-    else
-    {
-        static const Uint32 marker[4] = {
-            0x00ffffffU, 0x00aaaaaaU, 0x00555555U, 0x00000000U
-        };
-        Uint32 pal, shade;
-        p->gb.setColorCorrection(false);
-        /* AURORA_GB_STANDALONE_DYNAMIC_R4_20260909
-         * Neutral markers only; never install 1-A/2-A/etc.  The final host
-         * renderer recolors each pixel from the game's SGB palette+ATTR map. */
-        for (pal = 0; pal < 3U; ++pal)
-            for (shade = 0; shade < 4U; ++shade)
-                p->gb.setDmgPaletteColor(pal, shade, marker[shade]);
-    }
+    p->gb.setColorCorrectionMode(1U);
+    p->gb.setColorCorrection(true);
+    p->gb.setColorCorrectionBrightness(0.0f);
     p->gb.setDarkFilterLevel(0U);
 }
 
@@ -1293,62 +695,21 @@ static void AuroraGbEnsureTargetBlack(const GambatteSystem::Impl *p,
 static void AuroraGbRender(const GambatteSystem::Impl *p,
                            CRenderSurface *pTarget)
 {
-    /* AURORA_GB_HOTFIX_R13D_COLOR_AUDIO_LIFECYCLE_20260909
-     * Keep native integer 1x. R13D moved centred dy 56 -> 28.
-     * R13F moves 14 pixels back down: dy 28 -> 42, with no clipping. */
     const Int32 dx = 48;
-    const Int32 dy = 42; /* AURORA_GB_HOTFIX_R13F_STANDALONE_BOOT_AUDIO_Y_20260909_Y: R13D 28 + 14 (25% of original 56). */
-    const Bool cgbFiveBit =
-        (p && p->mode == GambatteSystem::STANDALONE_CGB) ? TRUE : FALSE;
-    const Bool sgbDynamic =
-        (p && (p->mode == GambatteSystem::STANDALONE_SGB1_DYNAMIC ||
-               p->mode == GambatteSystem::STANDALONE_SGB2_DYNAMIC)) ? TRUE : FALSE;
+    const Int32 dy = 42;
     Int32 y, x;
 
     if (!p || !pTarget ||
         pTarget->GetWidth() < 256U || pTarget->GetHeight() < 240U)
         return;
 
-    if (p->mode == GambatteSystem::STANDALONE_CGB)
-        AuroraGbEnsureTargetBlack(p, pTarget);
-
-    /* MASK_EN=1 freezes the previous host image. */
-    if (sgbDynamic && p->sgb.maskMode == 1U)
-        return;
-
+    AuroraGbEnsureTargetBlack(p, pTarget);
     for (y = 0; y < 144; ++y)
     {
         const gambatte::video_pixel_t *src = p->screen + y * 160;
         Uint32 *dst = (Uint32 *)pTarget->GetLinePtr(dy + y) + dx;
         for (x = 0; x < 160; ++x)
-        {
-            if (sgbDynamic)
-            {
-                Uint16 c;
-                if (p->sgb.maskMode == 2U)
-                    c = 0U;
-                else if (p->sgb.maskMode == 3U)
-                    c = p->sgb.palette[0];
-                else
-                {
-                    Uint8 shade = AuroraGbSgbMarkerShade((Uint32)src[x]);
-                    Uint8 pal = p->sgb.attr[(Uint32)(y >> 3) * 20U +
-                                            (Uint32)(x >> 3)] & 3U;
-                    c = p->sgb.palette[(Uint32)pal * 4U + shade];
-                }
-                {
-                    Uint32 r = c & 31U;
-                    Uint32 g = (c >> 5) & 31U;
-                    Uint32 b = (c >> 10) & 31U;
-                    r = (r << 3) | (r >> 2);
-                    g = (g << 3) | (g >> 2);
-                    b = (b << 3) | (b >> 2);
-                    dst[x] = 0xff000000U | (b << 16) | (g << 8) | r;
-                }
-            }
-            else
-                dst[x] = AuroraGbRgb32ToSurface((Uint32)src[x], cgbFiveBit);
-        }
+            dst[x] = AuroraGbRgb32ToSurface((Uint32)src[x], TRUE);
     }
 }
 
@@ -1367,13 +728,7 @@ Bool GambatteSystem::LoadGame(const Uint8 *pData, Uint32 nBytes, Uint32 uCRC,
                               const Uint8 *pCgbBootRom,
                               Uint32 nCgbBootRomBytes)
 {
-    unsigned flags;
-
-    if (!pData || nBytes < 0x150U)
-        return FALSE;
-    if (eMode != STANDALONE_CGB &&
-        eMode != STANDALONE_SGB1_DYNAMIC &&
-        eMode != STANDALONE_SGB2_DYNAMIC)
+    if (!pData || nBytes < 0x150U || eMode != STANDALONE_CGB)
         return FALSE;
 
     UnloadGame();
@@ -1381,79 +736,55 @@ Bool GambatteSystem::LoadGame(const Uint8 *pData, Uint32 nBytes, Uint32 uCRC,
     if (!m_p)
         return FALSE;
 
-    m_p->mode = eMode;
-    AuroraGbSgbResetHost(m_p); /* AURORA_GB_STANDALONE_DYNAMIC_R4_20260909 */
-    m_p->loaded = TRUE; /* boot getter is allowed during GB::load/full_init */
-
-    m_p->gb.setSgbJoypCallback(NULL, NULL);
-    m_p->gb.setScanlineCallback(NULL);
-    m_p->gb.setInputGetter(&m_p->input);
-    m_p->gb.setDarkFilterLevel(0U);
-
-    if (eMode == STANDALONE_CGB)
+    if (!pCgbBootRom || nCgbBootRomBytes != AURORA_GB_CGB_BOOT_BYTES)
     {
-        if (!pCgbBootRom || nCgbBootRomBytes != AURORA_GB_CGB_BOOT_BYTES)
-        {
-            delete m_p;
-            m_p = NULL;
-            return FALSE;
-        }
-        memcpy(m_p->cgbBootRom, pCgbBootRom, AURORA_GB_CGB_BOOT_BYTES);
-        m_p->hasCgbBootRom = TRUE;
-        g_AuroraGbBootHost = m_p;
-        m_p->gb.setBootloaderGetter(&AuroraGbCgbBootloaderGetter);
-        flags = gambatte::GB::FORCE_CGB;
-    }
-    else
-    {
-        m_p->hasCgbBootRom = FALSE;
-        g_AuroraGbBootHost = NULL;
-        m_p->gb.setBootloaderGetter(NULL);
-        flags = gambatte::GB::FORCE_DMG;
-    }
-
-    if (!m_p->turboFile.Init(uCRC))
-    {
-        if (g_AuroraGbBootHost == m_p) g_AuroraGbBootHost = NULL;
-        delete m_p; m_p = NULL;
-        return FALSE;
-    }
-    m_p->gb.setSerialIO(m_p->turboFile.Active() ? &m_p->turboFile : NULL);
-
-    if (m_p->gb.load(pData, (unsigned)nBytes, flags) != 0)
-    {
-        if (g_AuroraGbBootHost == m_p)
-            g_AuroraGbBootHost = NULL;
         delete m_p;
         m_p = NULL;
         return FALSE;
     }
 
-    /* AURORA_GB_HOTFIX_R13D_COLOR_AUDIO_LIFECYCLE_20260909: boot ROM has already been copied by full_init(); do not leave
-     * a live global pointer to the cartridge for the rest of gameplay. */
+    m_p->loaded = TRUE;
+    memcpy(m_p->cgbBootRom, pCgbBootRom, AURORA_GB_CGB_BOOT_BYTES);
+    m_p->hasCgbBootRom = TRUE;
+    m_p->gb.setInputGetter(&m_p->input);
+    m_p->gb.setDarkFilterLevel(0U);
+    g_AuroraGbBootHost = m_p;
+    m_p->gb.setBootloaderGetter(&AuroraGbCgbBootloaderGetter);
+
+    if (!m_p->turboFile.Init(uCRC))
+    {
+        if (g_AuroraGbBootHost == m_p) g_AuroraGbBootHost = NULL;
+        m_p->loaded = FALSE;
+        m_p->gb.setSerialIO(NULL);
+        m_p->gb.setBootloaderGetter(NULL);
+        m_p->gb.setInputGetter(NULL);
+        delete m_p;
+        m_p = NULL;
+        return FALSE;
+    }
+    m_p->gb.setSerialIO(m_p->turboFile.Active() ? &m_p->turboFile : NULL);
+
+    if (m_p->gb.load(pData, (unsigned)nBytes, gambatte::GB::FORCE_CGB) != 0)
+    {
+        if (g_AuroraGbBootHost == m_p) g_AuroraGbBootHost = NULL;
+        m_p->loaded = FALSE;
+        m_p->gb.setSerialIO(NULL);
+        m_p->gb.setBootloaderGetter(NULL);
+        m_p->gb.setInputGetter(NULL);
+        delete m_p;
+        m_p = NULL;
+        return FALSE;
+    }
     if (g_AuroraGbBootHost == m_p) g_AuroraGbBootHost = NULL;
 
     m_p->gb.setInputGetter(&m_p->input);
-    if (eMode == STANDALONE_SGB1_DYNAMIC ||
-        eMode == STANDALONE_SGB2_DYNAMIC)
-    {
-        /* AURORA_GB_STANDALONE_DYNAMIC_R4_20260909
-         * GB::load() has just installed the ordinary DMG post-boot state.
-         * Override A/C before the first instruction and connect FF00 packets. */
-        m_p->gb.setSgbPostBootState(eMode == STANDALONE_SGB2_DYNAMIC);
-        m_p->gb.setSgbJoypCallback(&AuroraGbSgbJoypCallback, m_p);
-    }
-    else
-        m_p->gb.setSgbJoypCallback(NULL, NULL);
     AuroraGbConfigureVideo(m_p);
-
     m_p->romBytes = nBytes;
     m_p->romCRC = uCRC;
-    m_p->clockCredit = 0;
     m_p->turboFrame = 0;
     m_p->audioSumL = m_p->audioSumR = 0;
     m_p->audioPhase = 0;
-    m_p->biosHostFast = FALSE; /* AURORA_GB_FINAL_R1_BIOS_HOST_FAST_20260909 */
+    m_p->biosHostFast = FALSE;
     m_p->input.Set(0);
     memset(m_p->screen, 0, sizeof(m_p->screen));
     m_p->gb.clearSavedataDirty();
@@ -1472,21 +803,16 @@ void GambatteSystem::UnloadGame()
         return;
     }
 
-    /* AURORA_GB_HOTFIX_R13D_COLOR_AUDIO_LIFECYCLE_20260909
-     * Do not leave a previous cartridge connected to any frontend callback.
-     * The boot-host global is valid only while boot bytes are being fetched. */
     if (g_AuroraGbBootHost == m_p) g_AuroraGbBootHost = NULL;
     m_p->loaded = FALSE;
     m_p->input.Set(0);
     m_p->gb.setSerialIO(NULL);
     m_p->gb.setBootloaderGetter(NULL);
     m_p->gb.setInputGetter(NULL);
-    m_p->gb.setSgbJoypCallback(NULL, NULL);
-    m_p->gb.setScanlineCallback(NULL);
     m_p->turboFile.ResetProtocol();
     m_p->audioSumL = m_p->audioSumR = 0;
     m_p->audioPhase = 0;
-    m_p->biosHostFast = FALSE; /* AURORA_GB_FINAL_R1_BIOS_HOST_FAST_20260909 */
+    m_p->biosHostFast = FALSE;
 
     delete m_p;
     m_p = NULL;
@@ -1505,8 +831,7 @@ Bool GambatteSystem::IsGameLoaded() const
  * to the SNES/TV pixel-aspect domain rather than the handheld LCD domain. */
 Bool GambatteSystem::UsesSquarePixelPresentation() const
 {
-    return (m_p && m_p->loaded &&
-            m_p->mode == STANDALONE_CGB) ? TRUE : FALSE;
+    return (m_p && m_p->loaded) ? TRUE : FALSE;
 }
 
 Uint32 GambatteSystem::GetGameCRC() const
@@ -1530,39 +855,18 @@ void GambatteSystem::Reset()
     if (!m_p || !m_p->loaded)
         return;
 
-    if (m_p->mode == STANDALONE_CGB)
-    {
-        g_AuroraGbBootHost = m_p;
-        m_p->gb.setBootloaderGetter(&AuroraGbCgbBootloaderGetter);
-    }
-    else
-    {
-        g_AuroraGbBootHost = NULL;
-        m_p->gb.setBootloaderGetter(NULL);
-    }
-
+    g_AuroraGbBootHost = m_p;
+    m_p->gb.setBootloaderGetter(&AuroraGbCgbBootloaderGetter);
     m_p->gb.setSerialIO(m_p->turboFile.Active() ? &m_p->turboFile : NULL);
     m_p->turboFile.ResetProtocol();
     m_p->gb.reset();
     if (g_AuroraGbBootHost == m_p) g_AuroraGbBootHost = NULL;
-    /* AURORA_GB_HOTFIX_R13D_COLOR_AUDIO_LIFECYCLE_20260909: boot-host lifetime ends after reset full_init. */
-    AuroraGbSgbResetHost(m_p);
-    if (m_p->mode == STANDALONE_SGB1_DYNAMIC ||
-        m_p->mode == STANDALONE_SGB2_DYNAMIC)
-    {
-        m_p->gb.setSgbPostBootState(m_p->mode == STANDALONE_SGB2_DYNAMIC);
-        m_p->gb.setSgbJoypCallback(&AuroraGbSgbJoypCallback, m_p);
-    }
-    else
-        m_p->gb.setSgbJoypCallback(NULL, NULL);
-    m_p->gb.setScanlineCallback(NULL);
     m_p->gb.setInputGetter(&m_p->input);
     AuroraGbConfigureVideo(m_p);
-    m_p->clockCredit = 0;
     m_p->turboFrame = 0;
     m_p->audioSumL = m_p->audioSumR = 0;
     m_p->audioPhase = 0;
-    m_p->biosHostFast = FALSE; /* AURORA_GB_FINAL_R1_BIOS_HOST_FAST_20260909 */
+    m_p->biosHostFast = FALSE;
     m_p->input.Set(0);
     memset(m_p->screen, 0, sizeof(m_p->screen));
 }
@@ -1597,7 +901,7 @@ void GambatteSystem::ExecuteFrame(Emu::SysInputT *pInput,
      * FF50 is the exact boundary: gameplay immediately restores the normal
      * colour path, every-frame copy and ordinary per-run mixer delivery. */
     biosAtFrameStart =
-        (m_p->mode == STANDALONE_CGB && m_p->gb.isBootloaderActive())
+        m_p->gb.isBootloaderActive()
             ? TRUE : FALSE;
 
     if (biosAtFrameStart && !m_p->biosHostFast)
@@ -1662,17 +966,13 @@ void GambatteSystem::ExecuteFrame(Emu::SysInputT *pInput,
         AuroraGbOutputAudio(pMixBuf, m_p->biosAudio, biosAudioFrames);
 
     biosAtFrameEnd =
-        (m_p->mode == STANDALONE_CGB && m_p->gb.isBootloaderActive())
+        m_p->gb.isBootloaderActive()
             ? TRUE : FALSE;
     if (m_p->biosHostFast && !biosAtFrameEnd)
     {
         AuroraGbConfigureVideo(m_p);
         m_p->biosHostFast = FALSE;
     }
-
-    if (m_p->mode == STANDALONE_SGB1_DYNAMIC ||
-        m_p->mode == STANDALONE_SGB2_DYNAMIC)
-        AuroraGbSgbAdvanceTransfer(m_p); /* AURORA_GB_STANDALONE_DYNAMIC_R4_20260909 */
 
     /* AURORA_GB_STANDALONE_R5_ROUTE_BIOS_TURBO_20260909
      * BIOS audio batching stays enabled, but presentation must be every
@@ -1682,7 +982,6 @@ void GambatteSystem::ExecuteFrame(Emu::SysInputT *pInput,
         AuroraGbRender(m_p, pTarget);
 
     if (pMixBuf) pMixBuf->Flush();
-    m_p->clockCredit = 0;
     m_uLine = 0;
     ++m_uFrame;
 }
@@ -1708,8 +1007,6 @@ Bool GambatteSystem::SaveStateChecked(void *pState, Int32 nStateBytes)
     s->Version = AURORA_GB_STATE_VERSION;
     s->CoreBytes = (Uint32)coreBytes;
     s->TurboFrame = m_p->turboFrame;
-    s->ClockCredit = m_p->clockCredit;
-    s->Sgb = m_p->sgb; /* AURORA_GB_STANDALONE_DYNAMIC_R4_20260909 */
     s->Magic = AURORA_GB_STATE_MAGIC;
     return TRUE;
 }
@@ -1717,44 +1014,26 @@ Bool GambatteSystem::SaveStateChecked(void *pState, Int32 nStateBytes)
 Bool GambatteSystem::RestoreStateChecked(const void *pState, Int32 nStateBytes)
 {
     const AuroraGbStateT *s = (const AuroraGbStateT *)pState;
-    const Int32 v1Bytes = (Int32)offsetof(AuroraGbStateT, Sgb);
-    if (!m_p || !m_p->loaded || !s || nStateBytes < v1Bytes ||
+    if (!m_p || !m_p->loaded || !s ||
+        nStateBytes < (Int32)sizeof(*s) ||
         s->Magic != AURORA_GB_STATE_MAGIC ||
-        (s->Version != 1U && s->Version != AURORA_GB_STATE_VERSION) ||
-        (s->Version == AURORA_GB_STATE_VERSION &&
-         nStateBytes < (Int32)sizeof(*s)) ||
+        (s->Version != 1U && s->Version != 2U &&
+         s->Version != AURORA_GB_STATE_VERSION) ||
         !s->CoreBytes || s->CoreBytes > AURORA_GB_STATE_PAYLOAD)
         return FALSE;
 
     if (!m_p->gb.loadState(s->Core, (size_t)s->CoreBytes))
         return FALSE;
 
-    if (m_p->mode == STANDALONE_CGB)
-    {
-        g_AuroraGbBootHost = m_p;
-        m_p->gb.setBootloaderGetter(&AuroraGbCgbBootloaderGetter);
-    }
-    else
-    {
-        g_AuroraGbBootHost = NULL;
-        m_p->gb.setBootloaderGetter(NULL);
-    }
+    /* No long-lived boot-host pointer: reset/load establishes it only while
+     * boot bytes are actually being fetched. */
+    g_AuroraGbBootHost = NULL;
+    m_p->gb.setBootloaderGetter(&AuroraGbCgbBootloaderGetter);
     m_p->gb.setSerialIO(m_p->turboFile.Active() ? &m_p->turboFile : NULL);
     m_p->turboFile.ResetProtocol();
-    if (s->Version == AURORA_GB_STATE_VERSION)
-        m_p->sgb = s->Sgb;
-    else
-        AuroraGbSgbResetHost(m_p);
-    if (m_p->mode == STANDALONE_SGB1_DYNAMIC ||
-        m_p->mode == STANDALONE_SGB2_DYNAMIC)
-        m_p->gb.setSgbJoypCallback(&AuroraGbSgbJoypCallback, m_p);
-    else
-        m_p->gb.setSgbJoypCallback(NULL, NULL);
-    m_p->gb.setScanlineCallback(NULL);
     m_p->gb.setInputGetter(&m_p->input);
     AuroraGbConfigureVideo(m_p);
-    m_p->biosHostFast = FALSE; /* AURORA_GB_FINAL_R1_BIOS_HOST_FAST_20260909: rebuilt lazily from boot-ROM mapping */
-    m_p->clockCredit = 0;
+    m_p->biosHostFast = FALSE;
     m_p->turboFrame = s->TurboFrame;
     m_p->input.Set(0);
     return TRUE;

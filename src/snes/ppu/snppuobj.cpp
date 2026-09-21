@@ -144,17 +144,21 @@ void _SnesPPURenderOBJ8(Uint8 *pLine8, SNMaskT *pLine,
 	while (--nObjLine >= 0)
 	{
 		const SnesRenderObj8T *pObj = pObjLine + nObjLine;
-		/* AURORA_SAFE_CODE_PERF_V1_OBJ
-		 * Immutable per-tile metadata kept local in the hot renderer. */
-		const Int32 iPosX = pObj->iPosX;
-		const Uint32 uPri = pObj->uPri;
-		const Uint32 uPal = pObj->uPal;
+		/* AURORA_SNES_OBJ_TRANSPARENT_ROW_ELIDE_V3_20260921
+		 * OPAQUE is now the validity byte for materialized row metadata.
+		 * Reject a transparent fetched row before touching X/palette/priority. */
 		const Uint8 *pObjData = pObj->uData;
-		Uint32 uOpaque = pObjData[SNPPU_BGPLANE_OPAQUE];
-
-		if (!uOpaque || iPosX <= -8 || iPosX >= 256)
+		const Uint32 uOpaque = pObjData[SNPPU_BGPLANE_OPAQUE];
+		if (!uOpaque)
 			continue;
 
+		/* AURORA_SAFE_CODE_PERF_V1_OBJ */
+		const Int32 iPosX = pObj->iPosX;
+		if (iPosX <= -8 || iPosX >= 256)
+			continue;
+
+		const Uint32 uPri = pObj->uPri;
+		const Uint32 uPal = pObj->uPal;
 		const SNMaskT *pPriorityMask = &PriorityMask[uPri];
 
 #if SNDBG_DEEP

@@ -12,23 +12,15 @@
 class GambatteSystem : public Emu::System
 {
 public:
-    /* AURORA_GB_STANDALONE_DYNAMIC_R4_20260909
-     * All three values are standalone Gambatte.  SGB1/SGB2 never select
-     * the SNES/ICD2 runtime; they only expose the SGB post-boot identity and
-     * enable the game-driven SGB packet/palette renderer below. */
+    /* AURORA_NO_SGB_ELF_V4_20260921: standalone Gambatte remains GB/GBC only. */
     enum StandaloneModeE {
-        STANDALONE_CGB = 0,
-        STANDALONE_SGB1_DYNAMIC = 1,
-        STANDALONE_SGB2_DYNAMIC = 2
+        STANDALONE_CGB = 0
     };
 
     GambatteSystem();
     virtual ~GambatteSystem();
 
-    /* AURORA_SGB_GAMBATTE_R8_COMPLETE_20260909
-     * CGB mode requires an authentic 0x900-byte CGB boot ROM. Dynamic SGB1/2
-     * are standalone DMG Gambatte execution with game-driven SGB commands;
-     * neither path instantiates SNES/ICD2. */
+    /* GBC mode requires the existing authentic 0x900-byte CGB boot ROM. */
     Bool LoadGame(const Uint8 *pData, Uint32 nBytes, Uint32 uCRC,
                   StandaloneModeE eMode,
                   const Uint8 *pCgbBootRom, Uint32 nCgbBootRomBytes);

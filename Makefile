@@ -110,6 +110,11 @@ GAMBATTE_STAGE_STAMP := $(GAMBATTE_STAGE_DIR)/.aurora-gambatte-stage-v3 # AURORA
 GAMBATTE_LIB ?= $(GAMBATTE_STAGE_DIR)/gambatte_libretro_ps2.a
 GAMBATTE_PREPARE_TOOL := $(CURDIR)/tools/prepare_gambatte_sgb_sources.py
 GAMBATTE_PYTHON ?= python3
+# AURORA_NO_SGB_ELF_V4_20260921 / AURORA_GAMBATTE_GBC_ONLY_STAGE_V4_20260921
+# Keep the pinned Gambatte checkout pristine. After the existing stage is
+# prepared, strip only Aurora's SGB host extensions from the build-tree copy.
+GAMBATTE_GBC_ONLY_TOOL := $(CURDIR)/tools/strip_gambatte_sgb_stage.py
+GAMBATTE_GBC_ONLY_STAMP := $(GAMBATTE_STAGE_DIR)/.aurora-gambatte-gbc-only-v4
 
 
 # AURORA_GPSP_GBA_V1_20260911
@@ -698,10 +703,8 @@ SRCS := \
 	src/snes/core/snmask128.cpp \
 	src/snes/core/snmemmap.cpp \
 	src/snes/core/snsa1.cpp \
-	src/snes/core/gbhost.cpp \
 	src/gb/system/gambattesystem.cpp \
 	src/gba/system/gpspsystem.cpp \
-	src/snes/core/snsgb_icd2.cpp \
 	src/snes/core/snsgb.cpp \
 	src/snes/core/snswc.cpp \
 	src/snes/ppu/snppubg.cpp \
@@ -1137,9 +1140,12 @@ $(QUICKNES_LIB): FORCE_QUICKNES
 FORCE_PICODRIVE:
 
 $(PICODRIVE_LIB): FORCE_PICODRIVE
-	@printf '[ PicoDrive ] building PS2 static core\n'
+	@printf '[ PicoDrive ] building PS2 static core (32X disabled)\n'
+	# AURORA_NO_32X_ELF_V4_20260921: ar rcs does not remove members that disappeared from OBJS.
+	# Delete the archive first so no pre-V4 32X/SH2 member can survive.
+	@rm -f "$(PICODRIVE_LIB)"
 	@$(MAKE) -C "$(PICODRIVE_DIR)" -f Makefile.libretro \
-		platform=ps2 CC="$(EE_CC) $(PICODRIVE_PS2_SAFE_FLAGS) $(PICODRIVE_OPLL_NS_FLAGS)" AR="$(PICODRIVE_AR)" PS2DEV="$(PS2DEV)" PS2SDK="$(PS2SDK)" use_libchdr=0 STATIC_LINKING=0 STATIC_LINKING_LINK=1 all
+		platform=ps2 CC="$(EE_CC) $(PICODRIVE_PS2_SAFE_FLAGS) $(AURORA_SECTION_GC_FLAGS) $(PICODRIVE_OPLL_NS_FLAGS)" AR="$(PICODRIVE_AR)" PS2DEV="$(PS2DEV)" PS2SDK="$(PS2SDK)" use_libchdr=0 no_32x=1 STATIC_LINKING=0 STATIC_LINKING_LINK=1 all
 
 # AURORA_PCE_INCREMENTAL_BUILD_V1_20260824
 # AURORA_PCE_INCREMENTAL_BUILD_V1_MAKEFIX_20260824
@@ -1221,19 +1227,23 @@ clean: gpsp-clean
 
 # AURORA_SGB_GBHOST_V0_3_RULES
 #
-# AURORA_SGB_GAMBATTE_BACKEND_V1_1_20260907
-# The patched Gambatte public header exists only after staging.
-$(OBJ_DIR)/snes/core/gbhost.o: \
-	$(GAMBATTE_STAGE_STAMP)
-
 
 # AURORA_SGB_GAMBATTE_BACKEND_V1_1_20260907
 .PHONY: FORCE_GAMBATTE_STAGE
 FORCE_GAMBATTE_STAGE:
 
 $(GAMBATTE_STAGE_STAMP): FORCE_GAMBATTE_STAGE $(GAMBATTE_PREPARE_TOOL)
-	@printf '[ Gambatte GBHost ] checking staged SGB source\n'
+	@printf '[ Gambatte ] checking staged source\n'
 	+@$(GAMBATTE_PYTHON) "$(GAMBATTE_PREPARE_TOOL)" --prepare --source "$(GAMBATTE_DIR)" --stage "$(GAMBATTE_STAGE_DIR)"
+
+# AURORA_GAMBATTE_GBC_ONLY_STAGE_V4_20260921: second, build-tree-only pass. It removes SGB callbacks,
+# scanline hooks and SGB audio carry state while retaining normal GB/GBC,
+# boot ROM, SRAM/RTC dirty tracking and SerialIO/Turbo File.
+$(GAMBATTE_GBC_ONLY_STAMP): $(GAMBATTE_STAGE_STAMP) $(GAMBATTE_GBC_ONLY_TOOL)
+	@printf '[ Gambatte ] stripping SGB-only staged code\n'
+	+@$(GAMBATTE_PYTHON) "$(GAMBATTE_GBC_ONLY_TOOL)" --stage "$(GAMBATTE_STAGE_DIR)"
+
+$(OBJ_DIR)/gb/system/gambattesystem.o: $(GAMBATTE_GBC_ONLY_STAMP)
 
 # AURORA_SGB_GAMBATTE_LINKFIX_V1_1_1_20260907
 # AURORA_SGB_GAMBATTE_RUMBLE_LINKFIX_V1_1_2_20260907
@@ -1257,7 +1267,7 @@ $(GAMBATTE_STAGE_STAMP): FORCE_GAMBATTE_STAGE $(GAMBATTE_PREPARE_TOOL)
 # Boot/HLE/JOYP/audio/clock conversion remain unchanged.
 # Staged Makefile.common excludes ../libretro/libretro.cpp;
 # staged cartridge.cpp provides the MBC5 rumble no-op.
-$(GAMBATTE_LIB): $(GAMBATTE_STAGE_STAMP)
+$(GAMBATTE_LIB): $(GAMBATTE_GBC_ONLY_STAMP)
 	@printf '[ Gambatte GBHost ] checking incremental PS2 core-only archive\n'
 	+@PATH="$(PS2DEV)/ee/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" $(MAKE) --no-print-directory -C "$(GAMBATTE_STAGE_DIR)" -f Makefile.libretro platform=ps2 all
 

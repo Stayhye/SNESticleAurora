@@ -4627,12 +4627,10 @@ static void _MainLoopSgbBootTrace(const Char *pText)
     ConPrint("%s\n", pText);
 }
 
-/* AURORA_SGB_ATTACH_TRACE_V0_6_3_20260905
- * Temporary bridge used only by SGB attach diagnostics. */
-extern "C" void AuroraSgbBootTrace(const char *pText)
-{
-    _MainLoopSgbBootTrace((const Char *)pText);
-}
+/* AURORA_NOSGB_TRACE_BRIDGE_V4_1O_20260921
+ * SGB is not linked in V4. Keep the compatibility no-op owner in snsgb.cpp
+ * and retire this historical mainloop diagnostics bridge to avoid a second
+ * strong definition of AuroraSgbBootTrace at final ELF link. */
 
 /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908
  * Mandatory sgb_bios.*. SGB1 and SGB2 SM83 boot ROMs are bit-identical except
@@ -5666,14 +5664,15 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
 
     if (eType == MAINLOOP_ENTRYTYPE_GBROM)
     {
-        const Int32 gbMode = 0; /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910: GBC-only frontend */
         Bool bGbcFile;
-        Bool bSgbCompatible;
-        GambatteSystem::StandaloneModeE eGbMode;
+        const GambatteSystem::StandaloneModeE eGbMode =
+            GambatteSystem::STANDALONE_CGB;
         Uint8 gbcBios[0x900];
         Uint32 gbcBiosBytes = 0;
         Char gbcBiosPath[1024];
 
+        /* AURORA_NO_SGB_ELF_V4_20260921: all .gb/.gbc content stays on standalone Gambatte/CGB.
+         * No SGB header flag can route into a SNES/ICD2 or dynamic-SGB host. */
         if (!_RomData || nRomBytes < 0x150)
         {
             _MainLoopFreeRomBuffer();
@@ -5682,43 +5681,22 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
             return FALSE;
         }
 
-        /* AURORA_GB_STANDALONE_R5_ROUTE_BIOS_TURBO_20260909
-         * Deterministic automatic system choice:
-         *   .gbc                       -> CGB
-         *   .gb + SGB flag 0x146=0x03 -> standalone dynamic SGB
-         *   .gb without SGB flag       -> CGB
-         *
-         * Do NOT consult 0x143 to override an explicit .gb filename here:
-         * the requested Aurora policy gives .gb+SGB precedence.  Do NOT use
-         * the menu to choose CGB-vs-SGB either.  Once the ROM itself selected
-         * SGB, an explicit SGB2 menu value may select the SGB2 post-boot
-         * identity; GBC/SGB1 menu values both mean SGB1 for such a ROM.
-         * Static 1-A/2-A/etc palettes are never a fallback. */
         bGbcFile = _MainLoopGbContentIsGbc(FileName) ? TRUE : FALSE;
-        bSgbCompatible = (!bGbcFile && _RomData[0x146] == 0x03U)
-            ? TRUE : FALSE;
-
-        /* TEMP_FORCE_ALL_GB_TO_CGB */
-        eGbMode = GambatteSystem::STANDALONE_CGB;
-
         gbcBiosPath[0] = 0;
-        if (eGbMode == GambatteSystem::STANDALONE_CGB)
+        if (!_MainLoopLoadRequiredGbcBios(
+                gbcBios, sizeof(gbcBios), gbcBiosPath, sizeof(gbcBiosPath)))
         {
-            if (!_MainLoopLoadRequiredGbcBios(
-                    gbcBios, sizeof(gbcBios), gbcBiosPath, sizeof(gbcBiosPath)))
-            {
-                _MainLoopFreeRomBuffer();
-                _MainLoopUnloadRom();
-                MainLoopModalPrintf(60 * 7,
-                    "GBC requires retail CGB BIOS CRC32 41884E46 in SYSTEM");
-                return FALSE;
-            }
-            gbcBiosBytes = sizeof(gbcBios);
+            _MainLoopFreeRomBuffer();
+            _MainLoopUnloadRom();
+            MainLoopModalPrintf(60 * 7,
+                "GBC requires retail CGB BIOS CRC32 41884E46 in SYSTEM");
+            return FALSE;
         }
+        gbcBiosBytes = sizeof(gbcBios);
 
         if (!_pGb || !_pGb->LoadGame(
                 _RomData, (Uint32)nRomBytes, uRomIdentityCRC,
-                eGbMode, gbcBiosBytes ? gbcBios : NULL, gbcBiosBytes))
+                eGbMode, gbcBios, gbcBiosBytes))
         {
             _MainLoopFreeRomBuffer();
             _MainLoopUnloadRom();
@@ -5736,17 +5714,14 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
 
         _fbTexture[0]->Clear();
         TextureUpload(&_OutTex, _fbTexture[0]->GetLinePtr(0));
-        ConPrint("GB Loaded: %s [standalone: %s%s%s]\n",
+        ConPrint("GB Loaded: %s [standalone: CGB%s%s]\n",
                  pFileName,
-                 eGbMode == GambatteSystem::STANDALONE_CGB
-                     ? "CGB"
-                     : (eGbMode == GambatteSystem::STANDALONE_SGB2_DYNAMIC
-                         ? "SGB2 dynamic" : "SGB1 dynamic"),
                  bGbcFile ? ", .gbc" : "",
                  _pGb->HasTurboFile() ? ", ASCII Turbo File" : "");
         _MainLoopFreeRomBuffer();
         return TRUE;
     }
+
 
     if (pBios)
     {
