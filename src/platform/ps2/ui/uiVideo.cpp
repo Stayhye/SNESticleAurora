@@ -61,7 +61,7 @@ Bool MainLoopReinitVideoMode(Int32 mode);
 /* ------------------------------------------------------------------ */
 
 #define VIDEOCFG_MAGIC   0x53564944u   /* 'SVID' */
-#define VIDEOCFG_VERSION 50 /* AURORA_VOLUME_TFA_N163_V4_20260913: append GBC/GBA volume */
+#define VIDEOCFG_VERSION 51 /* AURORA_VOLUME_TFA_N163_V4_20260913: append GBC/GBA volume */
 /* AURORA_CFG_MODE7_FULL_ONCE_V1_6_20260905: 44 -> 45; same-layout migration, Mode7 Full once. */
 /* AURORA_CD_MUSIC_REDBOOK_V3_20260830: v43 appends shared SCD/PCE CD Red Book toggle; old configs default On. */
 /* AURORA_PCE_SCALING_LIGHTGUN_TOGGLE_V2_20260830: v42 appends Light Gun; old configs default On. */
@@ -525,7 +525,7 @@ void VideoSettingsLoad(void)
 	MainLoopSgbInvertSetEnabled(FALSE); /* AURORA_CFG_LOADER_REBUILD_V1_13_20260905 */
 	g_SgbBiosModel = 0; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: SGB1 default */
 	g_GameBoyMode = 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: v45-and-older default GBC */
-	PicoDriveBridge_SetRenderingMode(0); /* AURORA_CFG_LOADER_REBUILD_V1_13_20260905: MD FAST default */
+	PicoDriveBridge_SetRenderingMode(1); /* AURORA_CONFIG_RESET_DEFAULTS: MD Good default */
 	PicoDriveBridge_SetGgZoom(false);
 	/* AURORA_VOLUME_TFA_N163_V4_20260913: defaults for v49-and-older/missing config. */
 	g_GbcVolume = 200;
@@ -555,7 +555,12 @@ void VideoSettingsLoad(void)
 	if (MemCardReadFile(path, (Uint8 *)&header, sizeof(header)) &&
 	    header.magic == VIDEOCFG_MAGIC)
 	{
-		if (header.version == VIDEOCFG_VERSION)
+		if (header.version < VIDEOCFG_VERSION)
+		{
+			/* Old config intentionally ignored: retain all fresh defaults. */
+			loaded = FALSE;
+		}
+		else if (header.version == VIDEOCFG_VERSION)
 		{
 			loaded = MemCardReadFile(path, (Uint8 *)&cfg, sizeof(cfg));
 		}
@@ -1405,6 +1410,9 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 			_VideoHackLayerStatus(SNESPPU_MASK_BG4)); vy += 12;
 		_VideoRow(vy, 24, m_iSelect, "Sprites / OBJ",
 			_VideoHackLayerStatus(SNESPPU_MASK_OBJ)); vy += 12;
+		_VideoHeader(vy, "Mega Drive"); vy += 14;
+		_VideoRow(vy, 37, m_iSelect, "MD rendering",
+			_VideoMdRenderingStatus()); vy += 12;
 		/* AURORA_MENU_CLEANUP_V5_20260922:
 		 * Color Math / Window Effects / Mode 7 Quality are fixed policy and hidden. */
 #if AURORA_RUNTIME_TRACE || AURORA_SNES_COST_PROFILER
@@ -1438,8 +1446,6 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 			MainLoopTurboGetSpeedName()); vy += 12;
 		_VideoRow(vy, 44, m_iSelect, "Light Gun",
 			QuicknesBridge_GetLightGunEnabled() ? "On" : "Off"); vy += 12;
-		_VideoRow(vy, 45, m_iSelect, "SGB invert",
-			MainLoopSgbInvertGetEnabled() ? "On" : "Off"); vy += 12;
 	}
 
 	/* controls / hints (clear of the vy=215 footer) */
@@ -1497,7 +1503,7 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 			 * Hidden quality rows 25..27 and old Performance rows 31..37 are
 			 * deliberately absent from this order. */
 			static const Int32 order[] = {
-				20, 21, 22, 23, 24,
+				20, 21, 22, 23, 24, 37,
 #if AURORA_RUNTIME_TRACE
 				38,
 #endif
@@ -1522,7 +1528,7 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 			int lo, hi;
 			if (m_iSelect < 10)      { lo = 0;  hi = 8;  }
 			else if (m_iSelect < 20) { lo = 10; hi = 19; }
-			else                     { lo = 40; hi = 45; }
+			else                     { lo = 40; hi = 44; }
 
 			if (trigger & PAD_UP)
 			{
@@ -1847,9 +1853,6 @@ case 17: /* Famiclone Audio */
 		case 44:
 			QuicknesBridge_SetLightGunEnabled(
 				!QuicknesBridge_GetLightGunEnabled());
-			break;
-		case 45:
-			MainLoopSgbInvertSetEnabled(!MainLoopSgbInvertGetEnabled());
 			break;
 		}
 
