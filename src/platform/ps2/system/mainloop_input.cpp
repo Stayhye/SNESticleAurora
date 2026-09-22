@@ -513,9 +513,11 @@ Uint16 _MainLoopInput(Uint32 pad)
 	 * result, so R2+Cross cannot become "A held + Turbo A", nor B likewise.
 	 * D-pad/Start/Select remain continuous.
 	 *
+	 * AURORA_GBA_SHOULDER_TURBO_FIX_V3_20260922
 	 * gpSP special case: its bridge separately reads raw PS2 input for
-	 * R2+L1 = Turbo L and R2+L2 = Turbo R. Suppress normal L while R2 is
-	 * down so Turbo L does not mix with a continuously-held L.
+	 * R2+L1 = Turbo L and R2+R1 = Turbo R. L2 remains frontend-reserved.
+	 * Suppress both normal shoulders while R2 is down so a turbo chord cannot
+	 * mix with a continuously-held L/R from the ordinary gameplay carrier.
 	 */
 	if (_pSystem == _pGb || _pSystem == _pGba)
 	{
@@ -535,8 +537,8 @@ Uint16 _MainLoopInput(Uint32 pad)
 		}
 		else if (_pSystem == _pGba)
 		{
-			/* Raw-input R2+L1 remains gpSP Turbo-L only. */
-			uHandheld &= ~PAD_L1;
+			/* Raw-input R2+L1/R1 are gpSP Turbo-L/Turbo-R only. */
+			uHandheld &= ~(PAD_L1 | PAD_R1);
 		}
 
 		if (_MainLoopTurboHostIsOn())

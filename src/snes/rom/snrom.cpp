@@ -609,6 +609,32 @@ static Bool _SNRomIsValidCartInfo(SNRomInfoT *pCartInfo)
 	return pCartInfo && ((pCartInfo->InverseChecksum ^ pCartInfo->Checksum) == 0xFFFF);
 }
 
+/* AURORA_SNESDEV_EXHIROM_V1_20260922
+ * SNESdev $FFD5: map-mode low nibble 5 is ExHiROM.
+ * Bit 4 distinguishes SlowROM (25h) from FastROM (35h). */
+static Bool _SNRomHeaderIsExHiRom(const SNRomInfoT *pCartInfo)
+{
+	Uint8 uMapMode;
+	if (!_SNRomIsValidCartInfo((SNRomInfoT *)pCartInfo))
+		return FALSE;
+	uMapMode = pCartInfo->RomMakeup;
+	return ((uMapMode & (Uint8)~0x10u) == 0x25u) ? TRUE : FALSE;
+}
+
+/* AURORA_SNESDEV_LOADER_V2_20260922
+ * Secondary compatibility extension, NOT a SNESdev normal file ordering.
+ * A Jumbo/ExLoROM candidate must still describe an ordinary LoROM board
+ * (20h SlowROM or 30h FastROM). S-DD1 (x2), SA-1 (x3), and ExHiROM (x5)
+ * remain in their documented hardware families. */
+static Bool _SNRomHeaderIsPlainLoRomCompat(const SNRomInfoT *pCartInfo)
+{
+	Uint8 uMapMode;
+	if (!_SNRomIsValidCartInfo((SNRomInfoT *)pCartInfo))
+		return FALSE;
+	uMapMode = pCartInfo->RomMakeup;
+	return ((uMapMode & (Uint8)~0x10u) == 0x20u) ? TRUE : FALSE;
+}
+
 /* AURORA_REVIVE_7C3A5DE_TYPE1_HEADER_SCORING_20260829
  * Port of ReyFxck/SNESticleRevive commit 7c3a5de:
  * score checksum-valid LoROM/HiROM candidates before Type-1 deinterleave.
@@ -672,7 +698,9 @@ static Int32 _SNRomHeaderScore(const Uint8 *pRom, Uint32 uRomBytes,
 	if (uReset < 0x8000)
 		return -1000;
 
-	uResetBase = bLoHeader ? 0 : 0x8000;
+	/* AURORA_SNESDEV_EXHIROM_V1_20260922: derive reset window from physical header position.
+	 * 007FC0 -> 000000, 00FFC0 -> 008000, 40FFC0 -> 408000. */
+	uResetBase = uHeaderOffset - 0x7FC0u;
 	uOpcodeOffset = uResetBase + (uReset & 0x7FFF);
 	if (uOpcodeOffset >= uRomBytes)
 		return -1000;
@@ -1408,6 +1436,8 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 	SNRomInfoT *pCartInfo;
 	SNRomInfoT *pLoCartInfo;
 	SNRomInfoT *pHiCartInfo;
+	SNRomInfoT *pExLoCartInfo;
+	SNRomInfoT *pExHiCartInfo;
 	Bool bOriginalDSP1Op28 = FALSE;
 
 	/* AURORA_REVIVE_7C3A5DE_TYPE1_HEADER_SCORING_20260829
@@ -1416,15 +1446,26 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 	 * unconditionally can corrupt clean HiROM images such as Pinocchio. */
 	pLoCartInfo = GetCartInfo(32704);
 	pHiCartInfo = GetCartInfo(65472);
+	pExLoCartInfo = GetCartInfo(0x407FC0u);
+	pExHiCartInfo = GetCartInfo(0x40FFC0u);
 	Int32 nLoScore = _SNRomHeaderScore(m_pRomData, m_uRomBytes, 32704, TRUE);
 	Int32 nHiScore = _SNRomHeaderScore(m_pRomData, m_uRomBytes, 65472, FALSE);
+	Int32 nExLoScore =
+		(m_uRomBytes > 0x400000u && m_uRomBytes <= 0x800000u && _SNRomHeaderIsPlainLoRomCompat(pExLoCartInfo)) ?
+		_SNRomHeaderScore(m_pRomData, m_uRomBytes, 0x407FC0u, TRUE) : -1000;
+	Int32 nExHiScore =
+		(m_uRomBytes > 0x400000u && m_uRomBytes <= 0x800000u && _SNRomHeaderIsExHiRom(pExHiCartInfo)) ?
+		_SNRomHeaderScore(m_pRomData, m_uRomBytes, 0x40FFC0u, FALSE) : -1000;
+	Bool bStrongExtended =
+		(nExHiScore > -1000 && nExHiScore >= nLoScore && nExHiScore >= nHiScore) ||
+		(nExLoScore > -1000 && nExLoScore >= nLoScore && nExLoScore >= nHiScore);
 	Bool bBestIsLo = (nLoScore >= nHiScore);
 	SNRomInfoT *pBestCartInfo = bBestIsLo ? pLoCartInfo : pHiCartInfo;
 
 	/* Some genuine Type-1 images do not expose a usable reset opcode until
 	   after conversion. Preserve the old checksum/map fallback, but only
 	   when neither normal candidate could be scored. */
-	if (nLoScore <= -1000 && nHiScore <= -1000)
+	if (!bStrongExtended && nLoScore <= -1000 && nHiScore <= -1000)
 	{
 		if (_SNRomHeaderSaysType1(pLoCartInfo, TRUE))
 		{
@@ -1449,7 +1490,7 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 	     pBestCartInfo && _SNRomHeaderSaysType1(pBestCartInfo, bBestIsLo));
 #endif
 
-	if (pBestCartInfo &&
+	if (!bStrongExtended && pBestCartInfo &&
 	    _SNRomHeaderSaysType1(pBestCartInfo, bBestIsLo))
 	{
 		if (_SNRomDeinterleaveType1(m_pRomData, m_uRomBytes))
@@ -1638,7 +1679,28 @@ if (m_pRomData && m_uRomBytes)
 	 * prologue. */
 	nLoScore = _SNRomHeaderScore(m_pRomData, m_uRomBytes, 32704, TRUE);
 	nHiScore = _SNRomHeaderScore(m_pRomData, m_uRomBytes, 65472, FALSE);
-	if (nLoScore > -1000 || nHiScore > -1000)
+	pExLoCartInfo = GetCartInfo(0x407FC0u);
+	pExHiCartInfo = GetCartInfo(0x40FFC0u);
+	nExLoScore =
+		(m_uRomBytes > 0x400000u && m_uRomBytes <= 0x800000u && _SNRomHeaderIsPlainLoRomCompat(pExLoCartInfo)) ?
+		_SNRomHeaderScore(m_pRomData, m_uRomBytes, 0x407FC0u, TRUE) : -1000;
+	nExHiScore =
+		(m_uRomBytes > 0x400000u && m_uRomBytes <= 0x800000u && _SNRomHeaderIsExHiRom(pExHiCartInfo)) ?
+		_SNRomHeaderScore(m_pRomData, m_uRomBytes, 0x40FFC0u, FALSE) : -1000;
+	if (nExHiScore > -1000 &&
+	    nExHiScore >= nExLoScore &&
+	    nExHiScore >= nLoScore && nExHiScore >= nHiScore)
+	{
+		pCartInfo = pExHiCartInfo;
+		m_eMapping = SNROM_MAPPING_EXHIROM;
+	}
+	else if (nExLoScore > -1000 &&
+	         nExLoScore >= nLoScore && nExLoScore >= nHiScore)
+	{
+		pCartInfo = pExLoCartInfo;
+		m_eMapping = SNROM_MAPPING_EXLOROM;
+	}
+	else if (nLoScore > -1000 || nHiScore > -1000)
 	{
 		if (nLoScore >= nHiScore)
 		{
@@ -1650,6 +1712,17 @@ if (m_pRomData && m_uRomBytes)
 			pCartInfo = pHiCartInfo;
 			m_eMapping = SNROM_MAPPING_HIROM;
 		}
+	}
+	else if (m_uRomBytes > 0x400000u && m_uRomBytes <= 0x800000u && _SNRomHeaderIsExHiRom(pExHiCartInfo))
+	{
+		pCartInfo = pExHiCartInfo;
+		m_eMapping = SNROM_MAPPING_EXHIROM;
+	}
+	else if (m_uRomBytes > 0x400000u && m_uRomBytes <= 0x800000u &&
+	         _SNRomHeaderIsPlainLoRomCompat(pExLoCartInfo))
+	{
+		pCartInfo = pExLoCartInfo;
+		m_eMapping = SNROM_MAPPING_EXLOROM;
 	}
 	else if (_SNRomIsValidCartInfo(pLoCartInfo))
 	{
@@ -1667,11 +1740,50 @@ if (m_pRomData && m_uRomBytes)
 	}
 
 #if SNDBG_LOG
-	DLog("[rom-map] final lo=%d hi=%d mapper=%s title='%.21s'",
-	     (int)nLoScore, (int)nHiScore,
-	     pCartInfo ? (m_eMapping == SNROM_MAPPING_HIROM ? "HiROM" : "LoROM") : "none",
+	DLog("[rom-map] final lo/hi/exlo/exhi=%d/%d/%d/%d mapper=%s title='%.21s'",
+	     (int)nLoScore, (int)nHiScore, (int)nExLoScore, (int)nExHiScore,
+	     pCartInfo ?
+	       (m_eMapping == SNROM_MAPPING_HIROM ? "HiROM" :
+	        m_eMapping == SNROM_MAPPING_EXLOROM ? "ExLoROM" :
+	        m_eMapping == SNROM_MAPPING_EXHIROM ? "ExHiROM" : "LoROM") : "none",
 	     pCartInfo ? (const char *)pCartInfo->Title : "");
 #endif
+
+	/* AURORA_SNESDEV_LOADER_V2_20260922: normalize ExLoROM before cartridge classification.
+	 *
+	 * ExLoROM/Jumbo LoROM is retained strictly as a compatibility mapper.
+	 * For a >4 MiB image whose selected header is ordinary LoROM, preserve
+	 * Aurora's existing SMALLFIRST normalization, but do it before
+	 * SetCartInfo(). After an in-place rotation every header pointer must be
+	 * rebuilt because the bytes behind the old pointer have moved. */
+	if (pCartInfo && m_uRomBytes > 0x400000u &&
+	    m_uRomBytes <= 0x800000u &&
+	    (m_eMapping == SNROM_MAPPING_LOROM ||
+	     m_eMapping == SNROM_MAPPING_EXLOROM) &&
+	    _SNRomHeaderIsPlainLoRomCompat(pCartInfo))
+	{
+		int score0 = _ExLoRomHeaderScore(
+			m_pRomData, 0x007FC0u, m_uRomBytes);
+		int score4M = _ExLoRomHeaderScore(
+			m_pRomData, 0x407FC0u, m_uRomBytes);
+
+		if (m_eMapping == SNROM_MAPPING_LOROM && score0 > score4M)
+		{
+			Uint32 smallBytes = m_uRomBytes - 0x400000u;
+			_SNRomRotateLeft(m_pRomData, m_uRomBytes, smallBytes);
+		}
+
+		pLoCartInfo   = GetCartInfo(0x007FC0u);
+		pHiCartInfo   = GetCartInfo(0x00FFC0u);
+		pExLoCartInfo = GetCartInfo(0x407FC0u);
+		pExHiCartInfo = GetCartInfo(0x40FFC0u);
+
+		if (_SNRomHeaderIsPlainLoRomCompat(pExLoCartInfo))
+		{
+			pCartInfo = pExLoCartInfo;
+			m_eMapping = SNROM_MAPPING_EXLOROM;
+		}
+	}
 
 	SetCartInfo(pCartInfo);
 
@@ -1694,33 +1806,9 @@ if (m_pRomData && m_uRomBytes)
 		}
 	}
 
-	// ---- ExLoROM (Jumbo LoROM): LoROM maior que 4MB ----
-	// Hacks grandes (ex.: SMW expandida pelo Lunar Magic) usam ExLoROM:
-	// a metade de cima dos bancos ($80-$FF) deixa de ser espelho e passa a
-	// conter dados extras, chegando a 8MB. Seguimos o reference emulator
-	// (Map_JumboLoROMMap): a ROM e' normalizada para que a metade que tem o
-	// header/vetores fique em offset 0x400000 (mapeada em $00-$3F, de onde a
-	// CPU le os vetores) e os outros 4MB em offset 0 ($80-$FF).
-	// S-DD1 (Star Ocean tem 48Mbit): NAO e' ExLoROM. O >4MB e' acessado
-	// pela troca de segmento de 1MB do S-DD1 na janela $C0-$FF, com a ROM
-	// no formato linear original (sem rearranjo).
-	if (m_eMapping == SNROM_MAPPING_LOROM && m_uRomBytes > 0x400000
-	    && !(m_Flags & SNROM_FLAG_SDD1))
-	{
-		int score0  = _ExLoRomHeaderScore(m_pRomData, 0x007FC0, m_uRomBytes);
-		int score4M = _ExLoRomHeaderScore(m_pRomData, 0x407FC0, m_uRomBytes);
-
-		// header na frente do arquivo -> trocar as metades para coloca-lo
-		// em 0x400000 (caso "SMALLFIRST" do reference emulator).
-		if (score0 > score4M)
-		{
-			Uint32 smallBytes = m_uRomBytes - 0x400000;
-			/* AURORA_EXLOROM_INPLACE_ROTATE_V1_20260915 */
-			_SNRomRotateLeft(m_pRomData, m_uRomBytes, smallBytes);
-		}
-
-		m_eMapping = SNROM_MAPPING_EXLOROM;
-	}
+	/* AURORA_SNESDEV_LOADER_V2_20260922
+	 * ExLoROM promotion/normalization now runs before SetCartInfo(),
+	 * so cartridge metadata and hardware flags bind to the final header. */
 
 	/* The CRC alone is not enough: require the cartridge header to have
 	 * classified the image as DSP-1 before enabling a DSP-1 revision quirk. */

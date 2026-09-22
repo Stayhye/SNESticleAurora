@@ -97,6 +97,43 @@ static SnesMemMapT	_SnesMemMap_HiRom[]=
 
 
 
+
+/* AURORA_SNESDEV_EXHIROM_V1_20260922
+ * SNESdev ExHiROM ROM wiring. Each ROM row spans a complete 64 KiB
+ * logical bank so MapMem() advances one physical 64 KiB bank per CPU bank.
+ * System and SRAM windows are then overlaid as with normal HiROM.
+ *
+ * SNESdev defines the ROM address-line mapping but cartridge RAM decode can
+ * vary by board, so V1 conservatively retains Aurora's HiROM SRAM windows.
+ */
+static SnesMemMapT _SnesMemMap_ExHiRom[]=
+{
+	/* Bytes above 4 MiB. */
+	{0x00, 0x3F, 0x0000, 0xFFFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_ROM, 0x400000},
+	{0x40, 0x7D, 0x0000, 0xFFFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_ROM, 0x400000},
+
+	/* First 4 MiB. */
+	{0x80, 0xBF, 0x0000, 0xFFFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_ROM, 0x000000},
+	{0xC0, 0xFF, 0x0000, 0xFFFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_ROM, 0x000000},
+
+	/* Conservative HiROM-compatible cartridge SRAM overlays. */
+	{0x20, 0x3F, 0x6000, 0x7FFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_SRAM},
+	{0xA0, 0xBF, 0x6000, 0x7FFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_SRAM},
+
+	/* System WRAM. */
+	{0x7E, 0x7F, 0x0000, 0xFFFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_RAM},
+
+	/* System / PPU overlays. */
+	{0x00, 0x3F, 0x0000, 0x1FFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_LORAM},
+	{0x00, 0x3F, 0x2000, 0x3FFF, SNCPU_CYCLE_FAST, SNESMEM_TYPE_PPU0},
+	{0x00, 0x3F, 0x4000, 0x5FFF, SNCPU_CYCLE_FAST, SNESMEM_TYPE_PPU1},
+	{0x80, 0xBF, 0x0000, 0x1FFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_LORAM},
+	{0x80, 0xBF, 0x2000, 0x3FFF, SNCPU_CYCLE_FAST, SNESMEM_TYPE_PPU0},
+	{0x80, 0xBF, 0x4000, 0x5FFF, SNCPU_CYCLE_FAST, SNESMEM_TYPE_PPU1},
+
+	{0, 0, 0, 0, SNESMEM_TYPE_NONE}
+};
+
 /* AURORA_BSXSLOT_MEMORY_PACK_V1_20260906_SNMEMMAP_CPP
  * System-only portions of the two BSC board maps.  ROM and the Memory Pack
  * are installed explicitly below because BSC-HiROM has shadow regions whose
@@ -1771,6 +1808,18 @@ void SnesSystem::MapMem(SNRomMappingE eRomMapping, Uint32 uFlags)
 
 		case SNROM_MAPPING_BSCHIROM:
 			MapBSCHiRom();
+			break;
+
+		// AURORA_SNESDEV_EXHIROM_V1_20260922: SNESdev ExHiROM (>4 MiB, map modes 25h/35h)
+		case SNROM_MAPPING_EXHIROM:
+			MapMem(_SnesMemMap_ExHiRom);
+#if SNES_DSP1
+			if (uFlags & SNROM_FLAG_DSP1)
+			{
+				MapMem(_SnesMemMap_HiRom_DSP1);
+				m_pDsp = &m_DSP1;
+			}
+#endif
 			break;
 
 		// LoROM > 4MB (Jumbo / ExLoROM, ate 8MB)

@@ -465,9 +465,15 @@ void VideoSettingsSave(void)
 		(~SNPPURenderGetSoftwareLayerMask()) &
 		(SNESPPU_MASK_BG1 | SNESPPU_MASK_BG2 | SNESPPU_MASK_BG3 |
 		 SNESPPU_MASK_BG4 | SNESPPU_MASK_OBJ);
-	/* Retire the old fixed SNES frameskip bit; index 36 no longer owns it. */
+	/* AURORA_MENU_CLEANUP_V5_20260922
+	 * Hidden SNES quality controls are fixed to Accurate / Accurate / Full.
+	 * Keep the legacy video.cfg field/layout, but never persist approximation bits. */
 	cfg.sneshackflags =
-		SNPPURenderGetSoftwareHackFlags() & ~SNPPU_HACK_FRAME_SKIP;
+		SNPPURenderGetSoftwareHackFlags() &
+		~(SNPPU_HACK_FRAME_SKIP |
+		  SNPPU_HACK_COLOR_MATH_OFF |
+		  SNPPU_HACK_WINDOWS_OFF |
+		  SNPPU_HACK_MODE7_HALF);
 	cfg.compatflags = g_VideoCompatFlags & VIDEO_COMPAT_ALL;
 	cfg.objlimit = SNPPURenderGetObjLimitLevel();
 	cfg.sramdevice = MainLoopSramGetDevice();
@@ -535,7 +541,7 @@ void VideoSettingsLoad(void)
 	SNPPURenderSetSoftwareLayerMask(
 		SNESPPU_MASK_BG1 | SNESPPU_MASK_BG2 | SNESPPU_MASK_BG3 |
 		SNESPPU_MASK_BG4 | SNESPPU_MASK_OBJ);
-	SNPPURenderSetSoftwareHackFlags(SNPPU_HACK_MODE7_HALF);
+	SNPPURenderSetSoftwareHackFlags(0); /* AURORA_MENU_CLEANUP_V5_20260922: Accurate / Accurate / Full */
 	SNPPURenderSetObjLimitLevel(SNPPU_OBJ_LIMIT_OFF);
 	SNPPURenderSetObjLimitMode(SNPPU_OBJ_LIMIT_MODE_SCANLINE);
 	MainLoopSramSetDevice(MAINLOOP_SRAMDEVICE_AUTO);
@@ -881,10 +887,16 @@ void VideoSettingsLoad(void)
 		cfg.smsfm = 0;
 	}
 
-	/* The fixed 1-in-2 SNES frameskip is retired in v39. Clear it even
-	 * when importing a v38 file that had the old Performance row On. */
+	/* AURORA_MENU_CLEANUP_V5_20260922
+	 * Retire the old fixed frameskip and sanitize now-hidden renderer quality
+	 * switches on every imported/current config. The remaining hack bits keep
+	 * their existing persistence semantics. */
 	if (loaded)
-		cfg.sneshackflags &= ~SNPPU_HACK_FRAME_SKIP;
+		cfg.sneshackflags &=
+			~(SNPPU_HACK_FRAME_SKIP |
+			  SNPPU_HACK_COLOR_MATH_OFF |
+			  SNPPU_HACK_WINDOWS_OFF |
+			  SNPPU_HACK_MODE7_HALF);
 
 	/* AURORA_FAMICOM_MIC_CFG41_20260828
 	 * Preserve v42 Safe Frameskip when v43 only adds CD music.
@@ -1273,14 +1285,14 @@ void CVideoScreen::Draw()
 	char  buf[16];
 	int   m = _VideoModeIndex(g_GskVideoMode);
 	const char *pMode = _VideoModes[m].name;
-	/* AURORA_V85_SOFTWARE_HACKS_PAGE
-	 * AURORA_MD_MENU_MAPPING_SRAM_FIX_V4: controller page dedicada.
-	 * Display order: 0..9, 31..37, 40..44, 20..29, 10..19. */
+	/* AURORA_MENU_CLEANUP_V5_20260922
+	 * Visible order: Screen -> Audio -> Controller -> SNES Hacks -> Devices.
+	 * The old Performance page is not exposed. IDs 38/39 remain reserved for
+	 * optional runtime diagnostics and are displayed on the SNES page. */
 	int   iPage = (m_iSelect >= 50) ? 1 :
-	              ((m_iSelect >= 40) ? 3 :
-	              ((m_iSelect >= 31) ? 2 :
-	              ((m_iSelect >= 20) ? 4 :
-	              ((m_iSelect >= 10) ? 5 : 0))));
+	              ((m_iSelect >= 40) ? 2 :
+	              ((m_iSelect >= 20) ? 3 :
+	              ((m_iSelect >= 10) ? 4 : 0)));
 	const char *pWide = "Off";
 	/* AURORA_PS2LEAN_V2_20260824: SNES colour profile is intentionally fixed to
 	 * the original/default palette on PS2; no menu row is exposed. */
@@ -1291,12 +1303,11 @@ void CVideoScreen::Draw()
 	FontSelect(0);
 
 	_VideoHeader(vy,
-		iPage == 0 ? "Settings Menu (1/6)" :
-		iPage == 1 ? "Settings Menu (2/6)" :
-		iPage == 2 ? "Settings Menu (3/6)" :
-		iPage == 3 ? "Settings Menu (4/6)" :
-		iPage == 4 ? "Settings Menu (5/6)" :
-		             "Settings Menu (6/6)");
+		iPage == 0 ? "Settings Menu (1/5)" :
+		iPage == 1 ? "Settings Menu (2/5)" :
+		iPage == 2 ? "Settings Menu (3/5)" :
+		iPage == 3 ? "Settings Menu (4/5)" :
+		             "Settings Menu (5/5)");
 	vy += 18;
 
 	if (iPage == 0) {
@@ -1352,7 +1363,7 @@ void CVideoScreen::Draw()
 		_VideoRow(vy, 58, m_iSelect, "CD music",
 		          g_CdMusicEnabled ? "ON" : "OFF"); vy += 10; /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
 	}
-	else if (iPage == 5)
+	else if (iPage == 4)
 	{
 		_VideoHeader(vy, "Storage / Devices"); vy += 14;
 
@@ -1381,7 +1392,7 @@ _VideoRow(vy, 18, m_iSelect, "Reset emulator", ""); vy += 12;
 _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 
 	}
-	else if (iPage == 4)
+	else if (iPage == 3)
 	{
 		_VideoHeader(vy, "SNES Hacks"); vy += 14;
 		_VideoRow(vy, 20, m_iSelect, "BG1 Layer",
@@ -1394,47 +1405,26 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 			_VideoHackLayerStatus(SNESPPU_MASK_BG4)); vy += 12;
 		_VideoRow(vy, 24, m_iSelect, "Sprites / OBJ",
 			_VideoHackLayerStatus(SNESPPU_MASK_OBJ)); vy += 12;
-		_VideoRow(vy, 25, m_iSelect, "Color Math",
-			_VideoHackAccurateStatus(SNPPU_HACK_COLOR_MATH_OFF)); vy += 12;
-		_VideoRow(vy, 26, m_iSelect, "Window Effects",
-			_VideoHackAccurateStatus(SNPPU_HACK_WINDOWS_OFF)); vy += 12;
-		_VideoRow(vy, 27, m_iSelect, "Mode 7 Quality",
-			_VideoHackMode7Status()); vy += 12;
-		/* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910: Game Boy selector retired; GBC is fixed. */
-	}
-	else if (iPage == 2)
-	{
-		_VideoHeader(vy, "Performance"); vy += 14;
-		_VideoRow(vy, 31, m_iSelect, "Profile",
-			_VideoCompatProfileStatus()); vy += 12;
-		_VideoRow(vy, 32, m_iSelect, "GS Cache Sync",
-			_VideoCompatGsCacheStatus()); vy += 12;
-		_VideoRow(vy, 33, m_iSelect, "GIF DMA Wait",
-			_VideoCompatGifWaitStatus()); vy += 12;
-		_VideoRow(vy, 34, m_iSelect, "Audio RPC Chunk",
-			_VideoCompatAudioRpcStatus()); vy += 12;
-		_VideoRow(vy, 35, m_iSelect, "Audio Queue",
-			_VideoCompatAudioQueueStatus()); vy += 12;
-		_VideoRow(vy, 37, m_iSelect, "MD rendering",
-			_VideoMdRenderingStatus()); vy += 12;
+		/* AURORA_MENU_CLEANUP_V5_20260922:
+		 * Color Math / Window Effects / Mode 7 Quality are fixed policy and hidden. */
+#if AURORA_RUNTIME_TRACE || AURORA_SNES_COST_PROFILER
+		_VideoHeader(vy, "Diagnostics"); vy += 14;
 #if AURORA_RUNTIME_TRACE
-		/* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919: runtime-only; deliberately absent from VideoCfgT. */
 		_VideoRow(vy, 38, m_iSelect, "Debugger",
 			AuroraTraceIsEnabled() ? "On" : "Off"); vy += 12;
 #endif
 #if AURORA_SNES_COST_PROFILER
-		/* AURORA_SNES_COST_PROFILER_V1_20260920: runtime-only; no VideoCfgT field. */
-		#if AURORA_RUNTIME_TRACE
+#if AURORA_RUNTIME_TRACE
 		_VideoRow(vy, 39, m_iSelect, "SNES Profiler",
 			AuroraSnesCostProfilerIsEnabled() ? "On" : "Off"); vy += 12;
-		#else
+#else
 		_VideoRow(vy, 38, m_iSelect, "SNES Profiler",
 			AuroraSnesCostProfilerIsEnabled() ? "On" : "Off"); vy += 12;
-		#endif
 #endif
-
+#endif
+#endif
 	}
-	else if (iPage == 3)
+	else if (iPage == 2)
 	{
 		/* AURORA_MD_MENU_MAPPING_SRAM_FIX_V4 */
 		_VideoHeader(vy, "Controller options"); vy += 14;
@@ -1473,23 +1463,17 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 {
 	int dir = 0;
-#if AURORA_RUNTIME_TRACE && AURORA_SNES_COST_PROFILER
-	const int perfHi = 39;
-#elif AURORA_RUNTIME_TRACE || AURORA_SNES_COST_PROFILER
-	const int perfHi = 38;
-#else
-	const int perfHi = 37;
-#endif
+	/* AURORA_MENU_CLEANUP_V5_20260922: Performance is not a navigable page. */
 
-	/* AURORA_PD_MEGA_FIX_20260820: Screen -> Audio -> Performance -> Controller -> Hacks -> Devices. */
+	/* AURORA_MENU_CLEANUP_V5_20260922:
+	 * Screen -> Audio -> Controller -> SNES Hacks -> Devices. */
 	if (trigger & PAD_CIRCLE)
 	{
-		if (m_iSelect < 10)        m_iSelect = 50;
-		else if (m_iSelect < 20)   m_iSelect = 0;
-		else if (m_iSelect <= 30)  m_iSelect = 10;
-		else if (m_iSelect < 40)   m_iSelect = 40;
-		else if (m_iSelect < 50)   m_iSelect = 20;
-		else                       m_iSelect = 31;
+		if (m_iSelect < 10)         m_iSelect = 50;
+		else if (m_iSelect >= 50)   m_iSelect = 40;
+		else if (m_iSelect >= 40)   m_iSelect = 20;
+		else if (m_iSelect >= 20)   m_iSelect = 10;
+		else                        m_iSelect = 0;
 	}
 
 	{
@@ -1506,33 +1490,54 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 			if (trigger & PAD_DOWN) pos = (pos + 1) % count;
 			m_iSelect = order[pos];
 		}
+		else if (m_iSelect >= 20 && m_iSelect < 40 &&
+		         (trigger & (PAD_UP | PAD_DOWN)))
+		{
+			/* SNES page: five layer controls plus optional build-time diagnostics.
+			 * Hidden quality rows 25..27 and old Performance rows 31..37 are
+			 * deliberately absent from this order. */
+			static const Int32 order[] = {
+				20, 21, 22, 23, 24,
+#if AURORA_RUNTIME_TRACE
+				38,
+#endif
+#if AURORA_SNES_COST_PROFILER
+#if AURORA_RUNTIME_TRACE
+				39,
+#else
+				38,
+#endif
+#endif
+			};
+			const Int32 count = (Int32)(sizeof(order) / sizeof(order[0]));
+			Int32 pos = 0;
+			while (pos < count && order[pos] != m_iSelect) pos++;
+			if (pos >= count) pos = 0;
+			if (trigger & PAD_UP)   pos = (pos + count - 1) % count;
+			if (trigger & PAD_DOWN) pos = (pos + 1) % count;
+			m_iSelect = order[pos];
+		}
 		else
 		{
-		int lo, hi;
-		if (m_iSelect < 10)       { lo = 0;  hi = 8;  }
-		else if (m_iSelect < 20)  { lo = 10; hi = 19; }
-		else if (m_iSelect <= 30) { lo = 20; hi = 27; } /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910 */
-		else if (m_iSelect < 40)  { lo = 31; hi = perfHi; }
-		else                      { lo = 40; hi = 45; }
-		if (trigger & PAD_UP)
-		{
-			m_iSelect--;
-			if (m_iSelect < lo) m_iSelect = hi;
-			if (m_iSelect == 7) m_iSelect = 6; /* AURORA_V22_VERSION_GGZOOM_HIDDEN_20260912 */
-			/* Keep retired index 36 unreachable without renumbering 37. */
-			if (m_iSelect == 36) m_iSelect = 35;
-			if (m_iSelect == 15) m_iSelect = 14; /* AURORA_SWC_FLOPPY_V5_20260831 */
-			if (m_iSelect == 29 || m_iSelect == 28) m_iSelect = 27; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909 */
-		}
-		if (trigger & PAD_DOWN)
-		{
-			m_iSelect++;
-			if (m_iSelect > hi) m_iSelect = lo;
-			if (m_iSelect == 7) m_iSelect = 8; /* AURORA_V22_VERSION_GGZOOM_HIDDEN_20260912 */
-			if (m_iSelect == 36) m_iSelect = 37;
-			if (m_iSelect == 15) m_iSelect = 16; /* AURORA_SWC_FLOPPY_V5_20260831 */
-			if (m_iSelect >= 28 && m_iSelect <= 30) m_iSelect = 20; /* AURORA_V12_SELF_AUDIT_GBC_FX1_20260910 */
-		}
+			int lo, hi;
+			if (m_iSelect < 10)      { lo = 0;  hi = 8;  }
+			else if (m_iSelect < 20) { lo = 10; hi = 19; }
+			else                     { lo = 40; hi = 45; }
+
+			if (trigger & PAD_UP)
+			{
+				m_iSelect--;
+				if (m_iSelect < lo) m_iSelect = hi;
+				if (m_iSelect == 7)  m_iSelect = 6;  /* hidden GG Zoom */
+				if (m_iSelect == 15) m_iSelect = 14; /* retired SRAM Size */
+			}
+			if (trigger & PAD_DOWN)
+			{
+				m_iSelect++;
+				if (m_iSelect > hi) m_iSelect = lo;
+				if (m_iSelect == 7)  m_iSelect = 8;  /* hidden GG Zoom */
+				if (m_iSelect == 15) m_iSelect = 16; /* retired SRAM Size */
+			}
 		}
 	}
 
@@ -1851,15 +1856,14 @@ case 17: /* Famiclone Audio */
 
 	}
 
-	/* Square: previous page in the displayed six-page order. */
+	/* Square: previous page in the displayed five-page order. */
 	if (trigger & PAD_SQUARE)
 	{
-		if (m_iSelect >= 50)      m_iSelect = 0;
-		else if (m_iSelect >= 40) m_iSelect = 31;
-		else if (m_iSelect >= 31) m_iSelect = 50;
-		else if (m_iSelect >= 20) m_iSelect = 40;
-		else if (m_iSelect >= 10) m_iSelect = 20;
-		else                      m_iSelect = 10;
+		if (m_iSelect < 10)         m_iSelect = 10;
+		else if (m_iSelect >= 50)   m_iSelect = 0;
+		else if (m_iSelect >= 40)   m_iSelect = 50;
+		else if (m_iSelect >= 20)   m_iSelect = 40;
+		else                        m_iSelect = 20;
 	}
 
 /* Cross / Start: persist ordinary settings; immediate actions never save. */
@@ -1878,7 +1882,17 @@ if (trigger & (PAD_CROSS | PAD_START))
 #if AURORA_RUNTIME_TRACE
     else if (m_iSelect == 38)
     {
-        /* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919: runtime-only row; never writes video.cfg. */
+        /* Runtime Debugger is diagnostic-only; never writes video.cfg. */
+    }
+#endif
+#if AURORA_SNES_COST_PROFILER
+#if AURORA_RUNTIME_TRACE
+    else if (m_iSelect == 39)
+#else
+    else if (m_iSelect == 38)
+#endif
+    {
+        /* SNES Profiler is diagnostic-only; never writes video.cfg. */
     }
 #endif
     else

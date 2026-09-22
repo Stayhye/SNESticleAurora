@@ -100,12 +100,7 @@ static Uint32 s_SafeFrameskipPeriod = 0;
 static Uint32 s_SafeFrameskipSamples[3] = { 0, 0, 0 };
 static Uint32 s_SafeFrameskipSampleCount = 0;
 static Uint32 s_SafeFrameskipSamplePos = 0;
-/* AURORA_V7_1_3_SAFE_FRAMESKIP_FLICKER_PHASE_GUARD_20260917
- * Level-1 only: periodically swap one skipped/presented pair so intentional
- * every-other-frame sprite flicker cannot stay phase-locked to the hidden
- * frame. The compensation skip keeps average presentation work unchanged. */
-static Uint32 s_SafeFrameskipFlickerSkipCount = 0;
-static Bool   s_SafeFrameskipFlickerCompensate = FALSE;
+/* AURORA_FRAMESKIP_ISSUE22_VFINAL_20260922: issue-22 debt scheduler; no level-1 phase-swap state. */
 /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830
  * One-shot request raised only by a CDDA cache/hunk miss. */
 static Bool s_SafeFrameskipCdAudioWindowRequested = FALSE;
@@ -123,17 +118,6 @@ static void _MainLoopSafeFrameskipResetTiming(void)
     s_SafeFrameskipAim = 0;
     s_SafeFrameskipConsecutive = 0;
     s_SafeFrameskipSkipPresentation = FALSE;
-}
-
-/* V7.1.3 phase state is deliberately separate from transient timing reset.
- * max_skip recovery resets timing frequently at level 1; clearing the phase
- * counter there would prevent the guard from ever reaching its rotation
- * interval. Reset it only when the feature becomes ineligible/session-like
- * state changes. */
-static void _MainLoopSafeFrameskipResetFlickerPhase(void)
-{
-    s_SafeFrameskipFlickerSkipCount = 0;
-    s_SafeFrameskipFlickerCompensate = FALSE;
 }
 
 static void _MainLoopSafeFrameskipLearn(Uint32 delta, Bool gameplay)
@@ -215,7 +199,6 @@ void MainLoopSafeFrameskipSetLevel(Int32 level)
     /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830 */
     s_SafeFrameskipCdAudioWindowRequested = FALSE;
     _MainLoopSafeFrameskipResetTiming();
-    _MainLoopSafeFrameskipResetFlickerPhase();
 }
 
 Bool MainLoopSafeFrameskipGetEnabled(void)
@@ -266,7 +249,6 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
     {
         s_SafeFrameskipCdAudioWindowRequested = FALSE;
         _MainLoopSafeFrameskipResetTiming();
-        _MainLoopSafeFrameskipResetFlickerPhase();
         return FALSE;
     }
 
@@ -275,7 +257,6 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
         s_SafeFrameskipCdAudioWindowRequested = FALSE;
         /* CDDA skip windows are storage policy, not visual cadence.
          * Do not carry a phase swap through one of those windows. */
-        _MainLoopSafeFrameskipResetFlickerPhase();
 
         /* AURORA_EXTREME_CD_VIDEO_FIRST_V2_20260830
          * CDDA may spend Safe Frameskip, but never bypass max_skip. */
@@ -336,51 +317,16 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
      * once host debt exceeds one learned VBlank period. */
     /* AURORA_SAFE_FRAMESKIP_RESTORE_4A350B_V1_20260917: historical 4a350b one-frame trigger. */
 
-    /* AURORA_V7_1_3_SAFE_FRAMESKIP_FLICKER_PHASE_GUARD_20260917
-     * Repay a previously presented skip-opportunity by skipping this eligible
-     * tick instead. This is intentionally checked before the normal debt
-     * decision: the pair swap must change phase even if the extra presentation
-     * gave the host enough time to fall just inside the normal threshold.
-     *
-     * Only level 1 uses this. Higher levels already have multi-frame skip
-     * patterns and remain byte-for-byte scheduler-equivalent to V7.1. */
-    if (s_SafeFrameskipLevel == 1 &&
-        s_SafeFrameskipFlickerCompensate)
-    {
-        s_SafeFrameskipFlickerCompensate = FALSE;
-        s_SafeFrameskipConsecutive = 1;
-        skip = TRUE;
-    }
-    else if (diff < -target)
+    /* AURORA_FRAMESKIP_ISSUE22_VFINAL_20260922
+     * Restore issue-22-style catch-up: skip presentation only for real host
+     * timing debt, bounded by the selected max_skip. A late frame is never
+     * re-presented merely to rotate an every-other-frame visual phase. */
+    if (diff < -target)
     {
         if (s_SafeFrameskipConsecutive < (Uint32)s_SafeFrameskipLevel)
         {
-            if (s_SafeFrameskipLevel == 1)
-            {
-                ++s_SafeFrameskipFlickerSkipCount;
-
-                /* Four ordinary skips are enough to identify a stable phase
-                 * without churning cadence constantly. On the fourth, present
-                 * this phase and repay with one skip on the next eligible tick.
-                 * No extra presentation survives the completed swap. */
-                if (s_SafeFrameskipFlickerSkipCount >= 4u)
-                {
-                    s_SafeFrameskipFlickerSkipCount = 0;
-                    s_SafeFrameskipFlickerCompensate = TRUE;
-                    s_SafeFrameskipConsecutive = 0;
-                    skip = FALSE;
-                }
-                else
-                {
-                    ++s_SafeFrameskipConsecutive;
-                    skip = TRUE;
-                }
-            }
-            else
-            {
-                ++s_SafeFrameskipConsecutive;
-                skip = TRUE;
-            }
+            ++s_SafeFrameskipConsecutive;
+            skip = TRUE;
         }
         else
         {
@@ -460,7 +406,6 @@ static void _MainLoopSafeFrameskipAfterFlip(void)
 void MainLoopRender()
 {
 	static Uint32 _iFrame=0;
-        static int whichdrawbuf = 0;
 
         /* AURORA_SAFE_FRAMESKIP_PICODRIVE_AUTO_V1: standalone PicoDrive skip path has no
          * finalize/present/flip/VBlank wait. Core/audio already ran. */
@@ -496,11 +441,12 @@ void MainLoopRender()
          * In 480i/1080i MainLoopEnsureGameplayRasterWidth() does not
          * rebuild the GS; those modes keep their normal 640 framebuffer.
          */
+        const Bool bMdVideo =
+            (_pSystem == _pSega &&
+             PicoDriveBridge_IsMegaDriveVideo()) ? TRUE : FALSE;
+
         {
             Int32 wantedRaster = 256;
-            const Bool bMdVideo =
-                (_pSystem == _pSega &&
-                 PicoDriveBridge_IsMegaDriveVideo()) ? TRUE : FALSE;
 
             /* AURORA_SEGA_CD_32X_MD_SCALING_V2R1_20260828
              * Cartridge MD, Sega CD and 32X share H32/H40 presentation. */
@@ -540,6 +486,19 @@ void MainLoopRender()
 
 
 
+        /* AURORA_GLOBAL_PERF_V2_20260922
+         * Read-only presentation facts for this host render. Query each bridge
+         * at most once; no persistent capability cache is introduced. */
+        const Bool bSegaDirectGs =
+            (!_MainLoop_BlackScreen && _pSystem == _pSega &&
+             PicoDriveBridge_CanDirectGsVideo()) ? TRUE : FALSE;
+        const Bool bPceDirectGs =
+            (!_MainLoop_BlackScreen && _pSystem == _pPce &&
+             PceBridge_CanDirectGsVideo()) ? TRUE : FALSE;
+        const Bool bGbaDirectGs =
+            (!_MainLoop_BlackScreen && _pSystem == _pGba && _pGba &&
+             _pGba->CanDirectGsVideo()) ? TRUE : FALSE;
+
         /* AURORA_GPSP_GBA_V14_NATIVE_SQUARE_20260911
          * Both standalone GB/GBC and GBA LCDs use square source pixels.
          * Reuse v13's presentation-only policy: no core framebuffer
@@ -564,7 +523,7 @@ void MainLoopRender()
               _pSystem == _pFds || /* AURORA_FCEUMM_FDS_V0_5_RENDER */
               _pSystem == _pSnes ||
               (_pSystem == _pSega &&
-               (PicoDriveBridge_IsMegaDriveVideo() ||
+               (bMdVideo ||
                 PicoDriveBridge_IsMasterSystem()))) &&
              !_bMenu) ? 1 : 0;
 
@@ -628,14 +587,11 @@ void MainLoopRender()
 
     GSK_SetGameplaySkipClear(
         (!_bMenu && !_MainLoop_BlackScreen &&
-         (((_pSystem == _pSega) &&
-           PicoDriveBridge_CanDirectGsVideo() &&
-           (PicoDriveBridge_IsMegaDriveVideo() ||
+         ((bSegaDirectGs &&
+           (bMdVideo ||
             g_GskVideoMode == GSK_VIDMODE_240P)) ||
-          ((_pSystem == _pPce) &&
-           PceBridge_CanDirectGsVideo()) ||
-          ((_pSystem == _pGba) && _pGba &&
-           _pGba->CanDirectGsVideo() &&
+          bPceDirectGs ||
+          (bGbaDirectGs &&
            GSK_GetActiveVideoMode() == GSK_VIDMODE_240P))) ? TRUE : FALSE); /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912 */
     /* AURORA_GPSP_GBA_V14_NATIVE_SQUARE_20260911
      * Interlaced 2x2 handheld presentation leaves physical side bars, so use
@@ -721,16 +677,13 @@ void MainLoopRender()
                 g_GskVideoMode == GSK_VIDMODE_240P ? 2 : 4,
                 fColor);
         }
-        else if (_pSystem == _pPce &&
-                 !_bMenu && /* AURORA_PCE_SSF2_FINAL_20260913_PCE_NO_DIRECT_UNDER_MENU */
-                 PceBridge_CanDirectGsVideo())
+        else if (!_bMenu && bPceDirectGs)
         {
             /* AURORA_PCE_EXPERIMENTAL_V10_DIRECT_GS */
             PceBridge_DrawDirectGs(
                 _MainLoop_uOutTexTBP, fColor);
         }
-        else if (_pSystem == _pGba && _pGba &&
-                 _pGba->CanDirectGsVideo())
+        else if (bGbaDirectGs)
         {
             /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912
              * GPPrimTexRect uses the same transform as PolyRect. Scope the
@@ -748,8 +701,7 @@ void MainLoopRender()
             if (bGbaSquareDraw)
                 GSK_SetGbSquarePixelDraw(0);
         }
-        else if (_pSystem == _pSega &&
-                 PicoDriveBridge_CanDirectGsVideo())
+        else if (bSegaDirectGs)
         {
             /* AURORA_PD_DIRECT_T8_RENDER */
             PicoDriveBridge_DrawDirectGs(
@@ -1035,12 +987,6 @@ void MainLoopRender()
      * deadline. Aud_BufferedAsyncStart uses only wait=0 drains. */
     if (!_bMenu && _pSystem && !_MainLoop_BlackScreen)
         Aud_BufferedAsyncStart();
-
-    /* whichdrawbuf is now decorative - gsKit owns the active
-       framebuffer index via gsGlobal->ActiveBuffer. Keep it
-       alive so the diff against the original is small. */
-    whichdrawbuf ^= 1;
-    (void)whichdrawbuf;
 
     _iFrame++;
 }
