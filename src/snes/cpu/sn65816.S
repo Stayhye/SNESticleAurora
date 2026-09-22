@@ -828,11 +828,11 @@ _SNCPU_Write8Trap:
 
 		// restore volatile and temporary registers
 		lw		ra,SP_RA1
-		lw		R_Data,SP_Data0				   
         SNCPU_LOADREGSTATE()
 
+        /* AURORA_SNES_CPU_TRAP_DELAY_FAST_V1_20260921: restore R_Data in JR's existing delay slot. */
 		jr		ra
-        nop
+		lw		R_Data,SP_Data0
 
 /*
 //
@@ -1038,13 +1038,13 @@ _SNCPU_Read8Trap:
 		move	a1, R_Addr
 
         andi	R_Data, v0, 0xFF
-        sb      R_Data,SNCPU_uMDR    // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: trap result
 
 		lw		ra,SP_RA1				   
         SNCPU_LOADREGSTATE()
 
+        /* AURORA_SNES_CPU_TRAP_DELAY_FAST_V1_20260921: final MDR publication in JR's delay slot. */
 		jr		ra
-        nop
+        sb      R_Data,SNCPU_uMDR    // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: trap result
 
 
 
@@ -1142,11 +1142,11 @@ _SNCPU_Read16Trap:
         sb      v0,SNCPU_uMDR    // AURORA_MDR_MODE5_CLEAN_V2_1_2_20260907: byte 1
 
 		lw		ra,SP_RA1				   
-        lhu		R_Data,SP_Data0						
         SNCPU_LOADREGSTATE()
 
+        /* AURORA_SNES_CPU_TRAP_DELAY_FAST_V1_20260921: load return word in JR's existing delay slot. */
 		jr		ra
-        nop
+        lhu		R_Data,SP_Data0
 
 
 

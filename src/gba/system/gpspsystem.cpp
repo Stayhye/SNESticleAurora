@@ -935,9 +935,9 @@ void GpSPSystem::ExecuteFrame(Emu::SysInputT *pInput,
         const Uint32 rawPad = InputGetPadData(0);
         const Bool r2 = (rawPad & PAD_R2) ? TRUE : FALSE;
         m_p->turboShoulderL = (r2 && (rawPad & PAD_L1)) ? TRUE : FALSE;
-        m_p->turboShoulderR = (r2 && (rawPad & PAD_L2)) ? TRUE : FALSE;
-    } /* AURORA_GPSP_GBA_V13_BITMASK_TURBO_INPUT_20260911:
-       * R2+L1 = Turbo L; R2+L2 = Turbo R. */
+        m_p->turboShoulderR = (r2 && (rawPad & PAD_R1)) ? TRUE : FALSE;
+    } /* AURORA_GBA_SHOULDER_TURBO_FIX_V3_20260922:
+       * R2+L1 = Turbo L; R2+R1 = Turbo R. L2 remains frontend-only. */
     m_p->target = pTarget;
     m_p->mix = pMixBuf;
     s_GpSPHost = m_p;

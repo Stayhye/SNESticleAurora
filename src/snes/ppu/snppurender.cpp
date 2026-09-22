@@ -385,6 +385,38 @@ static _INLINE Uint32 _SnesPPUClamp5(Int32 n)
 	return (Uint32)n;
 }
 
+/* AURORA_SNES_PSEUDOHIRES_CRT_MERGE_V2_20260921
+ * Pseudo-hires is a 512-dot main/sub alternation. Aurora's PS2 output
+ * texture is intentionally 256 pixels wide, so preserve the visual result
+ * expected on a CRT by averaging each adjacent sub/main half-pixel pair.
+ * Work in native SNES BGR555; master brightness remains in the existing GS
+ * stage. This path is presentation-only and never mutates PPU state. */
+static _INLINE Uint16 _SnesPPUAveragePseudoHires15(Uint16 uMain, Uint16 uSub)
+{
+	/* AURORA_SNES_PSEUDOHIRES_PACKED_FAST_V3_20260921
+	 * Packed BGR555 floor-average. Clear each channel LSB before >>1 so
+	 * carries cannot cross channel boundaries; add the LSB back only when
+	 * both inputs had it. This is exactly floor((main+sub)/2) per channel. */
+	return (Uint16)(
+		((uMain & 0x7BDEu) >> 1) +
+		((uSub  & 0x7BDEu) >> 1) +
+		(uMain & uSub & 0x0421u));
+}
+
+static void _SnesPPUBuildPseudoHiresLine(
+	Uint16 *pOut, const SNPPUBlendInfoT *pInfo, const Uint16 *pCGRAM)
+{
+	Uint32 i;
+	for (i = 0; i < 256; ++i)
+	{
+		const Uint16 uMain =
+			(Uint16)(pCGRAM[pInfo->uMain8[i]] & 0x7FFFu);
+		const Uint16 uSub =
+			(Uint16)(pCGRAM[pInfo->uSub8[i]] & 0x7FFFu);
+		pOut[i] = _SnesPPUAveragePseudoHires15(uMain, uSub);
+	}
+}
+
 static void _SnesPPUBuildMode34DirectLine(Uint16 *pOut,
 	const SNPPUBlendInfoT *pInfo, const Uint16 *pCGRAM, Uint16 uFixedColor,
 	const SNMaskT *pColorMask, Bool bUseSubscreen, Bool bSubtract)
@@ -471,6 +503,11 @@ void SnesPPURender::RenderLine32(Int32 iLine, Bool bPlanar)
 	 * This scanline render is synchronous. Cache exact immutable fields
 	 * from the already-snapshotted register image. */
 	const Uint8 uBGMode = (Uint8)(pRegs->bgmode & 7);
+#if CODE_PLATFORM == CODE_PS2
+	/* AURORA_SNES_PSEUDOHIRES_CRT_MERGE_V2_20260921: native Mode 5/6 already has its own hires phase path. */
+	const Bool bPseudoHires =
+		m_pPPU->IsPseudoHires() && (uBGMode != 5) && (uBGMode != 6);
+#endif
 	/* AURORA_SNES_SAFE_PERF_V4_20260919: both brightness and force-blank come from the same byte. */
 	const Uint8 uINIDISP = pRegs->inidisp;
 	const Uint32 uIntensity = (Uint32)(uINIDISP & 0x0F);
@@ -614,7 +651,7 @@ static Bool bPrint = TRUE;
 		   all add/sub masks are mathematically unable to change the result.
 		   With main clipping disabled and brightness at 15, the GS can expand
 		   the indexed main line directly into the output texture. */
-		bDirectMain = !bBG1DirectPixels &&
+		bDirectMain = !bPseudoHires && !bBG1DirectPixels &&
 		              (uEffectiveCGADSUB & 0x3F) == 0 &&
 		              (uEffectiveCGWSEL & 0xC0) == 0 &&
 		              uIntensity == 15;
@@ -713,7 +750,49 @@ static Bool bPrint = TRUE;
 #endif
 		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_BLEND);
 #if CODE_PLATFORM == CODE_PS2
-		if (bBG1DirectPixels)
+		if (bPseudoHires && !bBG1DirectPixels &&
+		    (uEffectiveCGADSUB & 0x3F) == 0 &&
+		    (uEffectiveCGWSEL & 0xC0) == 0)
+		{
+			Uint16 PseudoHiresLine[256] _ALIGN(16);
+			Int32 iPixel;
+
+			/* AURORA_SNES_PSEUDOHIRES_CRT_MERGE_V2_20260921: Jurassic Park/Kirby-style pseudo transparency.
+			 * RenderLine8 has already produced both TM and TS. Collapse each
+			 * sub/main half-pixel pair to one BGR555 output sample. */
+			_SnesPPUBuildPseudoHiresLine(
+				PseudoHiresLine, pBlendInfo, pCGData);
+
+			/* Reuse the proven final-line indexed carrier used by the direct
+			 * color path. Entry zero must be opaque because all 256 palette
+			 * entries now represent already-resolved output pixels. */
+			m_pBlend->UpdatePalette(pBlendInfo, PseudoHiresLine, 15);
+			pBlendInfo->Pal[0].Color32[0] |= 0x80000000u;
+			for (iPixel = 0; iPixel < 256; ++iPixel)
+				pBlendInfo->uMain8[iPixel] = (Uint8)iPixel;
+
+			/* AURORA_SNES_PSEUDOHIRES_PACKED_FAST_V3_20260921: the line is already fully resolved. At brightness
+			 * 15, NULL selects the existing identity/direct-main GS list,
+			 * avoiding sub/attrib staging and a redundant second blend. */
+			if (uIntensity == 15)
+			{
+				m_pBlend->Exec(pBlendInfo, iLine, 0, NULL, FALSE, 15);
+			}
+			else
+			{
+				SNMaskT PseudoOutputMask[3];
+				SNMaskSet(&PseudoOutputMask[0]);
+				SNMaskClear(&PseudoOutputMask[1]);
+				SNMaskClear(&PseudoOutputMask[2]);
+				m_pBlend->Exec(pBlendInfo, iLine, 0, PseudoOutputMask,
+					FALSE, uIntensity);
+			}
+
+			/* Exec staged its sources; restore the real CGRAM palette for the
+			 * next ordinary scanline exactly like the direct-color carrier. */
+			m_pBlend->UpdatePalette(pBlendInfo, pCGData, uIntensity);
+		}
+		else if (bBG1DirectPixels)
 		{
 			Uint16 DirectLine[256] _ALIGN(16);
 			Int32 iPixel;
