@@ -3052,10 +3052,18 @@ void SnesSystem::SetSnesRom(SnesRom *pRom)
 		{
 			/* AURORA_MEGA_V5_COLD_BOOT_WRAM
 			 * Real power-on WRAM is undefined/random-looking. Randomise only when a
-			 * new cartridge is attached, never on RESET or save-state restore. */
+			 * new cartridge is attached, never on RESET or save-state restore.
+			 *
+			 * AURORA_SNES_COLD_BOOT_SESSION_INDEPENDENT_V1_20260922
+			 * Host allocator addresses and process-global rand() history are not SNES
+			 * hardware state. Derive the pseudo-power pattern from the immutable file
+			 * identity already captured by SnesRom, so a cartridge cold-boots the same
+			 * way regardless of which emulator/core/game was loaded before it. This is
+			 * a universal determinism rule: no title, CRC value or compatibility list. */
 			Uint32 uAuroraSeed =
-				((Uint32)(unsigned long)m_pRom ^ (Uint32)rand() ^
-				 ((Uint32)rand() << 16) ^ 0xA5C31F27u);
+				m_pRom->GetRawFileCRC32() ^
+				(m_pRom->GetRawFileBytes() * 0x9E3779B9u) ^
+				0xA5C31F27u;
 			if (!uAuroraSeed) uAuroraSeed = 0x6D2B79F5u;
 			for (Uint32 i = 0; i < (Uint32)sizeof(m_Ram); ++i)
 			{
