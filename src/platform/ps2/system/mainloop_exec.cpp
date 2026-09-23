@@ -7,7 +7,6 @@
 #include "file.h"
 #include "mainloop_exec.h"
 #include "mainloop_shared.h"
-#include "mainloop_safe_frameskip.h" /* AURORA_SAFE_FRAMESKIP_CORE_PRESSURE_FINAL_V1_20260923 */
 #include "platform/ps2/system/aurora_runtime_trace.h"
 #include "platform/ps2/system/aurora_ee_crash_diag.h"
 
@@ -62,9 +61,7 @@ Bool _ExecuteSnes(CRenderSurface *pSurface, CMixBuffer *pMixBuffer, Emu::SysInpu
 			AuroraEECrashDiagBreadcrumb(
 			    AED_HOST_FRAME_CALL_ENTER,
 			    (Uint32)_pSystem->GetFrame(), 0u);
-			MainLoopSafeFrameskipCoreBegin();
 		    _pSystem->ExecuteFrame(pInput, pSurface, pMixBuffer, eMode);
-			MainLoopSafeFrameskipCoreEnd();
 			AuroraEECrashDiagBreadcrumb(
 			    AED_HOST_FRAME_CALL_RETURN,
 			    (Uint32)_pSystem->GetFrame(), 0u);

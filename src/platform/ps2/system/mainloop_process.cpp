@@ -373,9 +373,7 @@ Bool MainLoopProcess()
             {
                 QuicknesBridge_SetSkipVideo(bSafeSkip ? true : false);
                 PROF_ENTER("NesExecuteFrame");
-                MainLoopSafeFrameskipCoreBegin();
                 _pNes->ExecuteFrame(&Input, pSurface, pMixBuffer, eMode);
-                MainLoopSafeFrameskipCoreEnd();
                 PROF_LEAVE("NesExecuteFrame");
                 if (!bSafeSkip && !QuicknesBridge_CanDirectGsVideo())
                 {
@@ -391,9 +389,7 @@ Bool MainLoopProcess()
                 if (bSafeSkip)
                     FceummFdsBridge_SetSkipVideo(true);
                 PROF_ENTER("FdsExecuteFrame");
-                MainLoopSafeFrameskipCoreBegin();
                 _pFds->ExecuteFrame(&Input, pSurface, pMixBuffer, eMode);
-                MainLoopSafeFrameskipCoreEnd();
                 PROF_LEAVE("FdsExecuteFrame");
                 {
                     /* AURORA_FCEUMM_FDS_V12_3B_BRIDGE_HOTPATH_FIX_20260827: drive state changes only on load/eject/insert/restore. */
@@ -563,7 +559,6 @@ Bool MainLoopProcess()
                 /* AURORA_ASYNC_CDDA_VIDEO_ABSOLUTE_V4_20260830
                  * No CDDA storage work is permitted on this thread. */
                 PROF_ENTER("SegaExecuteFrame");
-                MainLoopSafeFrameskipCoreBegin();
                 for (Int32 iPdFrame = 0;
                      iPdFrame < executeFrames;
                      ++iPdFrame)
@@ -594,7 +589,6 @@ Bool MainLoopProcess()
                     _pSega->ExecuteFrame(
                         &Input, pSurface, pMixBuffer, eMode);
                 }
-                MainLoopSafeFrameskipCoreEnd();
                 PROF_LEAVE("SegaExecuteFrame");
 
                 /* AURORA_ASYNC_CDDA_VIDEO_ABSOLUTE_V4_20260830
@@ -617,9 +611,7 @@ Bool MainLoopProcess()
                 /* AURORA_ASYNC_CDDA_VIDEO_ABSOLUTE_V4_20260830 */
                 PceBridge_SetSkipVideo(bSafeSkip ? true : false);
                 PROF_ENTER("PceExecuteFrame");
-                MainLoopSafeFrameskipCoreBegin();
                 _pPce->ExecuteFrame(&Input, pSurface, pMixBuffer, eMode);
-                MainLoopSafeFrameskipCoreEnd();
                 PROF_LEAVE("PceExecuteFrame");
                 /* AURORA_ASYNC_CDDA_VIDEO_ABSOLUTE_V4_20260830
                  * CDDA underrun cannot influence presentation timing. */
@@ -635,10 +627,8 @@ Bool MainLoopProcess()
             else if (_pSystem == _pGb)
             {
                 PROF_ENTER("GbExecuteFrame");
-                MainLoopSafeFrameskipCoreBegin();
                 _pGb->ExecuteFrame(&Input,
                     bSafeSkip ? NULL : pSurface, pMixBuffer, eMode);
-                MainLoopSafeFrameskipCoreEnd();
                 PROF_LEAVE("GbExecuteFrame");
 
                 if (!bSafeSkip)
@@ -667,10 +657,8 @@ Bool MainLoopProcess()
                 }
 
                 PROF_ENTER("GbaExecuteFrame");
-                MainLoopSafeFrameskipCoreBegin();
                 _pGba->ExecuteFrame(&Input,
                     bSafeSkip ? NULL : pSurface, pMixBuffer, eMode);
-                MainLoopSafeFrameskipCoreEnd();
                 PROF_LEAVE("GbaExecuteFrame");
 
                 /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912

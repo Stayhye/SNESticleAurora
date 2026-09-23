@@ -10,9 +10,6 @@ Bool MainLoopSafeFrameskipGetEnabled(void);
 void MainLoopSafeFrameskipSetEnabled(Bool enabled);
 /* AURORA_SAFE_FRAMESKIP_PICODRIVE_AUTO_V1: PicoDrive-style Auto decision once per host tick. */
 Bool MainLoopSafeFrameskipTake(Bool allowed);
-/* AURORA_SAFE_FRAMESKIP_CORE_PRESSURE_FINAL_V1_20260923: core-only EE timing; excludes host presentation/IOP. */
-void MainLoopSafeFrameskipCoreBegin(void);
-void MainLoopSafeFrameskipCoreEnd(void);
 Bool MainLoopSafeFrameskipConsumePresentationSkip(void);
 /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830
  * CDDA may request ONE host skip so synchronous storage refill happens
