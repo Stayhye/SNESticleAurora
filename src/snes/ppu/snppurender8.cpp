@@ -590,13 +590,22 @@ static void _FetchCHR2_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRende
 			#if SNDBG_LOG
 			g_DbgBGCacheMisses++;
 			#endif
-			uMask = _SnesPPU_HFlipLookup[1][uPlane0 | uPlane1];
-			uTile0  = (*pLookup)[uPlane0] << 0;
-			uTile0 |= (*pLookup)[uPlane1] << 1;
-			SnesPPUChrCacheStore2(&_SnesPPU_ChrCache, uRowAddr,
-				uTile0, uMask);
-			if (pTiles->uFlip & 1)
-				SnesPPUChrCacheFlipRow(&uTile0, &uMask);
+			/* AURORA_SNES_RENDERER_PERF_V8_BG_BLANK_MISS
+			 * Zero source planes decode to zero data/opacity in either H orientation. */
+			const Uint32 uSourceMask = uPlane0 | uPlane1;
+			if (!uSourceMask)
+			{
+				uTile0 = 0; uMask = 0;
+				SnesPPUChrCacheStore2(&_SnesPPU_ChrCache, uRowAddr, 0, 0);
+			}
+			else
+			{
+				uMask = _SnesPPU_HFlipLookup[1][uSourceMask];
+				uTile0  = (*pLookup)[uPlane0] << 0;
+				uTile0 |= (*pLookup)[uPlane1] << 1;
+				SnesPPUChrCacheStore2(&_SnesPPU_ChrCache, uRowAddr, uTile0, uMask);
+				if (pTiles->uFlip & 1) SnesPPUChrCacheFlipRow(&uTile0, &uMask);
+			}
 		}
 		#else
 		{
@@ -714,23 +723,32 @@ static void _FetchCHR4_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRende
 			#if SNDBG_LOG
 			g_DbgBGCacheMisses++;
 			#endif
-			uMask = _SnesPPU_HFlipLookup[1]
-				[uPlane0 | uPlane1 | uPlane2 | uPlane3];
-			uTile0  = (*pLookup)[uPlane0] << 0;
-			uTile0 |= (*pLookup)[uPlane1] << 1;
-			uTile0 |= (*pLookup)[uPlane2] << 2;
-			uTile0 |= (*pLookup)[uPlane3] << 3;
-			SnesPPUChrCacheStore4(&_SnesPPU_ChrCache, uRowAddr,
-				uTile0, uMask);
-			/* AURORA_BG_HFLIP_MISS_REUSE_V1 */
-			if (pTiles->uFlip & 1)
+			/* AURORA_SNES_RENDERER_PERF_V8_BG_BLANK_MISS
+			 * Skip four planar LUT reads and H-flip materialization for a zero row. */
+			const Uint32 uSourceMask = uPlane0 | uPlane1 | uPlane2 | uPlane3;
+			if (!uSourceMask)
 			{
+				uTile0 = 0; uMask = 0;
+				SnesPPUChrCacheStore4(&_SnesPPU_ChrCache, uRowAddr, 0, 0);
+			}
+			else
+			{
+				uMask = _SnesPPU_HFlipLookup[1][uSourceMask];
+				uTile0  = (*pLookup)[uPlane0] << 0;
+				uTile0 |= (*pLookup)[uPlane1] << 1;
+				uTile0 |= (*pLookup)[uPlane2] << 2;
+				uTile0 |= (*pLookup)[uPlane3] << 3;
+				SnesPPUChrCacheStore4(&_SnesPPU_ChrCache, uRowAddr, uTile0, uMask);
+				/* AURORA_BG_HFLIP_MISS_REUSE_V1 */
+				if (pTiles->uFlip & 1)
+				{
 #if SNPPU_CHR_CACHE_HFLIP
-				SnesPPUChrCacheLoad4HFlip(
-					&_SnesPPU_ChrCache, uRowAddr, &uTile0, &uMask);
+					SnesPPUChrCacheLoad4HFlip(
+						&_SnesPPU_ChrCache, uRowAddr, &uTile0, &uMask);
 #else
-				SnesPPUChrCacheFlipRow(&uTile0, &uMask);
+					SnesPPUChrCacheFlipRow(&uTile0, &uMask);
 #endif
+				}
 			}
 		}
 		#else
@@ -967,19 +985,32 @@ static _INLINE void _SnesPPUMode5GetCHR2Row64(
 #endif
 
 	{
-		const SnesPPUTile2T *pTile2 =
-			(const SnesPPUTile2T *)(pVram + uRowAddr);
-		const SnesChrLookup64T *pLookup =
-			(const SnesChrLookup64T *)SNPPU_BG_PLANE0_LOOKUP;
-		Uint32 uPlane0 = pTile2->uPlane01[0][0];
-		Uint32 uPlane1 = pTile2->uPlane01[0][1];
+		/* AURORA_SNES_PPU_EE_MODE56_PAIRLOAD_V1_20260922
+		 * Default BG cache is off on PS2. Mirror the proven normal-BG direct
+		 * path: fetch the two bitplanes as one VRAM word, keep exact 15-bit
+		 * word wrapping, and avoid both LUT reads for a fully transparent row.
+		 * Zero bitplanes decode to exactly zero data/opacity. */
+		const Uint16 uPair01 =
+			pVram[uRowAddr & SNPPU_VRAM_WORD_MASK];
+		const Uint32 uPlane0 = (Uint32)(uPair01 & 0x00ffu);
+		const Uint32 uPlane1 = (Uint32)(uPair01 >> 8);
+		const Uint32 uAny = uPlane0 | uPlane1;
 
 #if SNPPU_BG_CACHE && SNDBG_LOG
 		g_DbgBGCacheMisses++;
 #endif
-		*pOpaque = _SnesPPU_HFlipLookup[1][uPlane0 | uPlane1];
-		*pData  = (*pLookup)[uPlane0] << 0;
-		*pData |= (*pLookup)[uPlane1] << 1;
+		*pOpaque = _SnesPPU_HFlipLookup[1][uAny];
+		if (uAny)
+		{
+			const SnesChrLookup64T *pLookup =
+				(const SnesChrLookup64T *)SNPPU_BG_PLANE0_LOOKUP;
+			*pData  = (*pLookup)[uPlane0] << 0;
+			*pData |= (*pLookup)[uPlane1] << 1;
+		}
+		else
+		{
+			*pData = 0;
+		}
 
 #if SNPPU_BG_CACHE
 		SnesPPUChrCacheStore2(
@@ -1007,25 +1038,38 @@ static _INLINE void _SnesPPUMode5GetCHR4Row64(
 #endif
 
 	{
-		const SnesPPUTile4T *pTile4 =
-			(const SnesPPUTile4T *)(pVram + uRowAddr);
-		const SnesChrLookup64T *pLookup =
-			(const SnesChrLookup64T *)SNPPU_BG_PLANE0_LOOKUP;
-		Uint32 uPlane0 = pTile4->uPlane01[0][0];
-		Uint32 uPlane1 = pTile4->uPlane01[0][1];
-		Uint32 uPlane2 = pTile4->uPlane23[0][0];
-		Uint32 uPlane3 = pTile4->uPlane23[0][1];
+		/* AURORA_SNES_PPU_EE_MODE56_PAIRLOAD_V1_20260922
+		 * Four planar bytes become two aligned logical VRAM-word fetches.
+		 * The +8 plane pair wraps independently at 32K words, matching SNES
+		 * VRAM addressing and the normal 4bpp hot path. A blank row skips all
+		 * four planar LUT reads with an exact zero decoded result. */
+		const Uint16 uPair01 =
+			pVram[uRowAddr & SNPPU_VRAM_WORD_MASK];
+		const Uint16 uPair23 =
+			pVram[(uRowAddr + 8u) & SNPPU_VRAM_WORD_MASK];
+		const Uint32 uPlane0 = (Uint32)(uPair01 & 0x00ffu);
+		const Uint32 uPlane1 = (Uint32)(uPair01 >> 8);
+		const Uint32 uPlane2 = (Uint32)(uPair23 & 0x00ffu);
+		const Uint32 uPlane3 = (Uint32)(uPair23 >> 8);
+		const Uint32 uAny = uPlane0 | uPlane1 | uPlane2 | uPlane3;
 
 #if SNPPU_BG_CACHE && SNDBG_LOG
 		g_DbgBGCacheMisses++;
 #endif
-		*pOpaque = _SnesPPU_HFlipLookup[1][
-			uPlane0 | uPlane1 | uPlane2 | uPlane3
-		];
-		*pData  = (*pLookup)[uPlane0] << 0;
-		*pData |= (*pLookup)[uPlane1] << 1;
-		*pData |= (*pLookup)[uPlane2] << 2;
-		*pData |= (*pLookup)[uPlane3] << 3;
+		*pOpaque = _SnesPPU_HFlipLookup[1][uAny];
+		if (uAny)
+		{
+			const SnesChrLookup64T *pLookup =
+				(const SnesChrLookup64T *)SNPPU_BG_PLANE0_LOOKUP;
+			*pData  = (*pLookup)[uPlane0] << 0;
+			*pData |= (*pLookup)[uPlane1] << 1;
+			*pData |= (*pLookup)[uPlane2] << 2;
+			*pData |= (*pLookup)[uPlane3] << 3;
+		}
+		else
+		{
+			*pData = 0;
+		}
 
 #if SNPPU_BG_CACHE
 		SnesPPUChrCacheStore4(
@@ -1160,64 +1204,80 @@ static void _FetchCHR4Mode5_64(
 
 static void _FetchCHR8_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles, Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask)
 {
-	SNPPUBg8FlipT *pFlip;
+	const SNPPUBg8FlipT *pFlip;
 
 	PROF_ENTER("_FetchCHR8_64");
 
 	while (nTiles > 0)
 	{
-		SnesPPUTile8T *pTile8;
-		Uint32 uTileAddr;
+		Uint32 uTileAddr, uRowAddr;
 		Uint32 uPlane0, uPlane1, uPlane2, uPlane3;
 		Uint32 uPlane4, uPlane5, uPlane6, uPlane7;
 		Uint64 uTile0;
 		Uint32 uMask;
-		SnesChrLookup64T *pLookup;
-		Uint8 *pHFlip;
+		Uint32 uAny;
 
 		pFlip = &_FlipTable8[pTiles->uFlip];
 
 		// calculate tile address
 		uTileAddr = (uBaseAddr + pTiles->uTile * 32) & 0x7FFF;
+		uRowAddr = uTileAddr +
+			((uScrollY + pTiles->uOffsetY) ^ pFlip->uFlipXOR);
 
-		// get pointer to tile data (y flipped)
-		pTile8 = (SnesPPUTile8T *)(pVram + uTileAddr + ((uScrollY+pTiles->uOffsetY) ^ pFlip->uFlipXOR));
+		/* AURORA_SNES_PPU_EE_8BPP_PAIRLOAD_V2_20260922
+		 * Eight byte loads become the four native VRAM bitplane-word loads
+		 * already used by the optimized 2/4bpp paths. Each pair wraps at the
+		 * 32K-word VRAM boundary. The OR needed for opacity doubles as an exact
+		 * blank-row test, so fully transparent rows skip all eight LUT reads. */
+		{
+			const Uint16 uPair01 =
+				pVram[uRowAddr & SNPPU_VRAM_WORD_MASK];
+			const Uint16 uPair23 =
+				pVram[(uRowAddr + 8u) & SNPPU_VRAM_WORD_MASK];
+			const Uint16 uPair45 =
+				pVram[(uRowAddr + 16u) & SNPPU_VRAM_WORD_MASK];
+			const Uint16 uPair67 =
+				pVram[(uRowAddr + 24u) & SNPPU_VRAM_WORD_MASK];
 
-		// get tile plane bits
-		uPlane0 = pTile8->uPlane01[0][0];
-		uPlane1 = pTile8->uPlane01[0][1];
-		uPlane2 = pTile8->uPlane23[0][0];
-		uPlane3 = pTile8->uPlane23[0][1];
-		uPlane4 = pTile8->uPlane45[0][0];
-		uPlane5 = pTile8->uPlane45[0][1];
-		uPlane6 = pTile8->uPlane67[0][0];
-		uPlane7 = pTile8->uPlane67[0][1];
+			uPlane0 = (Uint32)(uPair01 & 0x00ffu);
+			uPlane1 = (Uint32)(uPair01 >> 8);
+			uPlane2 = (Uint32)(uPair23 & 0x00ffu);
+			uPlane3 = (Uint32)(uPair23 >> 8);
+			uPlane4 = (Uint32)(uPair45 & 0x00ffu);
+			uPlane5 = (Uint32)(uPair45 >> 8);
+			uPlane6 = (Uint32)(uPair67 & 0x00ffu);
+			uPlane7 = (Uint32)(uPair67 >> 8);
+		}
 
-		pLookup = (SnesChrLookup64T *)pFlip->pLookup;
-		pHFlip  = pFlip->pFlipLookup;
+		uAny = uPlane0 | uPlane1 | uPlane2 | uPlane3 |
+			uPlane4 | uPlane5 | uPlane6 | uPlane7;
+		uMask = pFlip->pFlipLookup[uAny];
 
-		// create mask
-		uMask = uPlane0 | uPlane1 | uPlane2 | uPlane3 | uPlane4 | uPlane5 | uPlane6 | uPlane7;
-		uMask = pHFlip[uMask];
+		if (uAny)
+		{
+			const SnesChrLookup64T *pLookup =
+				(const SnesChrLookup64T *)pFlip->pLookup;
+			uTile0  = (*pLookup)[uPlane0] << 0;
+			uTile0 |= (*pLookup)[uPlane1] << 1;
+			uTile0 |= (*pLookup)[uPlane2] << 2;
+			uTile0 |= (*pLookup)[uPlane3] << 3;
+			uTile0 |= (*pLookup)[uPlane4] << 4;
+			uTile0 |= (*pLookup)[uPlane5] << 5;
+			uTile0 |= (*pLookup)[uPlane6] << 6;
+			uTile0 |= (*pLookup)[uPlane7] << 7;
+		}
+		else
+		{
+			uTile0 = 0;
+		}
 
-		// decode tile
-		uTile0  = (*pLookup)[uPlane0] << 0;
-		uTile0 |= (*pLookup)[uPlane1] << 1;
-		uTile0 |= (*pLookup)[uPlane2] << 2;
-		uTile0 |= (*pLookup)[uPlane3] << 3;
-		uTile0 |= (*pLookup)[uPlane4] << 4;
-		uTile0 |= (*pLookup)[uPlane5] << 5;
-		uTile0 |= (*pLookup)[uPlane6] << 6;
-		uTile0 |= (*pLookup)[uPlane7] << 7;
-
-		pMask[ 0] = uMask;
+		pMask[0] = uMask;
 		pMask[SNPPU_BGPLANE_SIZE] = (pTiles->uPal & 8) ? uMask : 0;
 		pMask++;
 
-		// store tile data
 		((Uint64 *)pDest)[0] = uTile0;
 
-		pDest+=8;
+		pDest += 8;
 		pTiles++;
 		nTiles--;
 	}
