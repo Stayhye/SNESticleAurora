@@ -105,7 +105,7 @@ static Uint32 s_SafeFrameskipFlickerSkipCount = 0;
 static Bool   s_SafeFrameskipFlickerCompensate = FALSE;
 static Bool   s_SafeFrameskipCdAudioWindowRequested = FALSE;
 
-/* AURORA_SAFE_FRAMESKIP_RECOVERY_ONLY_V3_20260923
+/* AURORA_SAFE_FRAMESKIP_PREFLIP_HEALTH_V2_20260923
  *
  * Aim remains the catch-up scheduler: it is the part that actually detects
  * accumulated missed host-frame budget and makes Safe Frameskip useful.
@@ -115,10 +115,11 @@ static Bool   s_SafeFrameskipCdAudioWindowRequested = FALSE;
  * will be visible, and ends after GPFifoFlush() but BEFORE GSK_SyncFlip().
  * Therefore it includes core execution, texture/upload work and GS command
  * preparation, while excluding the blocking VBlank/flip and post-VBlank
- * audsrv/SIF service. Those excluded host-side waits may vary across PS2
- * revisions. The sample is recovery-only: it must NEVER prevent Aim/debt
- * from starting a skip burst. A presented recovery frame is healthy when
- * its recoverable pre-flip work fits within one learned host period.
+ * audsrv/SIF service.  Those excluded host-side waits may vary across PS2
+ * revisions and must not, by themselves, manufacture a skip burst.
+ *
+ * A frame is "clearly healthy" only with >= 12.5% pre-flip headroom.  Near-
+ * budget or heavy frames remain ambiguous and keep the normal Aim debt.
  */
 static Uint32 s_SafeFrameskipWorkStart = 0;
 static Uint32 s_SafeFrameskipLastPresentedWork = 0;
@@ -151,15 +152,16 @@ static void _MainLoopSafeFrameskipResetFlickerPhase(void)
     s_SafeFrameskipFlickerCompensate = FALSE;
 }
 
-static Bool _MainLoopSafeFrameskipPresentedWorkHealthyForRecovery(void)
+static Bool _MainLoopSafeFrameskipPresentedWorkClearlyHealthy(void)
 {
     if (!s_SafeFrameskipWorkSampleValid || s_SafeFrameskipPeriod == 0u)
         return FALSE;
 
-    /* Recovery-only oracle. Finishing early is healthy; there is no lower
-     * bound and, critically, this result must never gate skip activation. */
-    return ((Uint64)s_SafeFrameskipLastPresentedWork <=
-            (Uint64)s_SafeFrameskipPeriod) ? TRUE : FALSE;
+    /* Require at least 1/8 frame of headroom.  This is intentionally stricter
+     * than merely saying work <= period: a 99%-budget frame is not evidence
+     * that the lateness came from the host. */
+    return ((Uint64)s_SafeFrameskipLastPresentedWork * 8u <=
+            (Uint64)s_SafeFrameskipPeriod * 7u) ? TRUE : FALSE;
 }
 
 static void _MainLoopSafeFrameskipLearn(Uint32 delta, Bool gameplay)
@@ -351,6 +353,22 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
      * the historical short counter-wrap behaviour. */
     diff = (Int32)(s_SafeFrameskipAim - now);
 
+    /* V2 host-latency filter.
+     *
+     * If Aim says we are over one frame late BUT the most recent presented
+     * frame completed all recoverable pre-flip work with >=12.5% headroom,
+     * that debt is not credible evidence of an overloaded emulation/render
+     * path.  Rebase before spending a hidden frame.  Heavy and near-budget
+     * samples do NOT enter this branch, so normal catch-up remains intact. */
+    if (diff < -target && _MainLoopSafeFrameskipPresentedWorkClearlyHealthy())
+    {
+        s_SafeFrameskipAim = now;
+        s_SafeFrameskipConsecutive = 0;
+        s_SafeFrameskipRecoveryPending = FALSE;
+        _MainLoopSafeFrameskipResetFlickerPhase();
+        diff = 0;
+    }
+
     /* Original Aim/debt catch-up, including the level-1 parity guard. */
     if (s_SafeFrameskipLevel == 1 &&
         s_SafeFrameskipFlickerCompensate &&
@@ -480,7 +498,7 @@ static void _MainLoopSafeFrameskipAfterFlip(void)
              * existed while its pre-flip sample was measured.  Learn() may
              * refine Period afterwards. */
             const Bool healthyPresentedFrame =
-                _MainLoopSafeFrameskipPresentedWorkHealthyForRecovery();
+                _MainLoopSafeFrameskipPresentedWorkClearlyHealthy();
 
             /* Flip-to-flip remains calibration only. Hidden-frame spans are
              * rejected by Learn(); they do not define current-frame health. */

@@ -53,14 +53,13 @@ static void _SpcDebugWrite(SNSpcT *pSpc, Uint32 uAddr, Uint32 uData)
 #endif
 
 /* AURORA_ZENKI_APUIO_F1_COLLISION_V1_1_20260920
- * A latch reset through SPC $F1 wins over a 65816 APUIO write which lands
- * in that same SPC700 cycle.  The existing queue already handles the other
- * ordering (CPU write queued first, then $F1 clears it); this closes the
- * reverse host-ordering hole where $F1 executes first and an equal-cycle CPU
- * write would otherwise be enqueued/published afterwards.
+ * AURORA_APUIO_F1_EXACT_ORDER_FINAL_V1_20260922
  *
- * SNSPC_CYCLE is expressed in the same SNES master-clock domain as TOTAL.
- * Unsigned subtraction intentionally makes the comparison wrap-safe. */
+ * $F1 clears the CPU->APU data latch at the CONTROL write.  Preserve the
+ * Zenki reverse-host-order protection for a truly coincident CPU APUIO write,
+ * but do not extend that reset over the rest of the SPC700 instruction cycle:
+ * a CPU write with a later TOTAL timestamp is a future bus event and must
+ * survive.  Queue ordering itself remains in FRAME time. */
 Bool SNSpcIO::EnqueueWrite(
 	Uint32 uCycle, Uint32 uTotalCycle, Uint32 uAddr, Uint8 uData)
 {
@@ -74,13 +73,13 @@ Bool SNSpcIO::EnqueueWrite(
 			const Uint32 uResetTotal = (uGroup == 0x01u)
 				? m_uPortResetTotal01 : m_uPortResetTotal23;
 			const Uint32 uDelta = uTotalCycle - uResetTotal;
-			if (uDelta < (Uint32)SNSPC_CYCLE)
+			if (uDelta == 0u)
 			{
-				/* Hardware reset wins. TRUE means handled/discarded. */
+				/* Exactly coincident: the $F1 reset wins. TRUE = handled. */
 				return TRUE;
 			}
 
-			/* First write outside that SPC cycle retires the transient stamp. */
+			/* First non-coincident write is a later bus event; keep it. */
 			m_uPortResetValid &= (Uint8)~uGroup;
 		}
 	}

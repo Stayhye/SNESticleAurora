@@ -1531,6 +1531,7 @@ static _INLINE Int32 _SNSpcEchoFIR(const Int16 *l,const Int16 *c)
 	s+=(Int16)(((Int32)l[7]*c[7])>>6);
 	return _SNSpcClamp16(s)&~1;
 }
+
 static Uint32 _FilterEchoStereoARAM(SNSpcEchoSampleT *L,SNSpcEchoSampleT *R,Int32 n,Int32 fb,SNSpcDsp *dsp,Uint32 base,Uint32 pos,Uint32 size,const Int16 *coef,SNSpcFIRFilterT *f,Bool wr,Bool inputZero)
 {
 	Int32 fp=f[0].iPos;

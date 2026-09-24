@@ -93,37 +93,31 @@ static Uint32 _uVblankCycle;
  */
 static Int32  s_SafeFrameskipLevel = 1;
 static Bool   s_SafeFrameskipSkipPresentation = FALSE;
-static Uint32 s_SafeFrameskipAim = 0;
 static Uint32 s_SafeFrameskipConsecutive = 0;
 static Uint32 s_SafeFrameskipLastFlip = 0;
 static Uint32 s_SafeFrameskipPeriod = 0;
 static Uint32 s_SafeFrameskipSamples[3] = { 0, 0, 0 };
 static Uint32 s_SafeFrameskipSampleCount = 0;
 static Uint32 s_SafeFrameskipSamplePos = 0;
-static Bool   s_SafeFrameskipRecoveryPending = FALSE;
 static Uint32 s_SafeFrameskipFlickerSkipCount = 0;
 static Bool   s_SafeFrameskipFlickerCompensate = FALSE;
 static Bool   s_SafeFrameskipCdAudioWindowRequested = FALSE;
 
-/* AURORA_SAFE_FRAMESKIP_RECOVERY_ONLY_V3_20260923
+/* AURORA_SAFE_FRAMESKIP_CORE_PRESSURE_FINAL_V1_20260923
  *
- * Aim remains the catch-up scheduler: it is the part that actually detects
- * accumulated missed host-frame budget and makes Safe Frameskip useful.
+ * The old scheduler compared a wall-clock Aim with the current host tick.
+ * That made unrelated PS2 host latency eligible to become gameplay debt:
+ * GS/VBlank presentation, SIF/IOP/audsrv service time and other frontend work.
+ * Those paths are not equally implemented by every PS2 revision.
  *
- * The additional sample is deliberately narrower.  It begins after frontend
- * input/netplay scheduling, immediately after Take() decides that this frame
- * will be visible, and ends after GPFifoFlush() but BEFORE GSK_SyncFlip().
- * Therefore it includes core execution, texture/upload work and GS command
- * preparation, while excluding the blocking VBlank/flip and post-VBlank
- * audsrv/SIF service. Those excluded host-side waits may vary across PS2
- * revisions. The sample is recovery-only: it must NEVER prevent Aim/debt
- * from starting a skip burst. A presented recovery frame is healthy when
- * its recoverable pre-flip work fits within one learned host period.
+ * Keep the learned single-VBlank period only as a video-standard ruler.
+ * Normal skip pressure is produced exclusively by ExecuteFrame() time, sampled
+ * with the EE counter around each core call. No SCPH/model/chip detection.
  */
-static Uint32 s_SafeFrameskipWorkStart = 0;
-static Uint32 s_SafeFrameskipLastPresentedWork = 0;
-static Bool   s_SafeFrameskipWorkActive = FALSE;
-static Bool   s_SafeFrameskipWorkSampleValid = FALSE;
+static Uint64 s_SafeFrameskipCorePressure = 0;
+static Uint32 s_SafeFrameskipCoreStart = 0;
+static Bool   s_SafeFrameskipCoreActive = FALSE;
+static Bool   s_SafeFrameskipMeasureAllowed = FALSE;
 
 static Uint32 _MainLoopSafeFrameskipMedian3(Uint32 a, Uint32 b, Uint32 c)
 {
@@ -135,14 +129,12 @@ static Uint32 _MainLoopSafeFrameskipMedian3(Uint32 a, Uint32 b, Uint32 c)
 
 static void _MainLoopSafeFrameskipResetTiming(void)
 {
-    s_SafeFrameskipAim = 0;
     s_SafeFrameskipConsecutive = 0;
     s_SafeFrameskipSkipPresentation = FALSE;
-    s_SafeFrameskipRecoveryPending = FALSE;
-    s_SafeFrameskipWorkStart = 0;
-    s_SafeFrameskipLastPresentedWork = 0;
-    s_SafeFrameskipWorkActive = FALSE;
-    s_SafeFrameskipWorkSampleValid = FALSE;
+    s_SafeFrameskipCorePressure = 0;
+    s_SafeFrameskipCoreStart = 0;
+    s_SafeFrameskipCoreActive = FALSE;
+    s_SafeFrameskipMeasureAllowed = FALSE;
 }
 
 static void _MainLoopSafeFrameskipResetFlickerPhase(void)
@@ -151,23 +143,12 @@ static void _MainLoopSafeFrameskipResetFlickerPhase(void)
     s_SafeFrameskipFlickerCompensate = FALSE;
 }
 
-static Bool _MainLoopSafeFrameskipPresentedWorkHealthyForRecovery(void)
-{
-    if (!s_SafeFrameskipWorkSampleValid || s_SafeFrameskipPeriod == 0u)
-        return FALSE;
-
-    /* Recovery-only oracle. Finishing early is healthy; there is no lower
-     * bound and, critically, this result must never gate skip activation. */
-    return ((Uint64)s_SafeFrameskipLastPresentedWork <=
-            (Uint64)s_SafeFrameskipPeriod) ? TRUE : FALSE;
-}
-
 static void _MainLoopSafeFrameskipLearn(Uint32 delta, Bool gameplay)
 {
     if (delta == 0)
         return;
 
-    /* Acquire three mutually coherent VBlank intervals. */
+    /* Period learning is calibration only. It never creates skip pressure. */
     if (s_SafeFrameskipPeriod == 0)
     {
         if (s_SafeFrameskipSampleCount != 0)
@@ -202,8 +183,8 @@ static void _MainLoopSafeFrameskipLearn(Uint32 delta, Bool gameplay)
         return;
     }
 
-    /* Deliberately hidden frames make flip-to-flip span more than one VBlank;
-     * reject those intervals for period learning. */
+    /* Refine only from a coherent single-VBlank edge. Multi-VBlank intervals
+     * created by a deliberate hidden frame are rejected here. */
     if (gameplay)
     {
         if ((Uint64)delta * 4u < (Uint64)s_SafeFrameskipPeriod * 3u ||
@@ -223,6 +204,59 @@ static void _MainLoopSafeFrameskipLearn(Uint32 delta, Bool gameplay)
         s_SafeFrameskipSamples[0],
         s_SafeFrameskipSamples[1],
         s_SafeFrameskipSamples[2]);
+}
+
+void MainLoopSafeFrameskipCoreBegin(void)
+{
+    s_SafeFrameskipCoreActive = FALSE;
+    if (!s_SafeFrameskipMeasureAllowed ||
+        s_SafeFrameskipLevel <= 0 ||
+        s_SafeFrameskipSampleCount < 3u ||
+        s_SafeFrameskipPeriod == 0)
+        return;
+
+    s_SafeFrameskipCoreStart = ProfCtrGetCycle();
+    s_SafeFrameskipCoreActive = TRUE;
+}
+
+void MainLoopSafeFrameskipCoreEnd(void)
+{
+    Uint32 delta;
+    Uint64 period;
+    Uint64 work;
+    Uint64 cap;
+
+    if (!s_SafeFrameskipCoreActive)
+        return;
+
+    delta = ProfCtrGetCycle() - s_SafeFrameskipCoreStart;
+    s_SafeFrameskipCoreActive = FALSE;
+    s_SafeFrameskipCoreStart = 0;
+
+    if (delta == 0 || s_SafeFrameskipPeriod == 0)
+        return;
+
+    period = (Uint64)s_SafeFrameskipPeriod;
+    work = (Uint64)delta;
+
+    /* A debugger/trace stall must not manufacture a long skip tail. A genuinely
+     * very slow core still reaches maximum pressure in one sample. */
+    if (work > period * 4u)
+        work = period * 4u;
+
+    if (work <= period)
+    {
+        /* The emulated core fits the nominal frame budget again. Because this
+         * pressure intentionally excludes host presentation, there is no host
+         * wall-clock debt left to repay. Retire the burst immediately. */
+        s_SafeFrameskipCorePressure = 0;
+        return;
+    }
+
+    s_SafeFrameskipCorePressure += work - period;
+    cap = period * 3u;
+    if (s_SafeFrameskipCorePressure > cap)
+        s_SafeFrameskipCorePressure = cap;
 }
 
 Int32 MainLoopSafeFrameskipGetLevel(void)
@@ -274,19 +308,13 @@ void MainLoopSafeFrameskipCancelCdAudioWindow(void)
 
 Bool MainLoopSafeFrameskipTake(Bool allowed)
 {
-    Uint32 now;
-    Int32 diff;
-    const Int32 target = (Int32)s_SafeFrameskipPeriod;
+    const Uint64 target = (Uint64)s_SafeFrameskipPeriod;
+    const Bool pressured =
+        (target > 0u && s_SafeFrameskipCorePressure > target) ? TRUE : FALSE;
     Bool skip = FALSE;
 
-    /* Exactly one presentation one-shot is produced by each host decision. */
     s_SafeFrameskipSkipPresentation = FALSE;
-
-    /* A previous visible frame must have reached BeforeFlip already.  Clear
-     * only the in-progress latch here; the completed sample remains available
-     * as evidence for this decision. */
-    s_SafeFrameskipWorkStart = 0;
-    s_SafeFrameskipWorkActive = FALSE;
+    s_SafeFrameskipMeasureAllowed = FALSE;
 
     if (!allowed || s_SafeFrameskipLevel <= 0)
     {
@@ -296,8 +324,10 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
         return FALSE;
     }
 
-    /* Preserve the explicit CDDA one-shot policy.  It is not normal timing
-     * pressure and still obeys max_skip. */
+    s_SafeFrameskipMeasureAllowed = TRUE;
+
+    /* Preserve the existing CDDA one-shot policy. It is explicit storage
+     * policy, not a normal timing-pressure decision, and still obeys max_skip. */
     if (s_SafeFrameskipCdAudioWindowRequested)
     {
         s_SafeFrameskipCdAudioWindowRequested = FALSE;
@@ -305,62 +335,32 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
 
         if (s_SafeFrameskipConsecutive >= (Uint32)s_SafeFrameskipLevel)
         {
-            _MainLoopSafeFrameskipResetTiming();
-            if (s_SafeFrameskipSampleCount >= 3u && s_SafeFrameskipPeriod != 0u)
-            {
-                s_SafeFrameskipWorkStart = ProfCtrGetCycle();
-                s_SafeFrameskipWorkActive = TRUE;
-            }
+            s_SafeFrameskipConsecutive = 0;
             return FALSE;
         }
 
-        if (s_SafeFrameskipSampleCount >= 3u && target > 0)
-        {
-            now = ProfCtrGetCycle();
-            if (s_SafeFrameskipAim == 0)
-                s_SafeFrameskipAim = now;
-
-            ++s_SafeFrameskipConsecutive;
-            s_SafeFrameskipAim += s_SafeFrameskipPeriod;
-        }
-        else
-        {
-            ++s_SafeFrameskipConsecutive;
-        }
-
+        ++s_SafeFrameskipConsecutive;
         s_SafeFrameskipSkipPresentation = TRUE;
         return TRUE;
     }
 
-    if (s_SafeFrameskipSampleCount < 3u || target <= 0)
+    if (s_SafeFrameskipSampleCount < 3u || target == 0u)
     {
-        _MainLoopSafeFrameskipResetTiming();
+        s_SafeFrameskipConsecutive = 0;
         return FALSE;
     }
 
-    now = ProfCtrGetCycle();
-
-    /* PicoDrive reset_timing equivalent. First eligible tick establishes aim. */
-    if (s_SafeFrameskipAim == 0)
-    {
-        s_SafeFrameskipAim = now;
-        s_SafeFrameskipConsecutive = 0;
-    }
-
-    /* Uint32 subtraction followed by Int32 interpretation intentionally keeps
-     * the historical short counter-wrap behaviour. */
-    diff = (Int32)(s_SafeFrameskipAim - now);
-
-    /* Original Aim/debt catch-up, including the level-1 parity guard. */
+    /* Same level-1 parity guard as the current build, but it can only rotate
+     * while core pressure is still real. */
     if (s_SafeFrameskipLevel == 1 &&
         s_SafeFrameskipFlickerCompensate &&
-        diff < -target)
+        pressured)
     {
         s_SafeFrameskipFlickerCompensate = FALSE;
         s_SafeFrameskipConsecutive = 1;
         skip = TRUE;
     }
-    else if (diff < -target)
+    else if (pressured)
     {
         if (s_SafeFrameskipConsecutive < (Uint32)s_SafeFrameskipLevel)
         {
@@ -388,9 +388,9 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
         }
         else
         {
-            /* max_skip is a mandatory visible-frame boundary, not a debt-reset
-             * boundary.  Keep Aim alive so sustained real load can resume
-             * skip immediately after the forced presentation. */
+            /* max_skip is still a mandatory visible-frame boundary. Do not
+             * erase pressure here: the just-completed visible core sample will
+             * decide whether slowdown really survived. */
             s_SafeFrameskipConsecutive = 0;
             skip = FALSE;
         }
@@ -398,36 +398,7 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
     else
     {
         s_SafeFrameskipConsecutive = 0;
-
-        /* Natural recovery: once debt is already below the skip threshold,
-         * retire historical sub-threshold debt instead of dragging a burst. */
-        if (s_SafeFrameskipRecoveryPending)
-        {
-            s_SafeFrameskipAim = now;
-            s_SafeFrameskipRecoveryPending = FALSE;
-        }
-
         _MainLoopSafeFrameskipResetFlickerPhase();
-    }
-
-    /* Bound pathological historical debt to roughly three frame periods. */
-    while (diff < -(target * 3))
-    {
-        s_SafeFrameskipAim += s_SafeFrameskipPeriod;
-        diff = (Int32)(s_SafeFrameskipAim - now);
-    }
-
-    /* One ideal period per emulated host tick, whether visible or hidden. */
-    s_SafeFrameskipAim += s_SafeFrameskipPeriod;
-
-    if (skip)
-        s_SafeFrameskipRecoveryPending = TRUE;
-    else
-    {
-        /* Start the CURRENT visible frame's recoverable-work sample as late as
-         * possible in Take(), after scheduler bookkeeping itself. */
-        s_SafeFrameskipWorkStart = ProfCtrGetCycle();
-        s_SafeFrameskipWorkActive = TRUE;
     }
 
     s_SafeFrameskipSkipPresentation = skip;
@@ -441,62 +412,18 @@ Bool MainLoopSafeFrameskipConsumePresentationSkip(void)
     return skip;
 }
 
-static void _MainLoopSafeFrameskipBeforeFlip(void)
-{
-    Uint32 now;
-    Uint32 delta;
-
-    if (!s_SafeFrameskipWorkActive)
-        return;
-
-    now = ProfCtrGetCycle();
-    delta = now - s_SafeFrameskipWorkStart;
-    s_SafeFrameskipWorkStart = 0;
-    s_SafeFrameskipWorkActive = FALSE;
-
-    if (delta == 0u || s_SafeFrameskipPeriod == 0u)
-    {
-        s_SafeFrameskipLastPresentedWork = 0;
-        s_SafeFrameskipWorkSampleValid = FALSE;
-        return;
-    }
-
-    s_SafeFrameskipLastPresentedWork = delta;
-    s_SafeFrameskipWorkSampleValid = TRUE;
-}
-
 static void _MainLoopSafeFrameskipAfterFlip(void)
 {
     const Uint32 now = ProfCtrGetCycle();
     const Bool gameplay =
         (!_bMenu && _pSystem && !_MainLoop_BlackScreen) ? TRUE : FALSE;
 
+    /* VBlank is calibration only. It defines the nominal PAL/NTSC host-frame
+     * budget but can no longer add, retain or forgive normal skip pressure. */
     if (gameplay)
     {
         if (s_SafeFrameskipLastFlip != 0)
-        {
-            const Uint32 delta = now - s_SafeFrameskipLastFlip;
-            /* Classify the just-finished presented frame using the ruler that
-             * existed while its pre-flip sample was measured.  Learn() may
-             * refine Period afterwards. */
-            const Bool healthyPresentedFrame =
-                _MainLoopSafeFrameskipPresentedWorkHealthyForRecovery();
-
-            /* Flip-to-flip remains calibration only. Hidden-frame spans are
-             * rejected by Learn(); they do not define current-frame health. */
-            _MainLoopSafeFrameskipLearn(delta, TRUE);
-
-            /* A forced visible boundary after a real skip burst may clear
-             * historical debt only when its recoverable pre-flip work was
-             * clearly healthy.  VBlank/audsrv latency cannot satisfy this. */
-            if (s_SafeFrameskipRecoveryPending && healthyPresentedFrame)
-            {
-                s_SafeFrameskipAim = now;
-                s_SafeFrameskipConsecutive = 0;
-                s_SafeFrameskipRecoveryPending = FALSE;
-                _MainLoopSafeFrameskipResetFlickerPhase();
-            }
-        }
+            _MainLoopSafeFrameskipLearn(now - s_SafeFrameskipLastFlip, TRUE);
         s_SafeFrameskipLastFlip = now;
     }
     else
@@ -1074,8 +1001,6 @@ void MainLoopRender()
     PROF_ENTER("GPFlush");
     GPFifoFlush();
     PROF_LEAVE("GPFlush");
-
-    _MainLoopSafeFrameskipBeforeFlip(); /* AURORA_SAFE_FRAMESKIP_PREFLIP_HEALTH_V2_20260923 */
 
     /* gsKit_sync_flip waits for vsync, swaps the display buffer
        and resets gsKit's draw queue for the next frame. The
