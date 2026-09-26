@@ -105,7 +105,7 @@ static const char *AuroraGpSPVariable(const char *key)
     if (!strcmp(key, "gpsp_frameskip"))           return "disabled";
     if (!strcmp(key, "gpsp_frameskip_threshold")) return "33";
     if (!strcmp(key, "gpsp_frameskip_interval"))  return "0";
-    if (!strcmp(key, "gpsp_color_correction"))    return "enabled"; /* AURORA_GPSP_GBA_V13_PS2_COLOR_CORRECTION_20260911: native GBA LCD colour model */
+    if (!strcmp(key, "gpsp_color_correction"))    return "disabled"; /* AURORA_GPSP_GBA_V13_PS2_COLOR_CORRECTION_20260911: native GBA LCD colour model */
     if (!strcmp(key, "gpsp_frame_mixing"))        return "enabled"; /* AURORA_GPSP_GBA_V13_BITMASK_TURBO_INPUT_20260911: default ON */
     if (!strcmp(key, "gpsp_turbo_period"))        return "4";
     return NULL;

@@ -100,48 +100,12 @@ static Uint32 s_SafeFrameskipPeriod = 0;
 static Uint32 s_SafeFrameskipSamples[3] = { 0, 0, 0 };
 static Uint32 s_SafeFrameskipSampleCount = 0;
 static Uint32 s_SafeFrameskipSamplePos = 0;
-
-/* AURORA_SAFE_FRAMESKIP_MENU_NEUTRAL_V7_20260926
- * Frontend, gameplay and live-core UI are separate host timing domains.
- * A live-core menu/save-state prompt may never train gameplay calibration. */
-static Uint32 s_SafeFrameskipFrontendLastFlip = 0;
-
-/* Ordinary live-core UI freezes scheduler phase instead of resetting it.
- * Store Aim-now, not menu duration, so arbitrarily long menus and ProfCtr
- * wrap cannot manufacture debt. */
-static Bool s_SafeFrameskipGameplayActive = FALSE;
-
-/* AURORA_SAFE_FRAMESKIP_MENU_PAUSE_PHASE_V10_20260926
- * A live-core menu PAUSES host scheduling rather than resetting it.
- *
- * Aim is an absolute host-cycle deadline, so preserve it as Aim-pauseNow and
- * rebuild it at the first resumed Take(). Burst/recovery/flicker/predictor
- * state remains in its normal globals untouched while UI is active.
- */
-static Bool        s_SafeFrameskipUiFreezeValid = FALSE;
-static Bool        s_SafeFrameskipUiFreezeHadAim = FALSE;
-static Int32       s_SafeFrameskipUiFreezeAimPhase = 0;
-static const void *s_SafeFrameskipUiFreezeSystem = NULL;
-static Uint32      s_SafeFrameskipUiFreezeFrame = 0;
-static Bool        s_SafeFrameskipUiResumePhasePending = FALSE;
-static Int32       s_SafeFrameskipUiResumeAimPhase = 0;
-
-/* AURORA_SAFE_FRAMESKIP_MENU_TRANSIENT_BARRIER_V8_1_20260926
- * Kept as ancestry marker: V10 supersedes V8.1 reset-boundary semantics. */
-
 /* AURORA_SAFE_FRAMESKIP_HEALTHY_RECOVERY_V4_20260925
  * Recovery-only state.  Never used to gate first skip activation. */
 static Bool   s_SafeFrameskipRecoveryPending = FALSE;
 static Uint32 s_SafeFrameskipTickStart = 0;
 static Uint32 s_SafeFrameskipPreFlip = 0;
 static Uint32 s_SafeFrameskipHealthyFlipRun = 0;
-
-/* AURORA_SAFE_FRAMESKIP_DEADLINE_CATCHUP_V7_20260926
- * Host presentation predictor only. No emulated CPU/audio/PPU state. */
-static Uint32 s_SafeFrameskipLastPresentedWork = 0;
-static Bool   s_SafeFrameskipLastPresentedWorkValid = FALSE;
-static Bool   s_SafeFrameskipOverrunPending = FALSE;
-
 /* AURORA_SAFE_FRAMESKIP_ONOFF_CATCHUP_V6_20260925
  * ON is automatic/unbounded catch-up, but after four hidden frames one
  * presentation is forced solely to break sprite/flicker phase-lock.
@@ -176,10 +140,6 @@ static void _MainLoopSafeFrameskipResetTiming(void)
     s_SafeFrameskipPreFlip = 0;
     s_SafeFrameskipHealthyFlipRun = 0;
     s_SafeFrameskipFlickerForcedPresent = FALSE;
-    /* AURORA_SAFE_FRAMESKIP_DEADLINE_CATCHUP_V7_20260926 */
-    s_SafeFrameskipLastPresentedWork = 0;
-    s_SafeFrameskipLastPresentedWorkValid = FALSE;
-    s_SafeFrameskipOverrunPending = FALSE;
 }
 
 static void _MainLoopSafeFrameskipLearn(Uint32 delta, Bool gameplay)
@@ -273,17 +233,6 @@ void MainLoopSafeFrameskipSetLevel(Int32 level)
     _MainLoopSafeFrameskipResetTiming();
     s_SafeFrameskipFlickerSkipCount = 0;
     s_SafeFrameskipFlickerCompensate = FALSE;
-
-    /* AURORA_SAFE_FRAMESKIP_MENU_PAUSE_PHASE_V10_20260926: explicit OFF/ON invalidates any paused scheduler phase. */
-    s_SafeFrameskipUiFreezeValid = FALSE;
-    s_SafeFrameskipUiFreezeHadAim = FALSE;
-    s_SafeFrameskipUiFreezeAimPhase = 0;
-    s_SafeFrameskipUiFreezeSystem = NULL;
-    s_SafeFrameskipUiFreezeFrame = 0;
-    s_SafeFrameskipUiResumePhasePending = FALSE;
-    s_SafeFrameskipUiResumeAimPhase = 0;
-    s_SafeFrameskipLastFlip = 0;
-    s_SafeFrameskipFrontendLastFlip = 0;
 }
 
 Bool MainLoopSafeFrameskipGetEnabled(void)
@@ -294,162 +243,6 @@ Bool MainLoopSafeFrameskipGetEnabled(void)
 void MainLoopSafeFrameskipSetEnabled(Bool enabled)
 {
     MainLoopSafeFrameskipSetLevel(enabled ? 1 : 0);
-}
-
-/* AURORA_SAFE_FRAMESKIP_MENU_NEUTRAL_V7_20260926
- *
- * Host-only gameplay/UI transition observer.
- *
- * Ordinary gameplay -> live-core UI:
- *     savedPhase = Aim - pauseNow
- *
- * Same emulated state returning to gameplay:
- *     queue savedPhase, then restore it at the FIRST allowed Take():
- *     Aim = takeNow + savedPhase
- *
- * Restoring at Take(), rather than immediately at menu close, also excludes
- * menu-exit/audio-warmup overhead from gameplay debt.
- *
- * A System pointer or emulated frame-counter change while UI is open denotes
- * a real state/content discontinuity (load state/new game/etc.). In that case
- * transient scheduler timing is reset instead of transplanting old debt.
- */
-void MainLoopSafeFrameskipSetGameplayActive(Bool active)
-{
-    const void *system = (const void *)_pSystem;
-    const Uint32 frame =
-        _pSystem ? (Uint32)_pSystem->GetFrame() : 0u;
-
-    /* Ordinary gameplay hot path: zero mutation and zero timing query. */
-    if (active && s_SafeFrameskipGameplayActive)
-        return;
-
-    if (!active)
-    {
-        if (s_SafeFrameskipGameplayActive)
-        {
-            /* AURORA_SAFE_FRAMESKIP_MENU_PAUSE_PHASE_V10_20260926
-             * Gameplay -> live-core UI.
-             *
-             * Do NOT ResetTiming(): doing so changes the burst/flicker/recovery
-             * phase precisely when a menu is opened during active skipping.
-             */
-            s_SafeFrameskipGameplayActive = FALSE;
-
-            if (system != NULL)
-            {
-                const Uint32 now = ProfCtrGetCycle();
-
-                s_SafeFrameskipUiFreezeValid = TRUE;
-                s_SafeFrameskipUiFreezeSystem = system;
-                s_SafeFrameskipUiFreezeFrame = frame;
-                s_SafeFrameskipUiFreezeHadAim =
-                    (s_SafeFrameskipAim != 0u) ? TRUE : FALSE;
-                s_SafeFrameskipUiFreezeAimPhase =
-                    s_SafeFrameskipUiFreezeHadAim
-                        ? (Int32)(s_SafeFrameskipAim - now)
-                        : 0;
-            }
-            else
-            {
-                /* Core disappeared before the edge was observed: not a pause. */
-                s_SafeFrameskipUiFreezeValid = FALSE;
-                s_SafeFrameskipUiFreezeSystem = NULL;
-                s_SafeFrameskipUiFreezeFrame = 0;
-                s_SafeFrameskipUiFreezeHadAim = FALSE;
-                s_SafeFrameskipUiFreezeAimPhase = 0;
-                s_SafeFrameskipUiResumePhasePending = FALSE;
-                s_SafeFrameskipUiResumeAimPhase = 0;
-                _MainLoopSafeFrameskipResetTiming();
-                s_SafeFrameskipFlickerSkipCount = 0;
-                s_SafeFrameskipFlickerCompensate = FALSE;
-            }
-
-            /* A presentation one-shot belongs to the already-decided host
-             * tick. Never carry it through UI. */
-            s_SafeFrameskipSkipPresentation = FALSE;
-
-            /* Timestamp pairs may not cross the menu. These are measurement
-             * probes only; they are NOT skip/recovery phase state. */
-            s_SafeFrameskipLastFlip = 0;
-            s_SafeFrameskipFrontendLastFlip = 0;
-            s_SafeFrameskipTickStart = 0;
-            s_SafeFrameskipPreFlip = 0;
-            return;
-        }
-
-        /* Stable live-core UI: scheduler state is a complete no-op.
-         * Only detect an actual emulated-state/core discontinuity. */
-        if (s_SafeFrameskipUiFreezeValid)
-        {
-            if (system == NULL ||
-                system != s_SafeFrameskipUiFreezeSystem ||
-                frame != s_SafeFrameskipUiFreezeFrame)
-            {
-                s_SafeFrameskipUiFreezeValid = FALSE;
-                s_SafeFrameskipUiFreezeHadAim = FALSE;
-                s_SafeFrameskipUiFreezeAimPhase = 0;
-                s_SafeFrameskipUiFreezeSystem = system;
-                s_SafeFrameskipUiFreezeFrame = frame;
-                s_SafeFrameskipUiResumePhasePending = FALSE;
-                s_SafeFrameskipUiResumeAimPhase = 0;
-
-                _MainLoopSafeFrameskipResetTiming();
-                s_SafeFrameskipFlickerSkipCount = 0;
-                s_SafeFrameskipFlickerCompensate = FALSE;
-                s_SafeFrameskipCdAudioWindowRequested = FALSE;
-            }
-        }
-        return;
-    }
-
-    /* UI -> gameplay. */
-    if (!s_SafeFrameskipGameplayActive)
-    {
-        const Bool samePausedState =
-            (s_SafeFrameskipUiFreezeValid &&
-             system != NULL &&
-             system == s_SafeFrameskipUiFreezeSystem &&
-             frame == s_SafeFrameskipUiFreezeFrame) ? TRUE : FALSE;
-
-        if (samePausedState)
-        {
-            /* Rebuild Aim at Take(), not here: resume-only audio/frontend work
-             * must not become artificial scheduler debt. */
-            s_SafeFrameskipUiResumePhasePending =
-                s_SafeFrameskipUiFreezeHadAim;
-            s_SafeFrameskipUiResumeAimPhase =
-                s_SafeFrameskipUiFreezeAimPhase;
-
-            if (!s_SafeFrameskipUiFreezeHadAim)
-                s_SafeFrameskipAim = 0u;
-        }
-        else
-        {
-            s_SafeFrameskipUiResumePhasePending = FALSE;
-            s_SafeFrameskipUiResumeAimPhase = 0;
-            _MainLoopSafeFrameskipResetTiming();
-            s_SafeFrameskipFlickerSkipCount = 0;
-            s_SafeFrameskipFlickerCompensate = FALSE;
-            s_SafeFrameskipCdAudioWindowRequested = FALSE;
-        }
-
-        s_SafeFrameskipUiFreezeValid = FALSE;
-        s_SafeFrameskipUiFreezeHadAim = FALSE;
-        s_SafeFrameskipUiFreezeAimPhase = 0;
-        s_SafeFrameskipUiFreezeSystem = NULL;
-        s_SafeFrameskipUiFreezeFrame = 0;
-
-        /* Fresh measurement pair after resume; scheduler phase itself above is
-         * deliberately preserved. */
-        s_SafeFrameskipSkipPresentation = FALSE;
-        s_SafeFrameskipLastFlip = 0;
-        s_SafeFrameskipFrontendLastFlip = 0;
-        s_SafeFrameskipTickStart = 0;
-        s_SafeFrameskipPreFlip = 0;
-
-        s_SafeFrameskipGameplayActive = TRUE;
-    }
 }
 
 /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830
@@ -488,23 +281,8 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
         s_SafeFrameskipCdAudioWindowRequested = FALSE;
         s_SafeFrameskipFlickerSkipCount = 0;
         s_SafeFrameskipFlickerCompensate = FALSE;
-        s_SafeFrameskipUiResumePhasePending = FALSE;
-        s_SafeFrameskipUiResumeAimPhase = 0;
         _MainLoopSafeFrameskipResetTiming();
         return FALSE;
-    }
-
-    /* AURORA_SAFE_FRAMESKIP_MENU_PAUSE_PHASE_V10_20260926
-     * Rebase only the frozen absolute Aim clock at the first real scheduler
-     * decision after resume. This excludes all time spent in UI plus
-     * resume-only frontend/audio work while preserving debt/burst parity. */
-    if (s_SafeFrameskipUiResumePhasePending)
-    {
-        const Uint32 resumeNow = ProfCtrGetCycle();
-        s_SafeFrameskipAim =
-            resumeNow + (Uint32)s_SafeFrameskipUiResumeAimPhase;
-        s_SafeFrameskipUiResumePhasePending = FALSE;
-        s_SafeFrameskipUiResumeAimPhase = 0;
     }
 
     /* Global level-1 guard, but phase state must never cross cores. */
@@ -581,49 +359,23 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
      * Int32 interpretation intentionally preserves short counter wraparound. */
     diff = (Int32)(s_SafeFrameskipAim - now);
 
-    /* AURORA_SAFE_FRAMESKIP_DEADLINE_CATCHUP_V7_20260926
+    /* AURORA_SAFE_FRAMESKIP_MEANINGFUL_DEBT_V7_20260925
      *
-     * Safe Frameskip ON should not knowingly present a frame whose observed
-     * workload can no longer fit the next host VBlank.
+     * ON is still automatic catch-up with no user max-skip ceiling, but only
+     * debt larger than one complete learned host period justifies hiding
+     * another video frame.
      *
-     * diff = Aim-now. If negative, this host tick starts late.
-     *
-     * With a real previous presented-frame sample:
-     *     lateness + previous_work >= period  -> hide this presentation
-     *
-     * A previous presented frame whose real Take()->pre-VSync work itself
-     * exceeded one period also requests one catch-up decision immediately.
-     *
-     * Without a workload sample, retain the old conservative full-period
-     * lateness threshold. This avoids inventing skips from tiny startup jitter.
-     */
-    const Bool measuredOverrun = s_SafeFrameskipOverrunPending;
-    s_SafeFrameskipOverrunPending = FALSE;
+     * Sub-frame lateness is intentionally NOT "paid back" with frameskip.
+     * A presented frame can naturally absorb that residual phase error by
+     * spending less time (or no time) waiting for the next VBlank.  This also
+     * prevents small host jitter or audio-drain cost from sustaining a skip
+     * burst after the expensive scene has already recovered. */
+    const Bool meaningfulDebt = (diff < -target) ? TRUE : FALSE;
 
-    Bool deadlineDebt = FALSE;
-    if (diff < 0)
-    {
-        /* Magnitude of negative Int32 using defined Uint32 modular arithmetic. */
-        const Uint32 lateness = 0u - (Uint32)diff;
-
-        if (s_SafeFrameskipLastPresentedWorkValid)
-        {
-            deadlineDebt =
-                ((Uint64)lateness +
-                 (Uint64)s_SafeFrameskipLastPresentedWork >=
-                 (Uint64)(Uint32)target) ? TRUE : FALSE;
-        }
-        else
-        {
-            deadlineDebt =
-                (lateness >= (Uint32)target) ? TRUE : FALSE;
-        }
-    }
-
-    const Bool meaningfulDebt =
-        (measuredOverrun || deadlineDebt) ? TRUE : FALSE;
-
-    /* Mandatory anti-flicker code below is intentionally unchanged. */
+    /* PicoDrive Auto: if more than one target frame late, discard video,
+     * limited by max_skip. Here the menu level IS max_skip. */
+    /* AURORA_V13: tolerate ordinary scheduling jitter; catch up only
+     * once host debt exceeds 1.25 learned VBlank periods. */
     if (meaningfulDebt)
     {
         /* V6 anti-flicker phase guard.
@@ -673,10 +425,13 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
         s_SafeFrameskipFlickerForcedPresent = FALSE;
     }
 
-    /* AURORA_SAFE_FRAMESKIP_DEADLINE_CATCHUP_V7_20260926
-     * No ~3-period debt forgiveness here. Recoverable host debt is paid by
-     * hidden PRESENTATION ticks, subject to the mandatory anti-flicker
-     * phase-break above. CPU/audio/core execution is never skipped. */
+    /* PicoDrive: don't go in debt too much. Keep the ideal clock no more than
+     * roughly three target frames behind before advancing this frame's aim. */
+    while (diff < -(target * 3))
+    {
+        s_SafeFrameskipAim += s_SafeFrameskipPeriod;
+        diff = (Int32)(s_SafeFrameskipAim - now);
+    }
 
     /* PicoDrive advances timestamp_aim once for every emulated host tick,
      * whether that tick is shown or skipped. */
@@ -726,26 +481,6 @@ static void _MainLoopSafeFrameskipAfterFlip(void)
      */
     if (gameplay)
     {
-        /* AURORA_SAFE_FRAMESKIP_MENU_NEUTRAL_V7_20260926: gameplay cannot continue a frontend flip pair. */
-        s_SafeFrameskipFrontendLastFlip = 0;
-        /* AURORA_SAFE_FRAMESKIP_DEADLINE_CATCHUP_V7_20260926
-         * Real host work only: Take() -> immediately before blocking VSync.
-         * This changes no emulated clock and is valid even when LastFlip=0. */
-        const Bool hostWorkValid =
-            (s_SafeFrameskipTickStart != 0u && preFlip != 0u)
-            ? TRUE : FALSE;
-        const Uint32 hostWork =
-            hostWorkValid ? (preFlip - s_SafeFrameskipTickStart) : 0u;
-
-        if (hostWorkValid)
-        {
-            s_SafeFrameskipLastPresentedWork = hostWork;
-            s_SafeFrameskipLastPresentedWorkValid = TRUE;
-
-            if (s_SafeFrameskipPeriod > 0u &&
-                (Uint64)hostWork > (Uint64)s_SafeFrameskipPeriod)
-                s_SafeFrameskipOverrunPending = TRUE;
-        }
         if (s_SafeFrameskipLastFlip != 0)
         {
             const Uint32 delta = now - s_SafeFrameskipLastFlip;
@@ -818,67 +553,29 @@ static void _MainLoopSafeFrameskipAfterFlip(void)
         s_SafeFrameskipLastFlip = now;
         s_SafeFrameskipTickStart = 0;
     }
-    else if (!_pSystem)
-    {
-        /* AURORA_SAFE_FRAMESKIP_MENU_NEUTRAL_V7_20260926
-         * TRUE frontend only. With no emulated System alive, consecutive
-         * frontend flips are clean host-VBlank calibration samples. */
-        s_SafeFrameskipLastFlip = 0;
-
-        if (s_SafeFrameskipFrontendLastFlip != 0u)
-        {
-            const Uint32 delta =
-                now - s_SafeFrameskipFrontendLastFlip;
-            _MainLoopSafeFrameskipLearn(delta, FALSE);
-        }
-
-        s_SafeFrameskipFrontendLastFlip = now;
-        s_SafeFrameskipTickStart = 0;
-    }
     else
     {
-        /* LIVE CORE + !gameplay:
-         * menu, quick save-state/prompt, or live-core black-screen.
-         *
-         * AURORA_SAFE_FRAMESKIP_MENU_PAUSE_PHASE_V10_20260926
-         * TRUE scheduler pause: no Learn(), no Period/sample mutation, no
-         * Aim/debt/recovery/burst/flicker/predictor mutation.
-         *
-         * Only host measurement timestamps are discarded so no delta can span
-         * UI time. In particular HealthyFlipRun MUST survive the pause. */
-        s_SafeFrameskipLastFlip = 0;
-        s_SafeFrameskipFrontendLastFlip = 0;
+        /* AURORA_SAFE_FRAMESKIP_VBLANK_CAP_REAL_DEBT_V2_1_20260926
+         * Menu/browser/black-screen presentations still end in GSK_SyncFlip()
+         * and contain no gameplay workload. Use their flip cadence to learn
+         * the real host VBlank period, while ResetTiming below prevents menu
+         * time itself from becoming gameplay debt. */
+        if (s_SafeFrameskipLastFlip != 0u)
+        {
+            const Uint32 delta = now - s_SafeFrameskipLastFlip;
+            _MainLoopSafeFrameskipLearn(delta, FALSE);
+        }
+        s_SafeFrameskipLastFlip = now;
         s_SafeFrameskipTickStart = 0;
-        s_SafeFrameskipPreFlip = 0;
     }
 
-    /* True frontend has no gameplay scheduler to preserve. Live-core UI does. */
-    if (s_SafeFrameskipLevel <= 0 || (!gameplay && !_pSystem))
+    if (s_SafeFrameskipLevel <= 0 || !gameplay)
         _MainLoopSafeFrameskipResetTiming();
 }
 
 void MainLoopRender()
 {
 	static Uint32 _iFrame=0;
-
-        /* AURORA_SAFE_FRAMESKIP_UI_EDGE_RENDER_FALLBACK_V9_20260926
-         *
-         * Some modal/status/frontend paths render directly and therefore do
-         * not pass through MainLoopProcess(). Observe the gameplay/UI state
-         * again here so such a path cannot bypass the V8.1 timing barrier.
-         *
-         * Normal gameplay already observed the same state before Take(); the
-         * observer is edge-triggered/idempotent, so this is a zero-mutation
-         * no-op on the ordinary hot path.
-         *
-         * IMPORTANT: this runs BEFORE consuming a queued presentation skip.
-         * If UI became active after the scheduler decision, the V8.1 edge
-         * reset cancels that stale one-shot instead of hiding the first UI
-         * presentation or carrying its phase through the menu.
-         */
-        MainLoopSafeFrameskipSetGameplayActive(
-            (!_bMenu && _pSystem && !_MainLoop_BlackScreen)
-                ? TRUE : FALSE);
 
         /* AURORA_SAFE_FRAMESKIP_PICODRIVE_AUTO_V1: standalone PicoDrive skip path has no
          * finalize/present/flip/VBlank wait. Core/audio already ran. */

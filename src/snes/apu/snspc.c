@@ -94,7 +94,7 @@ void SNSPCResetRegs(SNSpcT *pCpu)
 	pCpu->Regs.rA   = 0;
 	pCpu->Regs.rX   = 0;
 	pCpu->Regs.rY   = 0;
-	pCpu->Regs.rSP  = 0;
+	pCpu->Regs.rSP  = 0xEF; /* AURORA_SPC_RESET_SP_ACCURACY_V1_20260926: IPL reset stack baseline. */
 	pCpu->Regs.rPC  = 0;
 	pCpu->Regs.rPSW = 0;
 	/* AURORA_SPC700_ACCURACY_BATCH2_V1_20260914: reset is the wake source for SLEEP/STOP. */

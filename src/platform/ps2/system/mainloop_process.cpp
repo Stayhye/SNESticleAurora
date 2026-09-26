@@ -126,6 +126,11 @@ Bool MainLoopProcess()
         const Bool bGameplayNow =
             (!_bMenu && _pSystem && !_MainLoop_BlackScreen) ? TRUE : FALSE;
 
+        /* AURORA_SAFE_FRAMESKIP_MENU_NEUTRAL_V7_20260926
+         * Observe the actual gameplay/UI state after input has resolved _bMenu.
+         * This covers direct quick-state menu paths as well as _MenuEnable(). */
+        MainLoopSafeFrameskipSetGameplayActive(bGameplayNow);
+
         bGameplayJustStarted =
             (bGameplayNow &&
              (!_AudioGameplayWasActive ||

@@ -10,6 +10,8 @@ Int32 MainLoopSafeFrameskipGetLevel(void);
 void MainLoopSafeFrameskipSetLevel(Int32 level);
 Bool MainLoopSafeFrameskipGetEnabled(void);
 void MainLoopSafeFrameskipSetEnabled(Bool enabled);
+/* AURORA_SAFE_FRAMESKIP_MENU_NEUTRAL_V7_20260926: host-only gameplay/UI scheduler transition. */
+void MainLoopSafeFrameskipSetGameplayActive(Bool active);
 /* AURORA_SAFE_FRAMESKIP_PICODRIVE_AUTO_V1: PicoDrive-style Auto decision once per host tick. */
 Bool MainLoopSafeFrameskipTake(Bool allowed);
 Bool MainLoopSafeFrameskipConsumePresentationSkip(void);
