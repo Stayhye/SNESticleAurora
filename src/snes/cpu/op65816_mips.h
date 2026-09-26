@@ -1,7 +1,7 @@
-/* AURORA_CPU_HOST_WORK_REDUCTION_V1_20260920_OPS
- * Remove getter masks that are immediately repeated by the destination
- * setter, and operate INX/DEX/INY/DEY modulo the destination width
- * directly.  SNES-visible results/flags remain bit-identical. */
+/* AURORA_DKC_CPU_REGISTER_ALGEBRA_V1_20260924
+ * Destination setters already mask to architectural width; flags
+ * read the committed destination. Register-only host work is removed;
+ * no memory/bus/timing macro is changed. */
 	// NOP_
 SNCPU_OP(0x0ea)
 SNCPU_OP(0x1ea)

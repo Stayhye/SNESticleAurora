@@ -40,9 +40,15 @@
 
 struct SnesPPUChrCacheT
 {
+#if SNPPU_BG_CACHE
+	/* AURORA_CHR_CACHE_BG2_COMPILEOUT_V1_20260926
+	 * 2bpp decoded rows exist only for the BG cache. OBJ is 4bpp and never
+	 * references these arrays, so compiling them out at BG=0 recovers
+	 * exactly 299008 bytes (292 KiB) of persistent EE RAM. */
 	Uint64 uData2[SNPPU_CHR2_TILE_COUNT][8];
 	Uint8  uOpaque2[SNPPU_CHR2_TILE_COUNT][8];
 	Uint8  uValid2[SNPPU_CHR2_TILE_COUNT];
+#endif
 
 	Uint64 uData4[SNPPU_CHR4_TILE_COUNT][8];
 	Uint8  uOpaque4[SNPPU_CHR4_TILE_COUNT][8];
@@ -54,56 +60,6 @@ struct SnesPPUChrCacheT
 
 	Uint8  uValid4[SNPPU_CHR4_TILE_COUNT];
 };
-
-#if SNPPU_CHR_CACHE_HFLIP
-/* AURORA_SNES_OBJ_TRIPLE_HOTPATH_V1_20260920
- * OBJ chooses normal/HFlip once per object. Both views still share uValid4,
- * so invalidation/store policy is unchanged; only the per-hit orientation
- * branch is removed from the hot tile loop. */
-struct SnesPPUChrCache4ViewT
-{
-	const Uint64 (*pData)[8];
-	const Uint8  (*pOpaque)[8];
-	const Uint8  *pValid;
-};
-
-_INLINE void SnesPPUChrCacheSelect4View(
-	const SnesPPUChrCacheT *pCache, Bool bHFlip,
-	SnesPPUChrCache4ViewT *pView)
-{
-	pView->pData = bHFlip ? pCache->uData4HFlip : pCache->uData4;
-	pView->pOpaque = bHFlip ? pCache->uOpaque4HFlip : pCache->uOpaque4;
-	pView->pValid = pCache->uValid4;
-}
-
-_INLINE Bool SnesPPUChrCacheLookup4View(
-	const SnesPPUChrCache4ViewT *pView,
-	Uint32 uRowAddress, Uint64 *pData, Uint32 *pOpaque)
-{
-	const Uint32 uAddress = uRowAddress & SNPPU_VRAM_WORD_MASK;
-	const Uint32 uTile = uAddress >> 4;
-	const Uint32 uRow = uAddress & 7u;
-
-	if (!(pView->pValid[uTile] & (1u << uRow)))
-		return FALSE;
-
-	*pData = pView->pData[uTile][uRow];
-	*pOpaque = pView->pOpaque[uTile][uRow];
-	return TRUE;
-}
-
-_INLINE void SnesPPUChrCacheLoad4View(
-	const SnesPPUChrCache4ViewT *pView,
-	Uint32 uRowAddress, Uint64 *pData, Uint32 *pOpaque)
-{
-	const Uint32 uAddress = uRowAddress & SNPPU_VRAM_WORD_MASK;
-	const Uint32 uTile = uAddress >> 4;
-	const Uint32 uRow = uAddress & 7u;
-
-	*pData = pView->pData[uTile][uRow];
-	*pOpaque = pView->pOpaque[uTile][uRow];
-}
-#endif
 
 _INLINE Uint64 SnesPPUChrCacheReverseBytes(Uint64 uData)
 {
@@ -127,6 +83,7 @@ _INLINE void SnesPPUChrCacheFlipRow(Uint64 *pData, Uint32 *pOpaque)
 	*pOpaque = SnesPPUChrCacheReverseMask((Uint8)*pOpaque);
 }
 
+#if SNPPU_BG_CACHE
 _INLINE Bool SnesPPUChrCacheLookup2(const SnesPPUChrCacheT *pCache,
 	Uint32 uRowAddress, Bool bHFlip, Uint64 *pData, Uint32 *pOpaque)
 {
@@ -143,6 +100,8 @@ _INLINE Bool SnesPPUChrCacheLookup2(const SnesPPUChrCacheT *pCache,
 		SnesPPUChrCacheFlipRow(pData, pOpaque);
 	return TRUE;
 }
+
+#endif
 
 _INLINE Bool SnesPPUChrCacheLookup4(const SnesPPUChrCacheT *pCache,
 	Uint32 uRowAddress, Bool bHFlip, Uint64 *pData, Uint32 *pOpaque)
@@ -174,6 +133,7 @@ _INLINE Bool SnesPPUChrCacheLookup4(const SnesPPUChrCacheT *pCache,
 	return TRUE;
 }
 
+#if SNPPU_BG_CACHE
 _INLINE void SnesPPUChrCacheStore2(SnesPPUChrCacheT *pCache,
 	Uint32 uRowAddress, Uint64 uData, Uint32 uOpaque)
 {
@@ -185,6 +145,8 @@ _INLINE void SnesPPUChrCacheStore2(SnesPPUChrCacheT *pCache,
 	pCache->uOpaque2[uTile][uRow] = (Uint8)uOpaque;
 	pCache->uValid2[uTile] |= (Uint8)(1u << uRow);
 }
+
+#endif
 
 _INLINE void SnesPPUChrCacheStore4(SnesPPUChrCacheT *pCache,
 	Uint32 uRowAddress, Uint64 uData, Uint32 uOpaque)
@@ -228,7 +190,9 @@ _INLINE void SnesPPUChrCacheLoad4HFlip(
 
 _INLINE void SnesPPUChrCacheInvalidateAll(SnesPPUChrCacheT *pCache)
 {
+#if SNPPU_BG_CACHE
 	memset(pCache->uValid2, 0, sizeof(pCache->uValid2));
+#endif
 	memset(pCache->uValid4, 0, sizeof(pCache->uValid4));
 }
 
@@ -243,12 +207,16 @@ _INLINE Uint32 SnesPPUChrCacheInvalidateRange(SnesPPUChrCacheT *pCache,
 	if (nWords >= 0x8000u)
 	{
 		SnesPPUChrCacheInvalidateAll(pCache);
+#if SNPPU_BG_CACHE
 		return SNPPU_CHR2_TILE_COUNT + SNPPU_CHR4_TILE_COUNT;
+#else
+		return SNPPU_CHR4_TILE_COUNT;
+#endif
 	}
 
-	/* Avanca por limites de tile 2bpp. Isso visita no maximo 4097
-	   posicoes ate em uma transferencia com wrap e tambem cobre cada tile
-	   4bpp tocado, sem um laco por byte de DMA. */
+#if SNPPU_BG_CACHE
+	/* Full BG+OBJ cache mode: preserve the original 8-word walk so every
+	   touched 2bpp tile and overlapping 4bpp tile is invalidated. */
 	while (nWords)
 	{
 		Uint32 uAddress = uWordAddress & SNPPU_VRAM_WORD_MASK;
@@ -272,6 +240,31 @@ _INLINE Uint32 SnesPPUChrCacheInvalidateRange(SnesPPUChrCacheT *pCache,
 		uWordAddress = (uAddress + nStep) & SNPPU_VRAM_WORD_MASK;
 		nWords -= nStep;
 	}
+#else
+	/* AURORA_CHR_CACHE_BG2_COMPILEOUT_V1_20260926
+	 * OBJ-only normal build. A 4bpp tile occupies 16 VRAM words, so there is
+	 * no reason to visit the midpoint of every tile after the 2bpp cache has
+	 * been compiled out. This removes the uTile2 calculation/validity access
+	 * and cuts large sequential invalidation walks to roughly half as many
+	 * iterations while preserving wrap semantics exactly. */
+	while (nWords)
+	{
+		Uint32 uAddress = uWordAddress & SNPPU_VRAM_WORD_MASK;
+		Uint32 uTile4 = uAddress >> 4;
+		Uint32 nStep = 16u - (uAddress & 15u);
+
+		if (pCache->uValid4[uTile4])
+		{
+			pCache->uValid4[uTile4] = 0;
+			nValidTiles++;
+		}
+
+		if (nStep > nWords)
+			nStep = nWords;
+		uWordAddress = (uAddress + nStep) & SNPPU_VRAM_WORD_MASK;
+		nWords -= nStep;
+	}
+#endif
 
 	return nValidTiles;
 }

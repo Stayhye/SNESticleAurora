@@ -30,7 +30,9 @@
 #endif
 
 #ifndef SNPPU_BG_CACHE
-#define SNPPU_BG_CACHE 0
+/* AURORA_RAM_REINVEST_BG_CACHE_V3_20260924
+ * Restore known-good DKC quiet-60FPS local state. */
+#define SNPPU_BG_CACHE 1
 #endif
 
 #if SNDBG_DEEP && !SNDBG_LOG
