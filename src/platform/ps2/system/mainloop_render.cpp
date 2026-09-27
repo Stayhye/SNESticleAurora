@@ -150,7 +150,19 @@ static Bool s_SafeFrameskipFlickerForcedPresent = FALSE;
 /* AURORA_SAFE_FRAMESKIP_GLOBAL_FLICKER_PHASE_GUARD_V1_20260923
  * Level 1 only, all cores: periodically swap one skipped/presented pair so
  * intentional every-other-frame flicker cannot phase-lock to the hidden
- * frame. Reset phase state whenever the active core changes. */
+ * frame. Reset phase state whenever the active core changes.
+ *
+ * AURORA_SAFE_FRAMESKIP_FLICKER_PHASE_SWAP_V11_20260926
+ * V7 accidentally reused FlickerSkipCount as the consecutive-burst limiter,
+ * leaving FlickerCompensate permanently FALSE and disabling the P/S phase
+ * exchange. Keep the two concepts separate again:
+ *
+ *   Consecutive       = current consecutive hidden-presentation burst
+ *   FlickerSkipCount  = skip candidates accumulated for parity rotation
+ *   FlickerCompensate = one compensating skip after a forced presentation
+ *
+ * This is host presentation policy only; emulated frame execution is never
+ * skipped or re-timed. */
 static Uint32 s_SafeFrameskipFlickerSkipCount = 0;
 static Bool   s_SafeFrameskipFlickerCompensate = FALSE;
 static const void *s_SafeFrameskipFlickerSystem = NULL;
@@ -623,37 +635,53 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
     const Bool meaningfulDebt =
         (measuredOverrun || deadlineDebt) ? TRUE : FALSE;
 
-    /* Mandatory anti-flicker code below is intentionally unchanged. */
+    /* AURORA_SAFE_FRAMESKIP_FLICKER_PHASE_SWAP_V11_20260926
+     *
+     * Two independent guards are required here:
+     *
+     *  1) maxHiddenBurst limits CONSECUTIVE hidden presentations.
+     *  2) FlickerSkipCount periodically rotates presented-frame parity.
+     *
+     * The pre-V7 phase guard used FlickerCompensate for a deliberate
+     * S/P -> P/S exchange. V7 kept the variable but accidentally made
+     * FlickerSkipCount the burst counter, so compensation could never arm.
+     *
+     * Restore the exchange:
+     *   - every fourth normal skip candidate becomes a forced presentation;
+     *   - if debt still exists on the next tick, that tick is hidden once.
+     *
+     * Net effect around the boundary:
+     *       ... S P  S P  S P ...
+     *   ->  ... S P  S P  P S ...
+     *
+     * That one-frame parity rotation prevents intentional every-other-frame
+     * sprite flicker from remaining permanently locked to hidden frames.
+     */
     if (meaningfulDebt)
     {
-        /* V6 anti-flicker phase guard.
-         *
-         * Four hidden frames are enough to create a persistent visual phase
-         * lock in games that intentionally alternate sprite visibility.
-         * Force exactly one presentation, but mark it as guard-only so
-         * _AfterFlip cannot mistake it for recovered performance and rebase
-         * away genuine timing debt. */
         /* AURORA_MD_SAFE_FRAMESKIP_BURST_CAP_V1_20260926
-         * PicoDrive already converts between emulated cadence and the GS host
-         * cadence (including 0/2 ExecuteFrame host ticks when required).
-         * Stacking the global four-hidden-frame burst on top of that scheduler
-         * can make plain Mega Drive/Genesis presentation visibly uneven on a
-         * setup that accumulates host timing debt.
-         *
-         * Preserve Safe Frameskip catch-up on Mega Drive, but restore the old
-         * level-1 rhythm there: at most one hidden presentation before a real
-         * presentation boundary (S/P/S/P under sustained debt). SMS/GG retain
-         * the current global four-frame cap. Sega CD is already excluded from
-         * normal Safe Frameskip by the realtime-CD pacing gate.
+         * Plain MD keeps its stricter one-hidden-frame burst cap. Other
+         * normal Safe Frameskip cores retain the four-hidden-frame cap.
          */
         const Uint32 maxHiddenBurst =
             (_pSystem == _pSega &&
              !PicoDriveBridge_Is8Bit() &&
              !PicoDriveBridge_IsSegaCD()) ? 1u : 4u;
 
-        if (s_SafeFrameskipFlickerSkipCount >= maxHiddenBurst)
+        if (s_SafeFrameskipFlickerCompensate)
         {
-            s_SafeFrameskipFlickerSkipCount = 0;
+            /* Second half of the phase exchange. Only spend it while real
+             * debt still exists; if debt disappeared, the clean path below
+             * cancels the pending compensation instead of inventing a skip. */
+            s_SafeFrameskipFlickerCompensate = FALSE;
+            s_SafeFrameskipConsecutive = 1u;
+            skip = TRUE;
+        }
+        else if (s_SafeFrameskipConsecutive >= maxHiddenBurst)
+        {
+            /* Mandatory visible boundary for a long hidden burst.
+             * Do NOT reset FlickerSkipCount: phase rotation counts skip
+             * candidates across these ordinary visible boundaries. */
             s_SafeFrameskipFlickerForcedPresent = TRUE;
             s_SafeFrameskipConsecutive = 0;
             skip = FALSE;
@@ -661,12 +689,28 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
         else
         {
             ++s_SafeFrameskipFlickerSkipCount;
-            ++s_SafeFrameskipConsecutive;
-            skip = TRUE;
+
+            if (s_SafeFrameskipFlickerSkipCount >= 4u)
+            {
+                /* First half of the historical P/S swap: this frame was a
+                 * legitimate skip candidate, but show it and hide the next
+                 * still-debted tick instead. */
+                s_SafeFrameskipFlickerSkipCount = 0;
+                s_SafeFrameskipFlickerCompensate = TRUE;
+                s_SafeFrameskipFlickerForcedPresent = TRUE;
+                s_SafeFrameskipConsecutive = 0;
+                skip = FALSE;
+            }
+            else
+            {
+                ++s_SafeFrameskipConsecutive;
+                skip = TRUE;
+            }
         }
     }
     else
     {
+        /* A genuinely clean scheduler interval ends this phase episode. */
         s_SafeFrameskipConsecutive = 0;
         s_SafeFrameskipFlickerSkipCount = 0;
         s_SafeFrameskipFlickerCompensate = FALSE;
