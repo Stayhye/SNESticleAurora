@@ -165,6 +165,16 @@ static Bool s_SafeFrameskipFlickerForcedPresent = FALSE;
  * skipped or re-timed. */
 static Uint32 s_SafeFrameskipFlickerSkipCount = 0;
 static Bool   s_SafeFrameskipFlickerCompensate = FALSE;
+/* AURORA_SAFE_FRAMESKIP_FLICKER_PHASE_MEMORY_V13_20260927
+ * Anti-flicker phase history must survive ONE clean presented tick.
+ *
+ * S/P/S/P is itself the dangerous phase-lock pattern: clearing SkipCount on
+ * every clean P makes the four-skip parity rotation mathematically unable to
+ * trigger. Two consecutive clean presentations are different: an every-other-
+ * frame sprite has necessarily exposed both parities already, so old skip
+ * history may then be discarded safely.
+ */
+static Uint32 s_SafeFrameskipFlickerCleanPresentRun = 0;
 static const void *s_SafeFrameskipFlickerSystem = NULL;
 /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830
  * One-shot request raised only by a CDDA cache/hunk miss. */
@@ -188,6 +198,7 @@ static void _MainLoopSafeFrameskipResetTiming(void)
     s_SafeFrameskipPreFlip = 0;
     s_SafeFrameskipHealthyFlipRun = 0;
     s_SafeFrameskipFlickerForcedPresent = FALSE;
+    s_SafeFrameskipFlickerCleanPresentRun = 0;
     /* AURORA_SAFE_FRAMESKIP_DEADLINE_CATCHUP_V7_20260926 */
     s_SafeFrameskipLastPresentedWork = 0;
     s_SafeFrameskipLastPresentedWorkValid = FALSE;
@@ -387,6 +398,11 @@ void MainLoopSafeFrameskipSetGameplayActive(Bool active)
             s_SafeFrameskipFrontendLastFlip = 0;
             s_SafeFrameskipTickStart = 0;
             s_SafeFrameskipPreFlip = 0;
+            /* AURORA_SAFE_FRAMESKIP_MENU_HOST_EVIDENCE_BARRIER_V12_20260927 */
+            s_SafeFrameskipHealthyFlipRun = 0;
+            s_SafeFrameskipLastPresentedWork = 0;
+            s_SafeFrameskipLastPresentedWorkValid = FALSE;
+            s_SafeFrameskipOverrunPending = FALSE;
             return;
         }
 
@@ -525,11 +541,13 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
         s_SafeFrameskipFlickerSystem = (const void *)_pSystem;
         s_SafeFrameskipFlickerSkipCount = 0;
         s_SafeFrameskipFlickerCompensate = FALSE;
+        s_SafeFrameskipFlickerCleanPresentRun = 0;
     }
     if (s_SafeFrameskipLevel != 1)
     {
         s_SafeFrameskipFlickerSkipCount = 0;
         s_SafeFrameskipFlickerCompensate = FALSE;
+        s_SafeFrameskipFlickerCleanPresentRun = 0;
     }
 
     if (s_SafeFrameskipCdAudioWindowRequested)
@@ -537,6 +555,7 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
         s_SafeFrameskipCdAudioWindowRequested = FALSE;
         s_SafeFrameskipFlickerSkipCount = 0;
         s_SafeFrameskipFlickerCompensate = FALSE;
+        s_SafeFrameskipFlickerCleanPresentRun = 0;
 
         /* AURORA_EXTREME_CD_VIDEO_FIRST_V2_20260830
          * CDDA may spend Safe Frameskip, but never bypass max_skip. */
@@ -659,6 +678,10 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
      */
     if (meaningfulDebt)
     {
+        /* Any skip candidate / forced debt presentation means the gameplay
+         * stream is not in a clean two-presentation recovery run. */
+        s_SafeFrameskipFlickerCleanPresentRun = 0;
+
         /* AURORA_MD_SAFE_FRAMESKIP_BURST_CAP_V1_20260926
          * Plain MD keeps its stricter one-hidden-frame burst cap. Other
          * normal Safe Frameskip cores retain the four-hidden-frame cap.
@@ -710,11 +733,31 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
     }
     else
     {
-        /* A genuinely clean scheduler interval ends this phase episode. */
+        /* AURORA_SAFE_FRAMESKIP_FLICKER_PHASE_MEMORY_V13_20260927
+         *
+         * One clean presentation must NOT erase skip history:
+         *
+         *     S P S P S P ...
+         *
+         * is exactly the phase-lock pattern the guard exists to break. If
+         * SkipCount were reset on each P it could never reach four.
+         *
+         * Two consecutive clean presentations are sufficient proof that both
+         * parities of an every-other-frame sprite were naturally exposed.
+         * Only then retire the accumulated skip history.
+         *
+         * Compensation remains immediate-only: if debt disappeared after the
+         * first half of P/S exchange, do not manufacture a later skip.
+         */
         s_SafeFrameskipConsecutive = 0;
-        s_SafeFrameskipFlickerSkipCount = 0;
         s_SafeFrameskipFlickerCompensate = FALSE;
         s_SafeFrameskipFlickerForcedPresent = FALSE;
+
+        if (s_SafeFrameskipFlickerCleanPresentRun < 2u)
+            ++s_SafeFrameskipFlickerCleanPresentRun;
+
+        if (s_SafeFrameskipFlickerCleanPresentRun >= 2u)
+            s_SafeFrameskipFlickerSkipCount = 0;
     }
 
     /* AURORA_SAFE_FRAMESKIP_DEADLINE_CATCHUP_V7_20260926
@@ -855,8 +898,10 @@ static void _MainLoopSafeFrameskipAfterFlip(void)
                 s_SafeFrameskipConsecutive = 0;
                 s_SafeFrameskipRecoveryPending = FALSE;
                 s_SafeFrameskipHealthyFlipRun = 0;
-                s_SafeFrameskipFlickerSkipCount = 0;
-                s_SafeFrameskipFlickerCompensate = FALSE;
+                /* AURORA_SAFE_FRAMESKIP_FLICKER_PHASE_MEMORY_V13_20260927
+                 * Recovery owns Aim/debt only. Do not erase anti-flicker
+                 * presentation history here: Take() retires it only after two
+                 * consecutive genuinely clean presented ticks. */
             }
         }
         s_SafeFrameskipLastFlip = now;

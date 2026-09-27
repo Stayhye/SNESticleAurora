@@ -474,7 +474,7 @@ static void AuroraGbConfigureVideo(GambatteSystem::Impl *p)
 {
     if (!p) return;
     p->gb.setColorCorrectionMode(1U);
-    p->gb.setColorCorrection(true);
+    p->gb.setColorCorrection(false);
     p->gb.setColorCorrectionBrightness(0.0f);
     p->gb.setDarkFilterLevel(0U);
 }
