@@ -277,24 +277,9 @@ static bool fdsPadHas(unsigned port, Uint16 bit)
 /* AURORA_FCEUMM_FDS_V4_TURBO_PAL_PERF_20260827: map Aurora carrier bits once per frame. */
 static Uint8 fdsMapPad(Uint16 pad)
 {
-    Uint8 nes = 0;
+    /* AURORA_CODEPATH_SIMPLIFY_V5_20260927 */
     if (pad == EMUSYS_DEVICE_DISCONNECTED) return 0;
-
-    /* AURORA_FCEUMM_FDS_V9_INPUT_PALETTE_CPU_FASTPATH_20260827 */
-    if (pad & SNESIO_JOY_B)      nes |= 0x01; /* Cross  -> A */
-    if (pad & SNESIO_JOY_Y)      nes |= 0x02; /* Square -> B */
-    if (pad & SNESIO_JOY_SELECT) nes |= 0x04;
-    if (pad & SNESIO_JOY_START)  nes |= 0x08;
-    if (pad & SNESIO_JOY_UP)     nes |= 0x10;
-    if (pad & SNESIO_JOY_DOWN)   nes |= 0x20;
-    if (pad & SNESIO_JOY_LEFT)   nes |= 0x40;
-    if (pad & SNESIO_JOY_RIGHT)  nes |= 0x80;
-
-    if ((nes & 0x10) && (nes & 0x20))
-        nes &= (Uint8)~(0x10 | 0x20);
-    if ((nes & 0x40) && (nes & 0x80))
-        nes &= (Uint8)~(0x40 | 0x80);
-    return nes;
+    return SnesIOFilterOppositeDirections8(SnesIOPadToNes8(pad));
 }
 
 static int16_t fdsInputState(unsigned port, unsigned device,

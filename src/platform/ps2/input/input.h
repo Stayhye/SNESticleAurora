@@ -31,6 +31,11 @@ void   InputPoll(void);
 Uint32 InputGetPadData(Uint32 uPad);
 Bool   InputIsPadConnected(Uint32 uPad);
 
+/* AURORA_CODEPATH_SIMPLIFY_V5_20260927
+ * One cross-TU call returns the immutable post-InputPoll digital + analog-dpad
+ * snapshot used repeatedly by MainLoopProcess. Output pointers must be valid. */
+Bool   InputGetPadSnapshot(Uint32 uPad, Uint32 *pData, Uint32 *pAnalogDpad);
+
 /* AURORA_MOUSE_EXPLICIT_V3
  * No automatic USB probing. Off/Controller perform no mouse SIF RPC.
  * USB is explicit and lazy-initialized. */

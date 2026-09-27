@@ -689,7 +689,8 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
         const Uint32 maxHiddenBurst =
             (_pSystem == _pSega &&
              !PicoDriveBridge_Is8Bit() &&
-             !PicoDriveBridge_IsSegaCD()) ? 1u : 4u;
+             !PicoDriveBridge_IsSegaCD()) ? 1u :
+            (_pSystem == _pSega ? 4u : 0xffffffffu);
 
         if (s_SafeFrameskipFlickerCompensate)
         {
@@ -713,7 +714,7 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
         {
             ++s_SafeFrameskipFlickerSkipCount;
 
-            if (s_SafeFrameskipFlickerSkipCount >= 4u)
+            if (_pSystem == _pSega && s_SafeFrameskipFlickerSkipCount >= 4u)
             {
                 /* First half of the historical P/S swap: this frame was a
                  * legitimate skip candidate, but show it and hide the next

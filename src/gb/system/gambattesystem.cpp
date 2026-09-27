@@ -483,26 +483,29 @@ static unsigned AuroraGbMapInput(const Emu::SysInputT *pInput,
                                  Uint32 turboFrame)
 {
     Uint16 pad = pInput ? pInput->uPad[0] : EMUSYS_DEVICE_DISCONNECTED;
-    unsigned out = 0;
     const Bool turboOn = ((turboFrame & 1U) == 0U) ? TRUE : FALSE;
 
     if (pad == EMUSYS_DEVICE_DISCONNECTED)
         return 0;
 
-    if (pad & SNESIO_JOY_B)      out |= 0x01U; /* Cross -> A */
-    if (pad & SNESIO_JOY_Y)      out |= 0x02U; /* Square -> B */
-    if (pad & SNESIO_JOY_SELECT) out |= 0x04U;
-    if (pad & SNESIO_JOY_START)  out |= 0x08U;
-    if (pad & SNESIO_JOY_RIGHT)  out |= 0x10U;
-    if (pad & SNESIO_JOY_LEFT)   out |= 0x20U;
-    if (pad & SNESIO_JOY_UP)     out |= 0x40U;
-    if (pad & SNESIO_JOY_DOWN)   out |= 0x80U;
-    if (turboOn && (pad & SNESIO_JOY_A)) out |= 0x01U; /* Circle */
-    if (turboOn && (pad & SNESIO_JOY_X)) out |= 0x02U; /* Triangle */
+    /* AURORA_CODEPATH_SIMPLIFY_V5_20260927
+     * Start from the common A/B/Select/Start/U/D/L/R byte, then permute only
+     * the four direction bits into Gambatte's R/L/U/D ordering. */
+    const Uint8 nes = SnesIOPadToNes8(pad);
+    Uint8 out = (Uint8)(
+        (nes & 0x0FU) |
+        ((nes & 0x80U) >> 3) |
+        ((nes & 0x40U) >> 1) |
+        ((nes & 0x30U) << 2));
 
-    if ((out & 0x30U) == 0x30U) out &= ~0x30U;
-    if ((out & 0xC0U) == 0xC0U) out &= ~0xC0U;
-    return out;
+    if (turboOn)
+    {
+        out |= (Uint8)(
+            ((pad & SNESIO_JOY_A) >> 7) | /* Circle   -> turbo A */
+            ((pad & SNESIO_JOY_X) >> 5)); /* Triangle -> turbo B */
+    }
+
+    return SnesIOFilterOppositeDirections8(out);
 }
 
 /* AURORA_VOLUME_TFA_N163_V4_20260913 */

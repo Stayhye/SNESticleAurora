@@ -19,6 +19,30 @@
 #define SNESIO_JOY_Y		0x4000
 #define SNESIO_JOY_B		0x8000
 
+/* AURORA_CODEPATH_SIMPLIFY_V5_20260927
+ * The high byte of Aurora's legacy SNES carrier is, bit-for-bit, the
+ * reverse of the ordinary NES A/B/Select/Start/Up/Down/Left/Right byte.
+ * Keep one 16-byte nibble table in snio.cpp and inline only two tiny lookups
+ * in the host bridges instead of repeating eight conditionals per mapper. */
+extern const Uint8 SnesIOReverseNibble[16];
+
+_INLINE Uint8 SnesIOPadToNes8(Uint16 pad)
+{
+	const Uint32 hi = (Uint32)pad >> 8;
+	return (Uint8)(
+		(Uint32)SnesIOReverseNibble[hi >> 4] |
+		((Uint32)SnesIOReverseNibble[hi & 0x0FU] << 4));
+}
+
+/* Pairs are bits 4/5 and 6/7. 11 must become 00, all other combinations
+ * stay unchanged. This is exactly the old two conditional clears. */
+_INLINE Uint8 SnesIOFilterOppositeDirections8(Uint8 value)
+{
+	const Uint32 both =
+		((Uint32)value & ((Uint32)value << 1)) & 0xA0U;
+	return (Uint8)((Uint32)value & ~(both | (both >> 1)));
+}
+
 #define SNESIO_DEVICE_NUM 5
 
 /* AURORA_SNES_TURBOFILE_V4_20260829
