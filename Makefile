@@ -712,19 +712,24 @@ SRCS := \
 	src/snes/core/snswc.cpp \
 	src/snes/ppu/snppubg.cpp \
 	src/snes/ppu/snppublend_gs.cpp \
+	src/snes/ppu/snppublend_gs_ps2.S \
 	src/snes/ppu/snppucolor.cpp \
 	src/snes/ppu/snppu.cpp \
 	src/snes/ppu/snppuobj.cpp \
 	src/snes/ppu/snppurender8.cpp \
+	src/snes/ppu/snppurender8_ps2.S \
 	src/snes/ppu/snppurender.cpp \
 	src/snes/rom/snrom.cpp \
 	src/snes/apu/snspcbrr.c \
+	src/snes/apu/snspcbrr_ps2.S \
 	src/snes/apu/snspc.c \
 	src/snes/apu/snspc_c.c \
 	src/snes/apu/snspcdisasm.c \
 	src/snes/apu/snspcdsp.cpp \
 	src/snes/apu/snspcio.cpp \
 	src/snes/apu/snspcmix.cpp \
+	src/snes/apu/snspcmix_hot_ps2.S \
+	src/snes/apu/snspcmix_ps2.S \
 	src/snes/apu/snspcrom.c \
 	src/snes/apu/snspctimer.cpp \
 	src/snes/state/snstate.cpp \
@@ -1755,10 +1760,10 @@ iso-build-image:
 
 # ---- /ISO ----
 
-# GCC 15.2 -O2 corrompe asm 128-bit do _MixChannel (audio direito quebrado).
-# Fix do hugorsgarcia/PS2SNESticle (PORTING.md Bug 7).
-$(OBJ_DIR)/snes/apu/snspcmix.o: src/snes/apu/snspcmix.cpp | $(OBJ_DIR)
-	$(call RUN_COMPILE,CXX,$<,$(EE_CXX) $(CXXFLAGS) $(DEPFLAGS) -O1 $(INCS) -c "$<" -o "$@")
+# AURORA_SNES_AUDIO_MIPS_FINAL_20260927
+# Audio MMI/BRR kernels are standalone EABI-safe R5900 assembly. snspcmix.cpp
+# therefore uses the normal generic C++ -O2 rule; no fragile inline-MMI -O1
+# exception remains.
 fast:
 	@reset=""; cyan=""; if [ "$(COLOR)" = "1" ]; then reset="\033[0m"; cyan="\033[36m"; fi; printf "$${cyan}[ FAST ]$${reset} build: JOBS=$(JOBS), LOAD_LIMIT=$(LOAD_LIMIT)\n"
 	+@$(MAKE) --no-print-directory build-begin

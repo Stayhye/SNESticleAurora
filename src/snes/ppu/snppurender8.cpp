@@ -227,6 +227,55 @@ static SNPPUBg8FlipT _FlipTable8[4]=
 	{7, _SnesPPU_HFlipLookup[0], &_SnesPPU_PlaneLookup[1]}
 };
 
+/* AURORA_PPU_R5900_DIRECT_BG_V5_20260927
+ * Normal PS2 builds use the direct BG path (SNPPU_BG_CACHE=0). Keep all
+ * emulated PPU decisions in C++; only the already-decided row expansion and
+ * masked copy kernels cross this ABI boundary. The reference C++ paths remain
+ * compiled when the switch is disabled or BG cache mode is selected. */
+#ifndef AURORA_PPU_R5900_ASM
+#define AURORA_PPU_R5900_ASM 1
+#endif
+
+#if CODE_PLATFORM == CODE_PS2 && AURORA_PPU_R5900_ASM
+struct AuroraPPUChrDirectAsmCtx
+{
+	const Uint64 *pPlaneNormal;
+	const Uint64 *pPlaneHFlip;
+	const Uint8  *pMaskReverse;
+	const Uint64 *pPalLookup;
+};
+
+typedef char AuroraPPUTileAsmSizeCheck[(sizeof(SnesRenderTileT) == 6) ? 1 : -1];
+typedef char AuroraPPUTileAsmPalCheck[(__builtin_offsetof(SnesRenderTileT, uPal) == 2) ? 1 : -1];
+typedef char AuroraPPUTileAsmFlipCheck[(__builtin_offsetof(SnesRenderTileT, uFlip) == 3) ? 1 : -1];
+typedef char AuroraPPUTileAsmOffsetYCheck[(__builtin_offsetof(SnesRenderTileT, uOffsetY) == 4) ? 1 : -1];
+typedef char AuroraPPUCtxAsmSizeCheck[(sizeof(AuroraPPUChrDirectAsmCtx) == 16) ? 1 : -1];
+
+extern "C" void AuroraPPUFetchCHR2Direct64PS2(
+	const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles,
+	Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask,
+	const AuroraPPUChrDirectAsmCtx *pCtx);
+extern "C" void AuroraPPUFetchCHR4Direct64PS2(
+	const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles,
+	Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask,
+	const AuroraPPUChrDirectAsmCtx *pCtx);
+extern "C" void AuroraPPURenderBGDataOPS2(
+	Uint8 *pLine8, Uint8 *pSrc8, const Uint8 *pMaskData,
+	Uint32 uScrollX, Int32 nTiles, const Uint64 *pMaskLookup);
+extern "C" void AuroraPPURenderBGDataPS2(
+	Uint8 *pLine8, Uint8 *pSrc8, const Uint8 *pMaskData,
+	Uint32 uScrollX, Int32 nTiles, const Uint64 *pMaskLookup);
+
+static const AuroraPPUChrDirectAsmCtx _AuroraPPUChr4DirectAsmCtx =
+{
+	(const Uint64 *)&_SnesPPU_PlaneLookup[0],
+	(const Uint64 *)&_SnesPPU_PlaneLookup[1],
+	(const Uint8  *)&_SnesPPU_HFlipLookup[1][0],
+	(const Uint64 *)&_SnesPPU_Tile4PalLookup64[0]
+};
+#endif
+
+
 //////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////
 
@@ -540,6 +589,22 @@ static void _FetchCHR(Uint8 *pLine, SnesPPU *pPPU, SnesBGInfoT *pBGInfo, struct 
 //
 
 
+#if CODE_PLATFORM == CODE_PS2 && AURORA_PPU_R5900_ASM && !SNPPU_BG_CACHE
+static void _FetchCHR2_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles, Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask, Uint64 *pPalLookup)
+{
+	AuroraPPUChrDirectAsmCtx ctx =
+	{
+		(const Uint64 *)&_SnesPPU_PlaneLookup[0],
+		(const Uint64 *)&_SnesPPU_PlaneLookup[1],
+		(const Uint8  *)&_SnesPPU_HFlipLookup[1][0],
+		(const Uint64 *)pPalLookup
+	};
+	PROF_ENTER("_FetchCHR2_64");
+	AuroraPPUFetchCHR2Direct64PS2(
+		pVram, uBaseAddr, pTiles, nTiles, uScrollY, pDest, pMask, &ctx);
+	PROF_LEAVE("_FetchCHR2_64");
+}
+#else
 static void _FetchCHR2_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles, Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask, Uint64 *pPalLookup)
 {
 	const SNPPUBg8FlipT *pFlip;
@@ -652,6 +717,7 @@ static void _FetchCHR2_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRende
 	PROF_LEAVE("_FetchCHR2_64");
 
 }
+#endif
 
 
 
@@ -661,6 +727,16 @@ static void _FetchCHR2_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRende
 
 
 
+#if CODE_PLATFORM == CODE_PS2 && AURORA_PPU_R5900_ASM && !SNPPU_BG_CACHE
+static void _FetchCHR4_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles, Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask)
+{
+	PROF_ENTER("_FetchCHR4_64");
+	AuroraPPUFetchCHR4Direct64PS2(
+		pVram, uBaseAddr, pTiles, nTiles, uScrollY, pDest, pMask,
+		&_AuroraPPUChr4DirectAsmCtx);
+	PROF_LEAVE("_FetchCHR4_64");
+}
+#else
 static void _FetchCHR4_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles, Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask)
 {
 	const SNPPUBg8FlipT *pFlip;
@@ -790,6 +866,7 @@ static void _FetchCHR4_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRende
 	}
 	PROF_LEAVE("_FetchCHR4_64");
 }
+#endif
 
 
 /* AURORA_ACCURACY_MODE5_HIRES_DECIMATE_V1_1_20260906
@@ -1318,9 +1395,21 @@ static void _FetchCHR_64(Uint8 *pLine, SnesPPU *pPPU, SnesBGInfoT *pBGInfo, stru
 
 
 #if CODE_PLATFORM == CODE_PS2
+#if AURORA_PPU_R5900_ASM
+static void _RenderBGData_O(Uint8 *pLine8, Uint8 *pSrc8, SNMaskT *pBGMask, Uint32 uScrollX, Int32 nTiles)
+{
+	AuroraPPURenderBGDataOPS2(
+		pLine8, pSrc8, pBGMask->uMask8, uScrollX, nTiles,
+		(const Uint64 *)&_SnesPPU_PlaneLookup[1]);
+}
 
-
-
+static void _RenderBGData(Uint8 *pLine8, Uint8 *pSrc8, SNMaskT *pBGMask, Uint32 uScrollX, Int32 nTiles)
+{
+	AuroraPPURenderBGDataPS2(
+		pLine8, pSrc8, pBGMask->uMask8, uScrollX, nTiles,
+		(const Uint64 *)&_SnesPPU_PlaneLookup[1]);
+}
+#else
 static void _RenderBGData_O(Uint8 *pLine8, Uint8 *pSrc8, SNMaskT *pBGMask, Uint32 uScrollX, Int32 nTiles)
 {
 	Uint16 *pMaskData;
@@ -1461,7 +1550,7 @@ static void _RenderBGData(Uint8 *pLine8, Uint8 *pSrc8, SNMaskT *pBGMask, Uint32 
 		nTiles-=2;
 	}
 }
-
+#endif
 
 #else
 

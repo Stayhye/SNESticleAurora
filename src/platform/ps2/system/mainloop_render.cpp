@@ -398,11 +398,14 @@ void MainLoopSafeFrameskipSetGameplayActive(Bool active)
             s_SafeFrameskipFrontendLastFlip = 0;
             s_SafeFrameskipTickStart = 0;
             s_SafeFrameskipPreFlip = 0;
-            /* AURORA_SAFE_FRAMESKIP_MENU_HOST_EVIDENCE_BARRIER_V12_20260927 */
-            s_SafeFrameskipHealthyFlipRun = 0;
-            s_SafeFrameskipLastPresentedWork = 0;
-            s_SafeFrameskipLastPresentedWorkValid = FALSE;
-            s_SafeFrameskipOverrunPending = FALSE;
+            /* AURORA_SAFE_FRAMESKIP_MENU_TRUE_PAUSE_V14_20260928
+             *
+             * Ordinary live-core UI is a PAUSE, not a scheduler boundary.
+             * Aim phase is already frozen above and rebuilt at the first
+             * resumed Take(). Preserve completed gameplay evidence too.
+             *
+             * Only the timestamp pairs cleared below are invalid across
+             * time spent in UI. */
             return;
         }
 

@@ -96,6 +96,20 @@ static void _SNSpcBRRFilter4(Int16 *pOut, Int16 *pIn, Int32 nSamples, Int32 eFil
 
 
 
+/* AURORA_SNES_AUDIO_MIPS_FINAL_20260927
+ * Keep nibble/range decode in C; move the fixed 16-sample recursive filter to
+ * a standalone EABI-safe R5900 kernel.  Non-PS2 builds retain the exact C
+ * reference implementation below. */
+#if CODE_PLATFORM == CODE_PS2
+extern void _SNSpcBRRFilterPS2(Int16 *pOut, Int16 *pIn,
+                               Int32 eFilterType, Int32 iPrev0, Int32 iPrev1);
+static void _SNSpcBRRFilter3(Int16 *pOut, Int16 *pIn, Int32 nSamples,
+                             Int32 eFilterType, Int32 iPrev0, Int32 iPrev1)
+{
+    (void)nSamples;
+    _SNSpcBRRFilterPS2(pOut, pIn, eFilterType, iPrev0, iPrev1);
+}
+#else
 /* AURORA_BRR_FILTER3_ACTIVE_RESTORE_V1_20260916 */
 static void _SNSpcBRRFilter3(Int16 *pOut, Int16 *pIn, Int32 nSamples, Int32 eFilterType, Int32 iPrev0, Int32 iPrev1)
 {
@@ -118,6 +132,7 @@ static void _SNSpcBRRFilter3(Int16 *pOut, Int16 *pIn, Int32 nSamples, Int32 eFil
         iPrev0 = out;
     }
 }
+#endif
 
 
 Uint8 SNSpcBRRDecode(Uint8 *pBRRBlock, Int16 *pOut, Int32 iPrev0, Int32 iPrev1)

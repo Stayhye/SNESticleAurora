@@ -117,6 +117,16 @@ static void _SNPPUGSValidateStage(const SNPPUBlendInfoT *pInfo)
 
 extern SnesChrLookupT _SnesPPU_PlaneLookup[2];
 
+/* AURORA_R5900_HOTPATHS_FINAL_V1_20260927: PS2 standalone R5900 GS attribute expansion. */
+#ifndef AURORA_PPU_GS_PLANAR_R5900
+#define AURORA_PPU_GS_PLANAR_R5900 ((CODE_PLATFORM == CODE_PS2) && 1)
+#endif
+#if CODE_PLATFORM == CODE_PS2
+extern "C" void AuroraPPUPlanarTo3PS2(
+    Uint8 *pDest, const Uint8 *pMask0, const Uint8 *pMask1,
+    const Uint8 *pMask2, const Uint64 *pLookup64);
+#endif
+
 /* AURORA_TOPGEAR_GS_COLORLUT_CACHE_V4_20260917
  * SNPPUColorGetPalette() returns a fixed static array. Calibration
  * mutates its contents in place, so this address remains valid. */
@@ -159,6 +169,12 @@ static Uint32 _SNPPUBlend_AttribSubPal[256] _ALIGN(64) =
  * exact same 32 mask bytes through byte pointers directly. */
 static void _PlanarTo3(Uint8 *pDest, SNMaskT *pSrc0, SNMaskT *pSrc1, SNMaskT *pSrc2)
 {
+#if AURORA_PPU_GS_PLANAR_R5900
+    AuroraPPUPlanarTo3PS2(
+        pDest, pSrc0->uMask8, pSrc1->uMask8, pSrc2->uMask8,
+        (const Uint64 *)&_SnesPPU_PlaneLookup[1][0]);
+#else
+
 	Uint32 nBytes = 256 / 8;
 	SnesChrLookup64T *pLookup64 = (SnesChrLookup64T *)&_SnesPPU_PlaneLookup[1];
 	Uint64 *pDest64 = (Uint64 *)pDest;
@@ -177,6 +193,7 @@ static void _PlanarTo3(Uint8 *pDest, SNMaskT *pSrc0, SNMaskT *pSrc1, SNMaskT *pS
 		*pDest64++ = uData;
 		nBytes--;
 	}
+#endif
 }
 
 void SNPPUBlendGS::MarkPaletteEntryDirty(Uint32 uAddr)
