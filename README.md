@@ -94,14 +94,13 @@ User interface:
 * Blackthorne (SNES) black screen fixed
 * Magical Pop'n (SNES) freeze fixed
 * Accele Brid (SNES) freeze fixed
-* Speedy Gonzales in Los Gatos Banditos (SNES) performance fixed *(with special safe frameskip)*
-* Top Gear (SNES) performance fixed *(with special safe frameskip)*
+* Kishin Douji Zenki: Tenchi Meidou (SNES) black screen fixed
+* The Lost Vikings 1 and 2 (SNES) black screen fixed
 * Many other graphical glitches and inaccuracies on many games and emulated systems were fixed
 
 **TO BE FIXED:**
-
-* Kishin Douji Zenki: Tenchi Meidou (SNES) black screen *(in progress)*
-* The Lost Vikings 1 and 2 (SNES) black screen *(in progress)*
+* Top Gear (SNES) performance *(in progress, safe frameskip helps a lot)*
+* Speedy Gonzales in Los Gatos Banditos (SNES) performance *(in progress, safe frameskip won't help much)*
 * SNES SA-1 Emulation (experimental state)
 * SNES FX1 and FX2 emulation (experimental state)
 * PC Engine CD and Sega CD performance (experimental state)
