@@ -71,11 +71,29 @@ PICODRIVE_INC := $(PICODRIVE_DIR)/platform/libretro/libretro-common/include
 
 # AURORA_PCE_EXPERIMENTAL_V1
 PCE_DIR ?= $(CURDIR)/src/third_party/beetle-pce-fast
-PCE_RAW_LIB ?= $(PCE_DIR)/mednafen_pce_fast_libretro_ps2_raw.a
-PCE_LIB ?= $(PCE_DIR)/beetle_pce_fast_libretro_ps2.a
+# AURORA_PCE_MIPS_CUMULATIVE_V5_20260928
+# AURORA_PCE_MIPS_STAGE_V1_20260928
+# Build PCE from a reproducible build-tree staging copy. The pinned submodule
+# remains pristine; PS2-only C wrappers and assembly live in the Aurora repo.
+PCE_STAGE_DIR ?= $(CURDIR)/build/beetle-pce-fast-src
+PCE_STAGE_STAMP := $(PCE_STAGE_DIR)/.aurora-pce-mips-stage-v1
+PCE_BUILD_DIR ?= $(CURDIR)/build/pce
+PCE_RAW_LIB ?= $(PCE_STAGE_DIR)/mednafen_pce_fast_libretro_ps2_raw.a
+PCE_LIB ?= $(PCE_BUILD_DIR)/beetle_pce_fast_libretro_ps2.a
 PCE_PS2_MAKEFILE := $(CURDIR)/tools/Makefile.beetle-pce-fast-ps2
 PCE_NAMESPACE_TOOL := $(CURDIR)/tools/namespace_pce_archive.py
+PCE_PREPARE_TOOL := $(CURDIR)/tools/prepare_beetle_pce_fast_sources.py
+PCE_MIPS_SOURCE := $(CURDIR)/src/platform/ps2/pce/aurora_pce_hotpaths_ps2.S
 PCE_PYTHON ?= python3
+PCE_STAGE_INPUTS := \
+	$(PCE_DIR)/Makefile \
+	$(PCE_DIR)/Makefile.common \
+	$(PCE_DIR)/mednafen/pce_fast/huc6280.c \
+	$(PCE_DIR)/mednafen/pce_fast/huc6280.h \
+	$(PCE_DIR)/mednafen/pce_fast/vdc.c \
+	$(PCE_DIR)/mednafen/pce_fast/psg.c \
+	$(PCE_DIR)/mednafen/sound/Blip_Buffer.c \
+	$(PCE_DIR)/mednafen/include/blip/Blip_Buffer.h
 PCE_NM ?= $(shell if command -v mips64r5900el-ps2-elf-nm >/dev/null 2>&1; then command -v mips64r5900el-ps2-elf-nm; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-nm" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-nm"; else echo nm; fi)
 PCE_OBJCOPY ?= $(shell if command -v mips64r5900el-ps2-elf-objcopy >/dev/null 2>&1; then command -v mips64r5900el-ps2-elf-objcopy; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-objcopy" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-objcopy"; else echo objcopy; fi)
 PCE_RANLIB ?= $(shell if command -v mips64r5900el-ps2-elf-ranlib >/dev/null 2>&1; then command -v mips64r5900el-ps2-elf-ranlib; elif [ -x "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-ranlib" ]; then echo "$(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-ranlib"; else echo ranlib; fi)
@@ -1162,20 +1180,26 @@ $(PICODRIVE_LIB): FORCE_PICODRIVE $(PICODRIVE_CONFIG_STAMP)
 
 # AURORA_PCE_INCREMENTAL_BUILD_V1_20260824
 # AURORA_PCE_INCREMENTAL_BUILD_V1_MAKEFIX_20260824
-# Always enter Beetle's own Makefile so it can inspect source/header
-# timestamps. The sub-make is incremental; critically, there is NO `clean`.
-# Keep the recursive make invocation on one physical recipe line to avoid
-# Makefile continuation/prefix ambiguities.
+# AURORA_PCE_MIPS_STAGE_V1_20260928
+# Stage from the exact pinned submodule; never build or patch inside it.
+$(PCE_STAGE_STAMP): $(PCE_STAGE_INPUTS) $(PCE_PREPARE_TOOL) $(PCE_MIPS_SOURCE)
+	@printf '[ Beetle PCE Fast ] preparing pristine PS2 staging tree\n'
+	@$(PCE_PYTHON) "$(PCE_PREPARE_TOOL)" --source "$(PCE_DIR)" --stage "$(PCE_STAGE_DIR)" --asm "$(PCE_MIPS_SOURCE)"
+	@test -f "$@"
+
+# Always enter Beetle's staged Makefile so dependency metadata remains
+# incremental. There is deliberately no clean here.
 .PHONY: FORCE_PCE_INCREMENTAL
 FORCE_PCE_INCREMENTAL:
 
-$(PCE_RAW_LIB): FORCE_PCE_INCREMENTAL $(PCE_PS2_MAKEFILE)
-	@printf '[ Beetle PCE Fast ] checking incremental PS2 core\n'
-	@test -f "$(PCE_DIR)/Makefile" || { echo "ERROR: missing $(PCE_DIR)"; exit 1; }
-	+@PATH="$(PS2DEV)/ee/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" $(MAKE) --no-print-directory -C "$(PCE_DIR)" -f "$(PCE_PS2_MAKEFILE)" CC="$(EE_CC)" CXX="$(EE_CXX)" AR="$(EE_AR)" all
+$(PCE_RAW_LIB): FORCE_PCE_INCREMENTAL $(PCE_STAGE_STAMP) $(PCE_PS2_MAKEFILE)
+	@printf '[ Beetle PCE Fast ] checking incremental staged PS2 core\n'
+	@test -f "$(PCE_STAGE_DIR)/Makefile" || { echo "ERROR: missing $(PCE_STAGE_DIR)"; exit 1; }
+	+@PATH="$(PS2DEV)/ee/bin:$(PS2DEV)/bin:$(PS2SDK)/bin:$$PATH" $(MAKE) --no-print-directory -C "$(PCE_STAGE_DIR)" -f "$(PCE_PS2_MAKEFILE)" CC="$(EE_CC)" CXX="$(EE_CXX)" AR="$(EE_AR)" all
 
 $(PCE_LIB): $(PCE_RAW_LIB) $(PCE_NAMESPACE_TOOL)
 	@printf '[ Beetle PCE Fast ] namespacing embedded libretro core\n'
+	@mkdir -p "$(dir $@)"
 	@$(PCE_PYTHON) "$(PCE_NAMESPACE_TOOL)" --nm "$(PCE_NM)" --objcopy "$(PCE_OBJCOPY)" --ranlib "$(PCE_RANLIB)" --raw "$(PCE_RAW_LIB)" --output "$(PCE_LIB)"
 
 .PHONY: pce-core

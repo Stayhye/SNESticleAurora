@@ -73,6 +73,10 @@ Bool MainLoopProcess()
     NetPlayRPCInputT NetInput;
     /* AURORA_PD_CADENCE_RESUME_FIRST_FRAME_V7_20260821 */
     Bool bGameplayJustStarted = FALSE;
+    /* AURORA_MENU_RESUME_COLDSTART_SPLIT_V15_20260928
+     * Audio must be re-primed after the menu hard-cut, but same-core UI
+     * resume is not a new gameplay/cadence epoch. */
+    Bool bGameplayAudioNeedsPrime = FALSE;
 
     /* AURORA_CODEPATH_SIMPLIFY_V5_20260927
      * InputPoll freezes these values for the rest of this frontend tick. */
@@ -144,15 +148,24 @@ Bool MainLoopProcess()
          * This covers direct quick-state menu paths as well as _MenuEnable(). */
         MainLoopSafeFrameskipSetGameplayActive(bGameplayNow);
 
-        bGameplayJustStarted =
+        bGameplayAudioNeedsPrime =
             (bGameplayNow &&
              (!_AudioGameplayWasActive ||
               _AudioGameplaySystem != _pSystem)) ? TRUE : FALSE;
 
-        if (bGameplayJustStarted)
+        /* V15: a normal menu round-trip keeps the same System and frame
+         * sequence. Do not reset PicoDrive cadence or turbo host phase just
+         * because the audio backend needs its safety reservoir rebuilt. */
+        bGameplayJustStarted =
+            (bGameplayNow &&
+             (_AudioGameplaySystem != _pSystem ||
+              (_pSystem && _pSystem->GetFrame() == 0))) ? TRUE : FALSE;
+
+        if (bGameplayAudioNeedsPrime)
         {
-            /* Start SMS/GG autofire in its ON half whenever gameplay resumes. */
-            MainLoopTurboRearmHostPhase();
+            /* True core/cadence start only; NOT ordinary same-core UI resume. */
+            if (bGameplayJustStarted)
+                MainLoopTurboRearmHostPhase();
             /* AURORA_FCEUMM_FDS_V14_AUDIO_BURST_STABILITY_20260827
              * FDS also produces roughly one 48 kHz frame of audio per host
              * tick. 1024 drains faster than production while preventing an

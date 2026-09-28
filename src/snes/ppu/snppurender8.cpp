@@ -259,6 +259,12 @@ extern "C" void AuroraPPUFetchCHR4Direct64PS2(
 	const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles,
 	Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask,
 	const AuroraPPUChrDirectAsmCtx *pCtx);
+/* AURORA_PPU_R5900_CHR8_V16_20260928
+ * 8bpp uses the same direct-row context as 2/4bpp; pPalLookup is unused. */
+extern "C" void AuroraPPUFetchCHR8Direct64PS2(
+	const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles,
+	Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask,
+	const AuroraPPUChrDirectAsmCtx *pCtx);
 extern "C" void AuroraPPURenderBGDataOPS2(
 	Uint8 *pLine8, Uint8 *pSrc8, const Uint8 *pMaskData,
 	Uint32 uScrollX, Int32 nTiles, const Uint64 *pMaskLookup);
@@ -1228,6 +1234,19 @@ static void _FetchCHR4Mode5_64(
 }
 
 
+#if CODE_PLATFORM == CODE_PS2 && AURORA_PPU_R5900_ASM && !SNPPU_BG_CACHE
+/* AURORA_PPU_R5900_CHR8_V16_20260928
+ * Emulated PPU decisions stay in C++; this leaf kernel only expands the
+ * already-selected 8bpp VRAM row and writes the same 8-byte tile + masks. */
+static void _FetchCHR8_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles, Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask)
+{
+	PROF_ENTER("_FetchCHR8_64");
+	AuroraPPUFetchCHR8Direct64PS2(
+		pVram, uBaseAddr, pTiles, nTiles, uScrollY, pDest, pMask,
+		&_AuroraPPUChr4DirectAsmCtx);
+	PROF_LEAVE("_FetchCHR8_64");
+}
+#else
 static void _FetchCHR8_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles, Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask)
 {
 	SNPPUBg8FlipT *pFlip;
@@ -1293,6 +1312,7 @@ static void _FetchCHR8_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRende
 	}
 	PROF_LEAVE("_FetchCHR8_64");
 }
+#endif
 
 
 

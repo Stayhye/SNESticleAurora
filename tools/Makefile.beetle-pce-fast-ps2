@@ -59,7 +59,12 @@ FLAGS += \
 
 CFLAGS += $(FLAGS) -std=gnu99
 CXXFLAGS += $(FLAGS) -std=gnu++11 -fno-exceptions -fno-rtti
-OBJECTS := $(SOURCES_CXX:.cpp=.o) $(SOURCES_C:.c=.o)
+
+# AURORA_PCE_MIPS_ASM_BUILD_V1_20260928
+# This file is copied into the build-tree stage by Aurora's prepare tool.
+SOURCES_S := $(CORE_EMU_DIR)/aurora_pce_hotpaths_ps2.S
+SFLAGS := -G0 -O3 -DPS2 -D_EE -DAURORA_PS2_PCE_FAST=1
+OBJECTS := $(SOURCES_CXX:.cpp=.o) $(SOURCES_C:.c=.o) $(SOURCES_S:.S=.o)
 
 # AURORA_PCE_INCREMENTAL_BUILD_V1_20260824
 # Header-aware incremental build. These flags only emit dependency metadata;
@@ -84,6 +89,9 @@ $(TARGET): $(OBJECTS)
 
 %.o: %.c
 	$(CC) -c -o $@ $< $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS)
+
+%.o: %.S
+	$(CC) -c -o $@ $< $(CPPFLAGS) $(SFLAGS)
 
 clean:
 	rm -f $(OBJECTS) $(DEPS) $(TARGET)

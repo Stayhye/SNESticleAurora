@@ -126,6 +126,19 @@ static Uint32      s_SafeFrameskipUiFreezeFrame = 0;
 static Bool        s_SafeFrameskipUiResumePhasePending = FALSE;
 static Int32       s_SafeFrameskipUiResumeAimPhase = 0;
 
+/* AURORA_SAFE_FRAMESKIP_MENU_BOUNDARY_V15_20260928
+ *
+ * The UI transition itself is NOT a timing boundary. _MenuEnable(TRUE)
+ * performs host-side transition work before SetGameplayActive(FALSE) sees the
+ * edge, so sampling Aim-now there makes menu open/close alter scheduler debt.
+ *
+ * Commit phase only after a complete gameplay host tick. Menu entry copies
+ * this immutable boundary snapshot; it never samples ProfCtrGetCycle(). */
+static Bool        s_SafeFrameskipCommittedPhaseValid = FALSE;
+static Int32       s_SafeFrameskipCommittedAimPhase = 0;
+static const void *s_SafeFrameskipCommittedSystem = NULL;
+static Uint32      s_SafeFrameskipCommittedFrame = 0;
+
 /* AURORA_SAFE_FRAMESKIP_MENU_TRANSIENT_BARRIER_V8_1_20260926
  * Kept as ancestry marker: V10 supersedes V8.1 reset-boundary semantics. */
 
@@ -188,9 +201,37 @@ static Uint32 _MainLoopSafeFrameskipMedian3(Uint32 a, Uint32 b, Uint32 c)
     return b;
 }
 
+static void _MainLoopSafeFrameskipInvalidateCommittedBoundary(void)
+{
+    s_SafeFrameskipCommittedPhaseValid = FALSE;
+    s_SafeFrameskipCommittedAimPhase = 0;
+    s_SafeFrameskipCommittedSystem = NULL;
+    s_SafeFrameskipCommittedFrame = 0;
+}
+
+static void _MainLoopSafeFrameskipCommitGameplayBoundary(Uint32 now)
+{
+    const void *system = (const void *)_pSystem;
+
+    if (system != NULL && s_SafeFrameskipAim != 0u)
+    {
+        s_SafeFrameskipCommittedPhaseValid = TRUE;
+        s_SafeFrameskipCommittedAimPhase =
+            (Int32)(s_SafeFrameskipAim - now);
+        s_SafeFrameskipCommittedSystem = system;
+        s_SafeFrameskipCommittedFrame =
+            (Uint32)_pSystem->GetFrame();
+    }
+    else
+    {
+        _MainLoopSafeFrameskipInvalidateCommittedBoundary();
+    }
+}
+
 static void _MainLoopSafeFrameskipResetTiming(void)
 {
     s_SafeFrameskipAim = 0;
+    _MainLoopSafeFrameskipInvalidateCommittedBoundary();
     s_SafeFrameskipConsecutive = 0;
     s_SafeFrameskipSkipPresentation = FALSE;
     s_SafeFrameskipRecoveryPending = FALSE;
@@ -361,16 +402,21 @@ void MainLoopSafeFrameskipSetGameplayActive(Bool active)
 
             if (system != NULL)
             {
-                const Uint32 now = ProfCtrGetCycle();
+                const Bool sameCommittedState =
+                    (s_SafeFrameskipCommittedPhaseValid &&
+                     s_SafeFrameskipCommittedSystem == system &&
+                     s_SafeFrameskipCommittedFrame == frame)
+                    ? TRUE : FALSE;
 
                 s_SafeFrameskipUiFreezeValid = TRUE;
                 s_SafeFrameskipUiFreezeSystem = system;
                 s_SafeFrameskipUiFreezeFrame = frame;
-                s_SafeFrameskipUiFreezeHadAim =
-                    (s_SafeFrameskipAim != 0u) ? TRUE : FALSE;
+
+                /* V15: the menu edge itself is never a clock sample. */
+                s_SafeFrameskipUiFreezeHadAim = sameCommittedState;
                 s_SafeFrameskipUiFreezeAimPhase =
-                    s_SafeFrameskipUiFreezeHadAim
-                        ? (Int32)(s_SafeFrameskipAim - now)
+                    sameCommittedState
+                        ? s_SafeFrameskipCommittedAimPhase
                         : 0;
             }
             else
@@ -986,6 +1032,11 @@ void MainLoopRender()
                  * With no backlog the second call returns immediately. */
                 Aud_BufferedAsyncStart();
                 Aud_BufferedAsyncStart();
+
+                /* V15 completed hidden-host-tick boundary. Core/audio have
+                 * already advanced; no VBlank/presentation wait follows. */
+                _MainLoopSafeFrameskipCommitGameplayBoundary(
+                    ProfCtrGetCycle());
             }
             ++_iFrame;
             return;
@@ -1556,7 +1607,15 @@ void MainLoopRender()
      * here so synchronous audsrv RPC latency is moved out of the pre-render
      * deadline. Aud_BufferedAsyncStart uses only wait=0 drains. */
     if (!_bMenu && _pSystem && !_MainLoop_BlackScreen)
+    {
         Aud_BufferedAsyncStart();
+
+        /* V15 completed presented-host-tick boundary. Commit AFTER the
+         * post-VBlank drain because that work occurs before the next Take()
+         * during uninterrupted gameplay and therefore belongs to phase. */
+        _MainLoopSafeFrameskipCommitGameplayBoundary(
+            ProfCtrGetCycle());
+    }
 
     _iFrame++;
 }

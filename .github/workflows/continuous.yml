@@ -35,6 +35,9 @@ jobs:
           test -f src/third_party/fceumm-fds/Copying
           test -f src/third_party/fceumm-fds/src/fds.c
           test -f tools/Makefile.beetle-pce-fast-ps2
+          # AURORA_CONTINUOUS_PCE_MIPS_STAGE_V1_20260928
+          test -f tools/prepare_beetle_pce_fast_sources.py
+          test -f src/platform/ps2/pce/aurora_pce_hotpaths_ps2.S
           test -f tools/Makefile.fceumm-fds-ps2
           test -f tools/prepare_fceumm_fds_sources.py
           test -f tools/namespace_fceumm_fds_archive.py
@@ -45,7 +48,7 @@ jobs:
           test -f tools/namespace_gpsp_archive.py
           test -f tools/prepare_gpsp_aurora_sources.py # AURORA_GPSP_GBA_V2_TFA_BLEND_20260911
           # Validate current tooling syntactically; the actual build is the authoritative integration check.
-          python3 -m py_compile tools/prepare_gpsp_aurora_sources.py tools/namespace_gpsp_archive.py tools/prepare_fceumm_fds_sources.py tools/namespace_fceumm_fds_archive.py
+          python3 -m py_compile tools/prepare_beetle_pce_fast_sources.py tools/prepare_gpsp_aurora_sources.py tools/namespace_gpsp_archive.py tools/prepare_fceumm_fds_sources.py tools/namespace_fceumm_fds_archive.py
           test -f LICENSES/gpSP-GPL-2.0.txt
 
 
@@ -64,6 +67,8 @@ jobs:
           git submodule status --recursive
           echo "Beetle PCE Fast commit:"
           git -C src/third_party/beetle-pce-fast rev-parse HEAD
+          test "$(git -C src/third_party/beetle-pce-fast rev-parse HEAD)" = "4685b6454924933fd6dbc6ddca84b12ccdd88440"
+          python3 tools/prepare_beetle_pce_fast_sources.py --source src/third_party/beetle-pce-fast --check-source
           echo "FCEUmm/FDS commit:"
           git -C src/third_party/fceumm-fds rev-parse HEAD
           test "$(git -C src/third_party/fceumm-fds rev-parse HEAD)" = "dc77e3ca4baad08f0023f61dba9846550735b74d"

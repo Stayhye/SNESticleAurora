@@ -31,6 +31,29 @@ static Uint8 _SNPPUBg_Tile16Pos[4][4] =
 	{17, 16}, // flipxy
 };
 
+
+/* AURORA_PPU_BG_MAP_R5900_V17_20260928
+ * PS2-only leaf kernels for the ordinary non-OPT tilemap fetch loops.
+ * Screen selection, 32-column wrap, tile metadata and 16x16 quadrant
+ * selection are preserved exactly. Timing/state/VRAM ownership stay in C++. */
+#ifndef AURORA_PPU_BG_MAP_R5900_ASM
+#define AURORA_PPU_BG_MAP_R5900_ASM 1
+#endif
+
+#if CODE_PLATFORM == CODE_PS2 && AURORA_PPU_BG_MAP_R5900_ASM
+typedef char AuroraBGMapTileSizeCheck[(sizeof(SnesRenderTileT) == 6) ? 1 : -1];
+typedef char AuroraBGMapTilePalCheck[(__builtin_offsetof(SnesRenderTileT, uPal) == 2) ? 1 : -1];
+typedef char AuroraBGMapTileFlipCheck[(__builtin_offsetof(SnesRenderTileT, uFlip) == 3) ? 1 : -1];
+typedef char AuroraBGMapTileOffsetYCheck[(__builtin_offsetof(SnesRenderTileT, uOffsetY) == 4) ? 1 : -1];
+
+extern "C" void AuroraPPUFetchBG8x8MapPS2(
+    Uint32 uAddr, SnesRenderTileT *pTile, Int32 nTiles,
+    SnesPPUScreenT **ppScreen);
+extern "C" void AuroraPPUFetchBG16x16MapPS2(
+    Uint32 uAddr, SnesRenderTileT *pTile, Int32 nTiles,
+    SnesPPUScreenT **ppScreen, Uint32 uFlipXOR);
+#endif
+
 // BG Fetch 
 /* AURORA_SNES_SAFE_PERF_V4_20260919: invariant-hoisting only; no BG addressing/timing rule changes. */
 
@@ -118,6 +141,15 @@ static Uint32 _FetchOffset(Uint16 uAddr, Uint16 *pOffset, Int32 nTiles, SnesPPUS
 }
 
 
+#if CODE_PLATFORM == CODE_PS2 && AURORA_PPU_BG_MAP_R5900_ASM
+/* V17: ordinary 8x8 map metadata fetch stays a pure host leaf kernel. */
+static void _FetchBG8x8(Uint32 uAddr, SnesRenderTileT *pTile, Int32 nTiles, SnesPPUScreenT **ppScreen)
+{
+    PROF_ENTER("_FetchBG8x8");
+    AuroraPPUFetchBG8x8MapPS2(uAddr, pTile, nTiles, ppScreen);
+    PROF_LEAVE("_FetchBG8x8");
+}
+#else
 static void _FetchBG8x8(Uint32 uAddr, SnesRenderTileT *pTile, Int32 nTiles, SnesPPUScreenT **ppScreen)
 {
 	//  each screen is 32x32
@@ -164,8 +196,18 @@ static void _FetchBG8x8(Uint32 uAddr, SnesRenderTileT *pTile, Int32 nTiles, Snes
 
     PROF_LEAVE("_FetchBG8x8");
 }
+#endif
 
 
+#if CODE_PLATFORM == CODE_PS2 && AURORA_PPU_BG_MAP_R5900_ASM
+/* V17: ordinary 16x16 map expansion; OPT/Mode6-special paths remain C++. */
+static void _FetchBG16x16(Uint32 uAddr, SnesRenderTileT *pTile, Int32 nTiles, SnesPPUScreenT **ppScreen, Uint32 uFlipXOR)
+{
+    PROF_ENTER("_FetchBG16x16");
+    AuroraPPUFetchBG16x16MapPS2(uAddr, pTile, nTiles, ppScreen, uFlipXOR);
+    PROF_LEAVE("_FetchBG16x16");
+}
+#else
 static void _FetchBG16x16(Uint32 uAddr, SnesRenderTileT *pTile, Int32 nTiles, SnesPPUScreenT **ppScreen, Uint32 uFlipXOR)
 {
 	//  each screen is 32x32
@@ -237,6 +279,7 @@ static void _FetchBG16x16(Uint32 uAddr, SnesRenderTileT *pTile, Int32 nTiles, Sn
 
 	PROF_LEAVE("_FetchBG16x16");
 }
+#endif
 
 
 
