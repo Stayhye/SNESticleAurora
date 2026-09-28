@@ -125,6 +125,46 @@ extern SnesChrLookupT _SnesPPU_PlaneLookup[2];
 extern "C" void AuroraPPUPlanarTo3PS2(
     Uint8 *pDest, const Uint8 *pMask0, const Uint8 *pMask1,
     const Uint8 *pMask2, const Uint64 *pLookup64);
+
+/* AURORA_SNES_MIPS_CUMULATIVE_V20_20260928
+ * Host-only scratchpad copy.  SNPPUBlendInfoT already proves payload
+ * contiguity above; add the alignment/footprint proof required by lq/sq. */
+extern "C" void AuroraPPUCopyBlendPayloadPS2(
+    Uint8 *pDest, const Uint8 *pSrc, Uint32 nQwords128);
+
+typedef char SNPPUBlendPayloadR5900LayoutCheck[
+    (((offsetof(SNPPUBlendInfoT, uMain8) & 15) == 0) &&
+     ((offsetof(SNPPUBlendInfoT, uSub8) & 15) == 0) &&
+     ((offsetof(SNPPUBlendInfoT, uAttrib8) & 15) == 0) &&
+     ((sizeof(((SNPPUBlendInfoT *)0)->uMain8) & 15) == 0) &&
+     ((sizeof(((SNPPUBlendInfoT *)0)->uSub8) & 15) == 0) &&
+     ((sizeof(((SNPPUBlendInfoT *)0)->uAttrib8) & 15) == 0)) ? 1 : -1];
+
+static _INLINE Uint32 _SNPPUBlendPayloadQwords(Bool bDirectMain)
+{
+#if SNDBG_LOG && SNDBG_DEEP
+    /* Deep diagnostics compare the complete staged struct even on the
+       direct-main path, matching the old diagnostic-only memcpy behavior. */
+    (void)bDirectMain;
+    return (sizeof(((SNPPUBlendInfoT *)0)->uMain8) +
+            sizeof(((SNPPUBlendInfoT *)0)->uSub8) +
+            sizeof(((SNPPUBlendInfoT *)0)->uAttrib8)) >> 4;
+#else
+    return (bDirectMain
+        ? sizeof(((SNPPUBlendInfoT *)0)->uMain8)
+        : sizeof(((SNPPUBlendInfoT *)0)->uMain8) +
+          sizeof(((SNPPUBlendInfoT *)0)->uSub8) +
+          sizeof(((SNPPUBlendInfoT *)0)->uAttrib8)) >> 4;
+#endif
+}
+
+static _INLINE void _SNPPUBlendCopyLinePayload(
+    SNPPUBlendInfoT *pDest, const SNPPUBlendInfoT *pSource, Bool bDirectMain)
+{
+    AuroraPPUCopyBlendPayloadPS2(
+        pDest->uMain8, pSource->uMain8,
+        _SNPPUBlendPayloadQwords(bDirectMain));
+}
 #endif
 
 /* AURORA_TOPGEAR_GS_COLORLUT_CACHE_V4_20260917
@@ -170,9 +210,11 @@ static Uint32 _SNPPUBlend_AttribSubPal[256] _ALIGN(64) =
 static void _PlanarTo3(Uint8 *pDest, SNMaskT *pSrc0, SNMaskT *pSrc1, SNMaskT *pSrc2)
 {
 #if AURORA_PPU_GS_PLANAR_R5900
+    /* AURORA_DKC_PLANAR_SPR_UNROLL4_V24_20260928_LOOKUP
+     * Same immutable PlaneLookup[1] bytes mirrored by BeginRender. */
     AuroraPPUPlanarTo3PS2(
         pDest, pSrc0->uMask8, pSrc1->uMask8, pSrc2->uMask8,
-        (const Uint64 *)&_SnesPPU_PlaneLookup[1][0]);
+        (const Uint64 *)(PS2MEM_SCRATCHPAD + 10 * 1024));
 #else
 
 	Uint32 nBytes = 256 / 8;
@@ -233,7 +275,25 @@ Uint32 SNPPUBlendGS::CopyDirtyPalette(PaletteT *pDest,
 	   copying the whole 1 KiB CLUT there was pure EE work. */
 	if (m_nPaletteDirty >= 64)
 	{
-		memcpy(pDest, pSource, sizeof(*pDest));
+		/* AURORA_DKC_PALETTE_STAGE_R5900_V30_20260928
+		 * PaletteT is 1 KiB in this renderer. Both normal callers point at
+		 * Pal members aligned by SNPPUBlendInfoT, so use the same exact
+		 * host-only lq/sq copier as scanline staging. Keep memcpy for any
+		 * unexpected private caller that violates the 16-byte precondition.
+		 */
+#if CODE_PLATFORM == CODE_PS2
+		if ((((Uint32)pDest | (Uint32)pSource) & 15u) == 0 &&
+		    ((sizeof(*pDest) & 15u) == 0))
+		{
+			AuroraPPUCopyBlendPayloadPS2(
+				(Uint8 *)pDest, (const Uint8 *)pSource,
+				(Uint32)(sizeof(*pDest) >> 4));
+		}
+		else
+#endif
+		{
+			memcpy(pDest, pSource, sizeof(*pDest));
+		}
 		uCopiedBytes = sizeof(*pDest);
 	}
 	else
@@ -1062,20 +1122,7 @@ void SNPPUBlendGS::Exec(SNPPUBlendInfoT *pInfo, Int32 iLine, Uint32 uFixedColor3
 		Uint32 uStageHash;
 		#endif
 		uPaletteCopyBytes = CopyDirtyPalette(pDmaInfo->Pal, pInfo->Pal);
-		memcpy(pDmaInfo->uMain8, pInfo->uMain8, sizeof(pDmaInfo->uMain8));
-		if (!bDirectMain)
-		{
-			memcpy(pDmaInfo->uSub8, pInfo->uSub8, sizeof(pDmaInfo->uSub8));
-			memcpy(pDmaInfo->uAttrib8, pInfo->uAttrib8, sizeof(pDmaInfo->uAttrib8));
-		}
-#if SNDBG_DEEP
-		else
-		{
-			/* Keep full staging validation meaningful in the intrusive build. */
-			memcpy(pDmaInfo->uSub8, pInfo->uSub8, sizeof(pDmaInfo->uSub8));
-			memcpy(pDmaInfo->uAttrib8, pInfo->uAttrib8, sizeof(pDmaInfo->uAttrib8));
-		}
-#endif
+		_SNPPUBlendCopyLinePayload(pDmaInfo, pInfo, bDirectMain);
 		_SNPPUGSDiag.CopyCycles += ProfCtrGetCycle() - uStart;
 		_SNPPUGSDiag.CopyBytes += sizeof(pDmaInfo->uMain8);
 		if (!bDirectMain)
@@ -1110,18 +1157,7 @@ void SNPPUBlendGS::Exec(SNPPUBlendInfoT *pInfo, Int32 iLine, Uint32 uFixedColor3
 	uPaletteCopyBytes = bUploadPalette
 		? CopyDirtyPalette(pDmaInfo->Pal, pInfo->Pal) : 0;
 	(void)uPaletteCopyBytes;
-	if (!bDirectMain)
-	{
-		/* AURORA_TOPGEAR_GS_LINE_PAYLOAD_COPY_V4_20260917 */
-		memcpy(pDmaInfo->uMain8, pInfo->uMain8,
-			sizeof(pDmaInfo->uMain8) + sizeof(pDmaInfo->uSub8) +
-			sizeof(pDmaInfo->uAttrib8));
-	}
-	else
-	{
-		memcpy(pDmaInfo->uMain8, pInfo->uMain8,
-			sizeof(pDmaInfo->uMain8));
-	}
+	_SNPPUBlendCopyLinePayload(pDmaInfo, pInfo, bDirectMain);
 #endif
 	pExecList = bUploadPalette ? &m_DmaListWithPalette : &m_DmaList;
 

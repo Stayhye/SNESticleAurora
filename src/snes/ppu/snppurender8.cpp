@@ -14,7 +14,9 @@
 #include "prof.h"
 #include "sndbglog.h"
 #include "platform/ps2/system/aurora_snes_cost_profiler.h" /* AURORA_SNES_PPU_BREAKDOWN_V2_20260920 */
-//#include "ps2mem.h"
+#if CODE_PLATFORM == CODE_PS2
+#include "ps2mem.h" /* AURORA_DKC_SPR_LUT_MIRROR_V23_20260928_INCLUDE */
+#endif
 
 #define SNPPU_BGPLANE_SIZE 48
 #define SNPPURENDER_CHR64 (TRUE)
@@ -237,6 +239,37 @@ static SNPPUBg8FlipT _FlipTable8[4]=
 #endif
 
 #if CODE_PLATFORM == CODE_PS2 && AURORA_PPU_R5900_ASM
+/* AURORA_DKC_SPR_LUT_MIRROR_V23_20260928_PTRS
+ * Mirror layout is compile-time guarded by snppurender.cpp. */
+#define AURORA_DKC_SPR_PLANE0 ((const Uint64 *)(PS2MEM_SCRATCHPAD + 8 * 1024))
+#define AURORA_DKC_SPR_PLANE1 ((const Uint64 *)(PS2MEM_SCRATCHPAD + 10 * 1024))
+#define AURORA_DKC_SPR_MASKREV ((const Uint8  *)(PS2MEM_SCRATCHPAD + 12 * 1024))
+
+/* AURORA_DKC_CHR_PALETTE_SPR_V27_20260928
+ * 12 KiB+256 .. +383 : 4bpp palette rows (16 * u64)
+ * 12 KiB+384 .. +895 : four 2bpp palette banks (64 * u64)
+ * Both are immutable host-derived LUTs and are refreshed per visible frame.
+ */
+#define AURORA_DKC_SPR_PAL4 ((const Uint64 *)(PS2MEM_SCRATCHPAD + 12 * 1024 + 256))
+#define AURORA_DKC_SPR_PAL2 ((const Uint64 *)(PS2MEM_SCRATCHPAD + 12 * 1024 + 384))
+
+typedef char AuroraDKCSprPal4SizeGuard[
+    (sizeof(_SnesPPU_Tile4PalLookup64) == 128) ? 1 : -1];
+typedef char AuroraDKCSprPal2SizeGuard[
+    (sizeof(_SnesPPU_Tile2PalLookup64) == 512) ? 1 : -1];
+typedef char AuroraDKCSprPaletteEndGuard[
+    ((12 * 1024 + 384 + sizeof(_SnesPPU_Tile2PalLookup64)) <= 16 * 1024) ? 1 : -1];
+
+void SnesPPURender8RefreshPaletteLutsScratchPS2(void)
+{
+    memcpy((void *)(PS2MEM_SCRATCHPAD + 12 * 1024 + 256),
+           (const void *)&_SnesPPU_Tile4PalLookup64[0],
+           sizeof(_SnesPPU_Tile4PalLookup64));
+    memcpy((void *)(PS2MEM_SCRATCHPAD + 12 * 1024 + 384),
+           (const void *)&_SnesPPU_Tile2PalLookup64[0][0],
+           sizeof(_SnesPPU_Tile2PalLookup64));
+}
+
 struct AuroraPPUChrDirectAsmCtx
 {
 	const Uint64 *pPlaneNormal;
@@ -274,10 +307,10 @@ extern "C" void AuroraPPURenderBGDataPS2(
 
 static const AuroraPPUChrDirectAsmCtx _AuroraPPUChr4DirectAsmCtx =
 {
-	(const Uint64 *)&_SnesPPU_PlaneLookup[0],
-	(const Uint64 *)&_SnesPPU_PlaneLookup[1],
-	(const Uint8  *)&_SnesPPU_HFlipLookup[1][0],
-	(const Uint64 *)&_SnesPPU_Tile4PalLookup64[0]
+	AURORA_DKC_SPR_PLANE0,
+	AURORA_DKC_SPR_PLANE1,
+	AURORA_DKC_SPR_MASKREV,
+	AURORA_DKC_SPR_PAL4
 };
 #endif
 
@@ -600,9 +633,9 @@ static void _FetchCHR2_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRende
 {
 	AuroraPPUChrDirectAsmCtx ctx =
 	{
-		(const Uint64 *)&_SnesPPU_PlaneLookup[0],
-		(const Uint64 *)&_SnesPPU_PlaneLookup[1],
-		(const Uint8  *)&_SnesPPU_HFlipLookup[1][0],
+		AURORA_DKC_SPR_PLANE0,
+		AURORA_DKC_SPR_PLANE1,
+		AURORA_DKC_SPR_MASKREV,
 		(const Uint64 *)pPalLookup
 	};
 	PROF_ENTER("_FetchCHR2_64");
@@ -1355,7 +1388,7 @@ static void _FetchCHR_64(Uint8 *pLine, SnesPPU *pPPU, SnesBGInfoT *pBGInfo, stru
 				uScrollY & 7,
 				pLine,
 				pMask,
-				_SnesPPU_Tile2PalLookup64[pBGInfo->uPalBase],
+				AURORA_DKC_SPR_PAL2 + ((Uint32)pBGInfo->uPalBase * 16u),
 				(pRegs->mosaic & 0x02) != 0,
 				bHiresSubscreen
 			);
@@ -1368,7 +1401,7 @@ static void _FetchCHR_64(Uint8 *pLine, SnesPPU *pPPU, SnesBGInfoT *pBGInfo, stru
 				uScrollY & 7,
 				pLine,
 				pMask,
-				_SnesPPU_Tile2PalLookup64[pBGInfo->uPalBase]
+				AURORA_DKC_SPR_PAL2 + ((Uint32)pBGInfo->uPalBase * 16u)
 			);
 		break;
 	case 4:
@@ -1420,14 +1453,14 @@ static void _RenderBGData_O(Uint8 *pLine8, Uint8 *pSrc8, SNMaskT *pBGMask, Uint3
 {
 	AuroraPPURenderBGDataOPS2(
 		pLine8, pSrc8, pBGMask->uMask8, uScrollX, nTiles,
-		(const Uint64 *)&_SnesPPU_PlaneLookup[1]);
+		AURORA_DKC_SPR_PLANE1);
 }
 
 static void _RenderBGData(Uint8 *pLine8, Uint8 *pSrc8, SNMaskT *pBGMask, Uint32 uScrollX, Int32 nTiles)
 {
 	AuroraPPURenderBGDataPS2(
 		pLine8, pSrc8, pBGMask->uMask8, uScrollX, nTiles,
-		(const Uint64 *)&_SnesPPU_PlaneLookup[1]);
+		AURORA_DKC_SPR_PLANE1);
 }
 #else
 static void _RenderBGData_O(Uint8 *pLine8, Uint8 *pSrc8, SNMaskT *pBGMask, Uint32 uScrollX, Int32 nTiles)
