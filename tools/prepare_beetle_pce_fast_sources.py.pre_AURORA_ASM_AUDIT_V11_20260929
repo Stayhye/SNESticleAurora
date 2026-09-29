@@ -326,19 +326,9 @@ def main():
             ["git", "archive", "--format=tar", "HEAD"], cwd=src)
         with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tf:
             tf.extractall(tmp)
-        # AURORA_ASM_AUDIT_V11_PCE_SELECTIVE_C_20260929
-        # Final conservative PCE policy after comparing the current MIPS
-        # kernels with the last pre-MIPS build.
-        #
-        # Keep BMT assembly: C still owns timing/event/page certification;
-        # assembly only copies already-certified plain RAM bytes and removes
-        # the old per-byte RdMem/WrMem hot-path overhead.
-        #
-        # Keep Blip and VDC in the pinned C source instead of replacing their
-        # already -O3/-funroll-loops loops with scalar assembly.  We do not
-        # recreate stale C here: the pristine pinned Beetle commit is exported
-        # first, so all existing Aurora C fast paths remain exactly intact.
         patch_huc(tmp / "mednafen/pce_fast/huc6280.c")
+        patch_blip(tmp / "mednafen/sound/Blip_Buffer.c")
+        patch_vdc(tmp / "mednafen/pce_fast/vdc.c")
         asm_dst = tmp / "mednafen/pce_fast/aurora_pce_hotpaths_ps2.S"
         shutil.copy2(asm, asm_dst)
         (tmp / ".aurora-pce-mips-stage-v1").write_text(
