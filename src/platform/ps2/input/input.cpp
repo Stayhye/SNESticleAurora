@@ -469,6 +469,24 @@ Uint32 InputGetPadData(Uint32 uPad)
     return _Input_PadData[uPad];
 }
 
+/* AURORA_CODEPATH_SIMPLIFY_V5_20260927
+ * InputPoll is the sole writer during a frontend tick. Read both values after
+ * one bounds/connection test instead of making MainLoopProcess cross this TU
+ * repeatedly through three small getters for every pad. */
+Bool InputGetPadSnapshot(Uint32 uPad, Uint32 *pData, Uint32 *pAnalogDpad)
+{
+    if (uPad >= (Uint32)_Input_nPads || !_Input_bPadConnected[uPad])
+    {
+        *pData = 0;
+        *pAnalogDpad = 0;
+        return FALSE;
+    }
+
+    *pData = _Input_PadData[uPad];
+    *pAnalogDpad = _Input_PadAnalogDpad[uPad];
+    return TRUE;
+}
+
 /* AURORA_QN_ARKANOID_ANALOG_V2_20260828 */
 Uint32 InputGetPadAnalog(Uint32 uPad)
 {

@@ -703,6 +703,26 @@ static void _MainLoopRemoveGbaZipTemp(void)
     }
 }
 
+/* AURORA_ZIP_MC_EXTRACT_GUARD_V1_1_20260927
+ * V1.1: keep the guard definitions before every caller. */
+/* AURORA_ZIP_MC_EXTRACT_GUARD_V1_20260927
+ * ZIP payloads may be read from a memory card, but Aurora must never create
+ * an extracted payload there. Keep the policy at the file-output boundary
+ * so in-memory ZIP loading remains unchanged. */
+static Bool s_ZipExtractBlockedOnMemoryCard = FALSE;
+
+static Bool _MainLoopZipPathIsMemoryCard(const Char *pPath)
+{
+    if (!pPath)
+        return FALSE;
+
+    return ((pPath[0] == 'm' || pPath[0] == 'M') &&
+            (pPath[1] == 'c' || pPath[1] == 'C') &&
+            (pPath[2] == '0' || pPath[2] == '1') &&
+             pPath[3] == ':') ? TRUE : FALSE;
+}
+
+
 static Bool _MainLoopPrepareZipTempPath(
     Char *pOut, Int32 nOutBytes, const Char *pLeaf)
 {
@@ -714,10 +734,19 @@ static Bool _MainLoopPrepareZipTempPath(
     if (!pOut || nOutBytes <= 0 || !pLeaf || !*pLeaf)
         return FALSE;
     pOut[0] = 0;
+    s_ZipExtractBlockedOnMemoryCard = FALSE;
 
     if (!MainLoopEnsureSystemDirectory(
             systemDir, (Int32)sizeof(systemDir)))
         return FALSE;
+
+    if (_MainLoopZipPathIsMemoryCard(systemDir))
+    {
+        s_ZipExtractBlockedOnMemoryCard = TRUE;
+        MainLoopModalPrintf(60 * 4,
+            "can't extract zip file on memory card");
+        return FALSE;
+    }
 
     n = snprintf(unzipDir, sizeof(unzipDir),
                  "%s/UNZIP", systemDir);
@@ -876,6 +905,15 @@ static Bool _MainLoopExtractZipEntryToFile(
         !pMemberName || !*pMemberName ||
         !pOutPath || !*pOutPath || nExpectedBytes <= 0)
         return FALSE;
+
+    s_ZipExtractBlockedOnMemoryCard = FALSE;
+    if (_MainLoopZipPathIsMemoryCard(pOutPath))
+    {
+        s_ZipExtractBlockedOnMemoryCard = TRUE;
+        MainLoopModalPrintf(60 * 4,
+            "can't extract zip file on memory card");
+        return FALSE;
+    }
 
     memset(&reader, 0, sizeof(reader));
     reader.fd = -1;
@@ -2647,8 +2685,9 @@ static Bool _MainLoopExecuteFdsZip(const char *pZipPath,
             tempPath, (Int32)sizeof(tempPath),
             "aurora_fds_zip.fds"))
     {
-        MainLoopModalPrintf(
-            60 * 4, "ERROR: cannot create SYSTEM/UNZIP");
+        if (!s_ZipExtractBlockedOnMemoryCard)
+            MainLoopModalPrintf(
+                60 * 4, "ERROR: cannot create SYSTEM/UNZIP");
         return FALSE;
     }
 
@@ -2656,8 +2695,9 @@ static Bool _MainLoopExecuteFdsZip(const char *pZipPath,
             pZipPath, pMemberName, uZipIndex,
             nExpectedBytes, tempPath))
     {
-        MainLoopModalPrintf(
-            60 * 4, "ERROR: Cannot extract complete FDS ZIP");
+        if (!s_ZipExtractBlockedOnMemoryCard)
+            MainLoopModalPrintf(
+                60 * 4, "ERROR: Cannot extract complete FDS ZIP");
         return FALSE;
     }
 
@@ -4937,8 +4977,9 @@ static Bool _MainLoopExecuteGbaZipMemory(const char *pZipPath,
             tempPath, (Int32)sizeof(tempPath),
             "aurora_gba_zip.gba"))
     {
-        MainLoopModalPrintf(
-            60 * 4, "ERROR: cannot create SYSTEM/UNZIP");
+        if (!s_ZipExtractBlockedOnMemoryCard)
+            MainLoopModalPrintf(
+                60 * 4, "ERROR: cannot create SYSTEM/UNZIP");
         return FALSE;
     }
 
@@ -4946,8 +4987,9 @@ static Bool _MainLoopExecuteGbaZipMemory(const char *pZipPath,
             pZipPath, pMemberName, uZipIndex,
             nExpectedBytes, tempPath, &uZipCRC))
     {
-        MainLoopModalPrintf(
-            60 * 4, "ERROR: Cannot extract complete GBA ZIP");
+        if (!s_ZipExtractBlockedOnMemoryCard)
+            MainLoopModalPrintf(
+                60 * 4, "ERROR: Cannot extract complete GBA ZIP");
         return FALSE;
     }
 
@@ -5308,16 +5350,18 @@ Bool _MainLoopExecuteFile(const char *pFileName, Bool bLoadSRAM)
                     tempPath, (Int32)sizeof(tempPath),
                     "aurora_snes_zip.sfc"))
             {
-                MainLoopModalPrintf(60 * 4,
-                    "ERROR: cannot create SYSTEM/UNZIP");
+                if (!s_ZipExtractBlockedOnMemoryCard)
+                    MainLoopModalPrintf(60 * 4,
+                        "ERROR: cannot create SYSTEM/UNZIP");
                 return FALSE;
             }
             if (!_MainLoopExtractZipEntryToFile(
                     pFileName, ZipMemberName, uZipIndex,
                     nExpectedRomBytes, tempPath))
             {
-                MainLoopModalPrintf(60 * 4,
-                    "ERROR: cannot extract complete SNES ZIP");
+                if (!s_ZipExtractBlockedOnMemoryCard)
+                    MainLoopModalPrintf(60 * 4,
+                        "ERROR: cannot extract complete SNES ZIP");
                 return FALSE;
             }
             pOwnedPath = tempPath;

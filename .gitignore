@@ -2,6 +2,8 @@
 build/
 refs/
 logs/
+.snesticle_rebuild/
+.snesticle_rebuild_v2/
 
 # Compiled/generated files
 *.o
@@ -30,6 +32,8 @@ src/platform/ps2/iop/aurora_ps2mouse/obj/
 
 # Required PCE build tool
 !tools/namespace_pce_archive.py
+# AURORA_CONTINUOUS_PCE_PREPARE_TRACKED_V21_20260928
+!tools/prepare_beetle_pce_fast_sources.py
 !tools/namespace_fceumm_fds_archive.py
 !tools/prepare_fceumm_fds_sources.py
 

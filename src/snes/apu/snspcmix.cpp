@@ -19,12 +19,26 @@ extern "C" {
 #include "ps2mem.h"
 #endif
 
+/* AURORA_R5900_HOTPATHS_FINAL_V1_20260927: PS2 standalone R5900 sample kernels. */
+#ifndef AURORA_SPC_R5900_SAMPLE_KERNELS
+#define AURORA_SPC_R5900_SAMPLE_KERNELS ((CODE_PLATFORM == CODE_PS2) && 1)
+#endif
+#if CODE_PLATFORM == CODE_PS2
+extern "C" Int32 AuroraSpcOutputSampleRunPS2(
+    const Int16 *pBlockBase, Int16 *pOut, Uint16 *pFrac,
+    Int32 *pPhase, Int32 iPhaseInc, Int32 nSamples);
+extern "C" void AuroraSpcOutputNoiseRunPS2(
+    Int16 *pOut, Uint16 *pFrac, Int32 nSamples,
+    Uint32 *pCounter, Uint32 *pNoise, Uint32 period, Uint32 offset);
+#endif
+
 #define SNSPCDSP_INFOSCRATCHPAD ((CODE_PLATFORM == CODE_PS2) && TRUE)
 #define SNSPCDSP_MIXSILENCE (FALSE)
 
 
-#define SNSPCDSP_MIXASM ((CODE_PLATFORM == CODE_PS2) && 1)
-
+/* AURORA_SNES_AUDIO_MIPS_FINAL_20260927
+ * PS2 MMI mixing is implemented in standalone R5900 assembly translation
+ * units; no inline-asm feature switch is needed in this C++ file. */
 Uint32 _ChMask=0xFF;
 
 
@@ -621,6 +635,12 @@ Int32 SNSpcDspMixFull::OutputNoise(Int16 *pOut, Uint16 *pFrac, Int32 nSamples, I
 	/* V1 generated-output path: one exact phase calculation per chunk.
 	 * AURORA_SNES_SAFE_PERF_V7_20260919: noise rate is invariant for this call. Select once outside the
 	 * output loop instead of retesting the same FLG rate every sample. */
+#if AURORA_SPC_R5900_SAMPLE_KERNELS
+	(void)eventCountdown;
+	AuroraSpcOutputNoiseRunPS2(
+		pOut, pFrac, nSamples, &counter, &noise, period, offset);
+#else
+
 	if(rate)
 	{
 		/* Every legal nonzero FLG rate has a nonzero period in the table. */
@@ -658,6 +678,8 @@ Int32 SNSpcDspMixFull::OutputNoise(Int16 *pOut, Uint16 *pFrac, Int32 nSamples, I
 			pOut+=2; pFrac++;
 		}
 	}
+#endif
+
 	m_iNoisePhase=(Int32)counter;
 	m_uNoiseGen=noise;
 	return 1;
@@ -820,6 +842,38 @@ Int32 SNSpcDspMixFull::OutputSample(Int32 iChannel, Int16 *pOut, Uint16 *pFrac, 
 	iPhaseInc = _SNSpcDspPhaseInc(uPitch, nSampleRate);
 
 
+#if AURORA_SPC_R5900_SAMPLE_KERNELS
+	while (nSamples > 0)
+	{
+		if (iPhase >= (14 << 16))
+		{
+			FetchBlock(iChannel);
+			iPhase -= (16 << 16);
+		}
+
+		Int32 nRun = AuroraSpcOutputSampleRunPS2(
+			pBlockBase, pOut, pFrac, &iPhase, iPhaseInc, nSamples);
+
+		/* The assembly run stops only at the exact pre-FetchBlock boundary.
+		 * Keep a defensive scalar sample for impossible malformed state so a
+		 * damaged/restored state cannot turn into an infinite host loop. */
+		if (nRun <= 0)
+		{
+			Int32 iSampleIndex = 16 + (iPhase >> 16);
+			Int16 *pSample = pBlockBase + iSampleIndex;
+			pFrac[0] = (Uint16)iPhase;
+			pOut[0] = pSample[0];
+			pOut[1] = pSample[1];
+			iPhase += iPhaseInc;
+			nRun = 1;
+		}
+
+		pFrac += nRun;
+		pOut += nRun * 2;
+		nSamples -= nRun;
+	}
+#else
+
 	while (nSamples > 0)
 	{
 		Int16 *pSample;
@@ -853,6 +907,7 @@ Int32 SNSpcDspMixFull::OutputSample(Int32 iChannel, Int16 *pOut, Uint16 *pFrac, 
 
 		nSamples--;
 	}
+#endif
 
 
 	// voice ended?
@@ -985,192 +1040,44 @@ Int32 SNSpcDspMixFull::OutputSampleModulated(
 
 
 
-#if SNSPCDSP_MIXASM
+/* AURORA_SNES_AUDIO_MIPS_FINAL_20260927
+ * PS2 mixer kernels live in snspcmix_ps2.S.
+ *
+ * The EE toolchain uses MIPS EABI argument registers a0-a7.  The echo kernel
+ * therefore receives its final scalars through one tail pointer, keeping the
+ * assembly entry point at exactly eight arguments and independent of stack
+ * argument layout. */
+#if CODE_PLATFORM == CODE_PS2
+extern "C" {
+void _MixChannel(Int32 *pOutLeft, Int32 *pOutRight,
+                 Int16 *pIn, Uint8 *pEnvelope, Uint16 *pFrac,
+                 Int32 nSamples, Int32 iVolLeft, Int32 iVolRight);
 
-__attribute__((noinline))
-void _MixChannel(Int32 *pOutLeft, Int32 *pOutRight, Int16 *pIn, Uint8 *pEnvelope, Uint16 *pFrac, Int32 nSamples, Int32 iVolLeft, Int32 iVolRight)
+struct AuroraMixChannelEchoTail
 {
-	__asm__ (
-		"pcpyh       %0,%0           \n"    
-		"pcpyld      %0,%0,%0           \n"    
-		"pcpyh       %1,%1           \n"    
-		"pcpyld      %1,%1,%1           \n"    
+    Int32 nSamples;
+    Int32 iVolLeft;
+    Int32 iVolRight;
+};
 
-		: "+r" (iVolLeft), "+r" (iVolRight)
-		);    
-
-
-	__asm__ __volatile__ (
-		".set noreorder \n"
-		".align 3           \n"
-		"_MixChannelPS2_Loop:         \n"
-		"lq         $10,0x00(%1)     \n"    // $10 = 8x frac bits (0.0.16)
-		"lq          $8,0x00(%0)     \n"    // $8  = 4x sample pairs (1.15.0)
-		"pnor       $11,$10,$0       \n"    // $11 = inv frac bits
-		"lq          $9,0x10(%0)     \n"    // $9  = 4x sample pairs (1.15.0)
-		"pextlh     $12,$10,$11      \n"    // $12 = invfrac, frac x 4  0.0.16
-		"pextuh     $13,$10,$11      \n"    // $13 = invfrac, frac x 4  0.0.16
-
-		"psrlh      $12,$12,1        \n"    // $12 = invfrace frac x 4  1.0.15
-		"psrlh      $13,$13,1        \n"    // $13 = invfrace frac x 4  1.0.15
-
-		"ld         $10,0x00(%4)     \n"    // $10 = 8x8 envelope 0.1.7   
-
-		"phmadh     $8,$8,$12        \n"    // $8  = 4 interpolated samplse 2.15.15
-		"pextlb     $10,$0,$10       \n"    // $10 =  8x8 envelope  8.1.7
-		"phmadh     $9,$9,$13        \n"    // $9  = 4 interpolated samplse 2.15.15
-
-		"pextuh     $11,$0,$10       \n"    // $11 = 4x16 envelope 24.1.7
-		"pextlh     $10,$0,$10       \n"    // $10 = 4x16 envelope 24.1.7
-
-		"psraw      $8,$8,15         \n"    // $8 = 32-bit interpolated samples 17.15.0
-		"pmulth     $8,$8,$10        \n"    // $8 = 32-bit sample * envelope  10.15.7
-
-		"psraw      $9,$9,15         \n"    // $9 = 32-bit interpolated samples 17.15.0
-		"pmulth     $9,$9,$11        \n"    // $9 = 32-bit sample * envelope  10.15.7
-
-		"addiu      %0,%0,0x20       \n"    // pInn+=16
-		"addiu      %1,%1,0x10       \n"    // pFrac+=8
-		"addiu      %4,%4,0x08       \n"    // pEnvelope+=8
-
-		"psraw      $8,$8,7          \n"    // $8 = 32-bit sample * envelope 17.15.0
-		"pmulth     $10,$8,%6        \n"    // $10= right  32-bit sample * envelope * volr  .15.14
-		"psraw      $9,$9,7          \n"    // $9 = 32-bit sample * envelope 17.15.0
-		"pmulth     $11,$9,%6        \n"    // $11= right  32-bit sample * envelope * volr  .15.14
-
-		"pmulth     $8,$8,%5        \n"     // $8 = left   32-bit sample * envelope * voll  .15.14
-		"lq         $12,0x00(%2)     \n"    // $12 = outl0
-		"pmulth     $9,$9,%5        \n"     // $9 = left   32-bit sample * envelope * voll  .15.14
-		"lq         $13,0x10(%2)     \n"    // $13 = outl1
-		"lq         $14,0x00(%3)     \n"    // $14 = outr0
-		"lq         $15,0x10(%3)     \n"    // $15 = outr1
-
-		"paddsw		$12,$12,$8       \n"
-		"paddsw		$13,$13,$9       \n"
-		"paddsw		$14,$14,$10      \n"
-		"paddsw		$15,$15,$11      \n"
-
-		"sq         $12,0x00(%2)     \n"    // $12 = outl0
-		"sq         $13,0x10(%2)     \n"    // $13 = outl1
-		"sq         $14,0x00(%3)     \n"    // $12 = outr0
-		"sq         $15,0x10(%3)     \n"    // $12 = outr1
-
-		"addiu      %7,%7,-8         \n"
-		"addiu      %2,%2,0x20       \n"
-
-		"bgtz       %7,_MixChannelPS2_Loop \n"
-		"addiu      %3,%3,0x20       \n"
-
-		".set reorder \n"
-
-		: 
-	: "r" (pIn), "r" (pFrac), "r" (pOutLeft), "r" (pOutRight), "r" (pEnvelope), "r" (iVolLeft), "r" (iVolRight), "r" (nSamples)
-		: "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15"
-		);    
+void _MixChannelEchoPS2(Int32 *pOutLeft, Int32 *pOutRight,
+                        SNSpcEchoSampleT *pEchoLeft,
+                        SNSpcEchoSampleT *pEchoRight,
+                        Int16 *pIn, Uint8 *pEnvelope, Uint16 *pFrac,
+                        const AuroraMixChannelEchoTail *pTail);
 }
 
-
-__attribute__((noinline))
-void _MixChannelEcho(Int32 *pOutLeft, Int32 *pOutRight, Int16 *pEchoLeft, Int16 *pEchoRight, Int16 *pIn, Uint8 *pEnvelope, Uint16 *pFrac, Int32 nSamples, Int32 iVolLeft, Int32 iVolRight)
+static _INLINE void _MixChannelEcho(
+        Int32 *pOutLeft, Int32 *pOutRight,
+        SNSpcEchoSampleT *pEchoLeft, SNSpcEchoSampleT *pEchoRight,
+        Int16 *pIn, Uint8 *pEnvelope, Uint16 *pFrac,
+        Int32 nSamples, Int32 iVolLeft, Int32 iVolRight)
 {
-	__asm__ (
-		"pcpyh       %0,%0           \n"    
-		"pcpyld      %0,%0,%0           \n"    
-		"pcpyh       %1,%1           \n"    
-		"pcpyld      %1,%1,%1           \n"    
-
-		: "+r" (iVolLeft), "+r" (iVolRight)
-		);    
-
-
-	__asm__ __volatile__ (
-		".set noreorder \n"
-		".align 3           \n"
-		"_MixChannelEchoPS2_Loop:         \n"
-		"lq         $10,0x00(%1)     \n"    // $10 = 8x frac bits (0.0.16)
-		"lq          $8,0x00(%0)     \n"    // $8  = 4x sample pairs (1.15.0)
-		"pnor       $11,$10,$0       \n"    // $11 = inv frac bits
-		"lq          $9,0x10(%0)     \n"    // $9  = 4x sample pairs (1.15.0)
-		"pextlh     $12,$10,$11      \n"    // $12 = invfrac, frac x 4  0.0.16
-		"pextuh     $13,$10,$11      \n"    // $13 = invfrac, frac x 4  0.0.16
-
-		"psrlh      $12,$12,1        \n"    // $12 = invfrace frac x 4  1.0.15
-		"psrlh      $13,$13,1        \n"    // $13 = invfrace frac x 4  1.0.15
-
-		"ld         $10,0x00(%4)     \n"    // $10 = 8x8 envelope 0.1.7   
-
-		"phmadh     $8,$8,$12        \n"    // $8  = 4 interpolated samplse 2.15.15
-		"pextlb     $10,$0,$10       \n"    // $10 =  8x8 envelope  8.1.7
-		"phmadh     $9,$9,$13        \n"    // $9  = 4 interpolated samplse 2.15.15
-
-		"pextuh     $11,$0,$10       \n"    // $11 = 4x16 envelope 24.1.7
-		"pextlh     $10,$0,$10       \n"    // $10 = 4x16 envelope 24.1.7
-
-		"psraw      $8,$8,15         \n"    // $8 = 32-bit interpolated samples 17.15.0
-		"pmulth     $8,$8,$10        \n"    // $8 = 32-bit sample * envelope  10.15.7
-
-		"psraw      $9,$9,15         \n"    // $9 = 32-bit interpolated samples 17.15.0
-		"pmulth     $9,$9,$11        \n"    // $9 = 32-bit sample * envelope  10.15.7
-
-		"addiu      %0,%0,0x20       \n"    // pInn+=16
-		"addiu      %1,%1,0x10       \n"    // pFrac+=8
-		"addiu      %4,%4,0x08       \n"    // pEnvelope+=8
-
-		"psraw      $8,$8,7          \n"    // $8 = 32-bit sample * envelope 17.15.0
-		"pmulth     $10,$8,%6        \n"    // $10= right  32-bit sample * envelope * volr  .15.14
-		"psraw      $9,$9,7          \n"    // $9 = 32-bit sample * envelope 17.15.0
-		"pmulth     $11,$9,%6        \n"    // $11= right  32-bit sample * envelope * volr  .15.14
-
-		"pmulth     $8,$8,%5        \n"     // $8 = left   32-bit sample * envelope * voll  .15.14
-		"lq         $12,0x00(%2)     \n"    // $12 = outl0
-		"pmulth     $9,$9,%5        \n"     // $9 = left   32-bit sample * envelope * voll  .15.14
-		"lq         $13,0x10(%2)     \n"    // $13 = outl1
-		"lq         $14,0x00(%3)     \n"    // $14 = outr0
-		"lq         $15,0x10(%3)     \n"    // $15 = outr1
-
-		"paddsw		$12,$12,$8       \n"
-		"paddsw		$13,$13,$9       \n"
-		"paddsw		$14,$14,$10      \n"
-		"paddsw		$15,$15,$11      \n"
-
-		"sq         $12,0x00(%2)     \n"    // $12 = outl0
-		"sq         $13,0x10(%2)     \n"    // $13 = outl1
-		"sq         $14,0x00(%3)     \n"    // $12 = outr0
-		"sq         $15,0x10(%3)     \n"    // $12 = outr1
-
-		"psraw      $10,$10,7        \n"    // $10 = 32-bit sample * envelope * volr  17.15.0
-		"psraw      $11,$11,7        \n"    // $11 = 32-bit sample * envelope * volr  17.15.0
-		"psraw      $8,$8,7          \n"    // $8  = 32-bit sample * envelope * voll  17.15.0
-		"psraw      $9,$9,7          \n"    // $9  = 32-bit sample * envelope * voll  17.15.0
-
-		"lq         $12,0x00(%8)     \n"    // $12 = outl
-		"lq         $13,0x00(%9)     \n"    // $13 = outr
-		"ppach      $8,$9,$8         \n"    // $8 = left   1.15.0
-		"ppach      $9,$11,$10       \n"    // $9 = right  1.15.0
-		"paddsh     $12,$12,$8       \n"    // $12 = outl + samples
-		"paddsh     $13,$13,$9       \n"    // $13 = outr + samples
-		"sq         $12,0x00(%8)     \n"    // store outl
-		"sq         $13,0x00(%9)     \n"    // store outr
-		"addiu      %8,%8,0x10       \n"
-		"addiu      %9,%9,0x10       \n"
-
-		"addiu      %7,%7,-8         \n"
-		"addiu      %2,%2,0x20       \n"
-
-		"bgtz       %7,_MixChannelEchoPS2_Loop \n"
-		"addiu      %3,%3,0x20       \n"
-
-		".set reorder \n"
-
-		: 
-	: "r" (pIn), "r" (pFrac), "r" (pOutLeft), "r" (pOutRight), "r" (pEnvelope), "r" (iVolLeft), "r" (iVolRight), "r" (nSamples), "r" (pEchoLeft), "r" (pEchoRight)
-		: "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15"
-		);    
+    AuroraMixChannelEchoTail tail = { nSamples, iVolLeft, iVolRight };
+    _MixChannelEchoPS2(
+        pOutLeft, pOutRight, pEchoLeft, pEchoRight,
+        pIn, pEnvelope, pFrac, &tail);
 }
-
-
-
-
 #else
 
 void _MixChannel(Int32 *pOutLeft, Int32 *pOutRight, Int16 *pIn, Uint8 *pEnvelope, Uint16 *pFrac, Int32 nSamples, Int32 iVolLeft, Int32 iVolRight)
@@ -1289,6 +1196,11 @@ void _MixChannelEcho(Int32 *pOutLeft, Int32 *pOutRight, SNSpcEchoSampleT *pEchoL
 
 
 
+/* AURORA_SNES_AUDIO_MIPS_FINAL_20260927
+ * Exact old nDwords*8 clear moved to 128-bit EE stores. */
+#if CODE_PLATFORM == CODE_PS2
+extern "C" void _SNSpcDspMemset64(Uint64 *pDest, Int32 nDwords);
+#else
 static void _SNSpcDspMemset64(Uint64 *pDest, Int32 nDwords)
 {
 	while (nDwords>=4)
@@ -1308,70 +1220,13 @@ static void _SNSpcDspMemset64(Uint64 *pDest, Int32 nDwords)
 		nDwords-=1;
 	}
 }
-
-
-#if SNSPCDSP_MIXASM
-
-#if 1
-__attribute__((noinline))
-void _MixEcho(Int16 *pOut, Int32 *pMain, Int16 *pEcho, Int32 nSamples, Int32 iMainVol, Int32 iEchoVol)
-{
-
-	__asm__ __volatile__ (
-		"pcpyh       %4,%4           \n"    
-		"pcpyld      %4,%4,%4           \n"    
-		"pcpyh       %5,%5           \n"    
-		"pcpyld      %5,%5,%5           \n"    
-
-		"pnor		 $14, $0,$0			\n"
-		"psrlw		 $14,$14,17         \n" // 7FFF
-		"pnor		 $15, $0,$0			\n"
-		"psllw		 $15,$15,15         \n" // 8000
-
-		".set noreorder \n"
-		".align 3           \n"
-		"_MixEchoPS2_Loop:         \n"
-		"lq          $8,0x00(%1)     \n"    // $8 = 4x main samples
-		"lq          $9,0x10(%1)     \n"    // $9 = 4x main samples
-		"lq         $10,0x00(%2)     \n"    // $10  = 8x echo samples
-		"psraw		 $8,$8,7		 \n"
-		"psraw		 $9,$9,7		 \n"
-		"pminw       $8,$8,$14       \n"
-		"pminw       $9,$9,$14       \n"
-		"pmaxw       $8,$8,$15       \n"
-		"pmaxw       $9,$9,$15       \n"
-		"ppach		 $8,$9,$8         \n" 
-		"pmulth		 $0,$8,%4         \n"     // lo = 5 4 1 0
-		"pmaddh		 $0,$10,%5        \n"     // hi = 7 6 3 2
-
-		"pmflo		 $8				\n"  // 8 = 5 4 1 0
-		"pmfhi		 $9				\n"  // 9 = 7 6 3 2 
-		"psraw		 $8,$8,6		 \n"
-		"psraw		 $9,$9,6		 \n"
-		"pminw       $8,$8,$14       \n"
-		"pminw       $9,$9,$14       \n"
-		"pmaxw       $8,$8,$15       \n"
-		"pmaxw       $9,$9,$15       \n"
-		"pcpyld		$10,$9,$8       \n"    // 3 2 1 0
- 		"pcpyud		$11,$8,$9       \n"    // 7 6 5 4 
-		"ppach		$10,$11,$10        \n" // 76543210
-		"sq			$10,0x00(%0)     \n" 
-		"addiu      %0,%0,0x10         \n"
-
-		"addiu      %3,%3,-8         \n"
-		"addiu      %1,%1,0x20       \n"
-		"bgtz       %3,_MixEchoPS2_Loop \n"
-		"addiu      %2,%2,0x10       \n"
-
-		".set reorder \n"
-
-		: 
-		: "r" (pOut), "r" (pMain), "r" (pEcho), "r" (nSamples), "r" (iMainVol), "r" (iEchoVol)
-		: "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15"
-		);    
-}
 #endif
 
+
+/* AURORA_SNES_AUDIO_MIPS_FINAL_20260927: final main+echo MMI kernel. */
+#if CODE_PLATFORM == CODE_PS2
+extern "C" void _MixEcho(Int16 *pOut, Int32 *pMain, SNSpcEchoSampleT *pEcho,
+                         Int32 nSamples, Int32 iMainVol, Int32 iEchoVol);
 #else
 
 /*

@@ -7,6 +7,14 @@
 
 #define SNIO_VERSION_5A22 (0x02)
 
+/* AURORA_CODEPATH_SIMPLIFY_V5_20260927
+ * Exact 4-bit reversal table shared by the Aurora-side input bridges. */
+const Uint8 SnesIOReverseNibble[16] =
+{
+	0, 8, 4, 12, 2, 10, 6, 14,
+	1, 9, 5, 13, 3, 11, 7, 15
+};
+
 /* AURORA_SNES_TURBOFILE_V4_20260829
  *
  * One ASCII Turbo File Twin on SFC controller port 2.

@@ -21,6 +21,12 @@
 #define SNPPU_BGPLANE_SIZE 48
 #define SNPPURENDER_CHR64 (TRUE)
 
+/* AURORA_SUNSET_RIDERS_CRC_OBJ128_V2_RENDER_20260825
+ * Capacity is larger for the diagnostic, but normal ROMs still fetch at the
+ * existing 34-tile hardware budget. */
+extern Bool g_SnesCompatSunsetRidersObj128;
+#define AURORA_SUNSET_RIDERS_OBJ_FETCH_MAX 128
+
 static void _FetchMode7(Uint8 *pLine, SnesPPU *pPPU, Int32 iLine, SNMaskT *pPriority, SNMaskT *pOpaque);
 static void _BuildMode7ExtBG(Uint8 *pLineBG2, SNMaskT *pPriority,
 	SNMaskT *pOpaque, const Uint8 *pLineBG1);
@@ -1008,24 +1014,18 @@ static _INLINE Uint64 _SnesPPUMode5PackPair(
     Bool bPreferredOdd = (Bool)((!bSubscreen && !bMosaic) ^ bHFlip);
     Uint64 uOut;
 
-    /* AURORA_SECRET_OF_MANA_MODE5_MAIN_COVERAGE_V7_1_20260929
-     * Native Mode 5/6 contains two physical hires dots per Aurora output
-     * sample. Preserve the exact SUB phase, but on MAIN restore the proven
-     * coverage-preserving 256px reduction: the opposite phase is consulted
-     * only when the preferred sample is transparent. A non-zero preferred
-     * sample is never replaced. */
-    if (bSubscreen)
-    {
-        uOut =
-            (Uint64)_SnesPPUMode5Pack4(uRow0, bPreferredOdd) |
-            ((Uint64)_SnesPPUMode5Pack4(uRow1, bPreferredOdd) << 32);
-    }
-    else
-    {
-        uOut =
-            (Uint64)_SnesPPUMode5Pack4Coverage(uRow0, bPreferredOdd) |
-            ((Uint64)_SnesPPUMode5Pack4Coverage(uRow1, bPreferredOdd) << 32);
-    }
+    /* AURORA_SNES_PPU_ACCURACY_V8_20260919
+     * AURORA_SNES_PPU_ACCURACY_V8_MODE56_PHASE_20260919
+     * AURORA_SNES_PPU_ACCURACY_V8_1_20260919: final whole-tree audit retained this Mode 5/6 correction.
+     * The separate V8 $213B helper change was removed because snes.cpp
+     * already composes the documented PPU2 open-bus bit at the bus layer.
+     * Mode 5/6 physical hires phases are distinct pixels. Keep Aurora's
+     * existing selected phase, but never borrow the opposite phase when the
+     * selected pixel is transparent. Besides being more faithful, this is
+     * less work than the old host-only coverage fallback. */
+    uOut =
+        (Uint64)_SnesPPUMode5Pack4(uRow0, bPreferredOdd) |
+        ((Uint64)_SnesPPUMode5Pack4(uRow1, bPreferredOdd) << 32);
 
     if (bHFlip)
         uOut = SnesPPUChrCacheReverseBytes(uOut);
@@ -1044,23 +1044,12 @@ static _INLINE Uint8 _SnesPPUMode5PackPairMask(
     Bool bPreferredOdd = (Bool)((!bSubscreen && !bMosaic) ^ bHFlip);
     Uint8 uOut;
 
-    /* AURORA_SECRET_OF_MANA_MODE5_MAIN_COVERAGE_V7_1_20260929
-     * Opacity must describe the same reduction as the pixel carrier:
-     * exact selected phase for SUB, union coverage for MAIN. */
-    if (bSubscreen)
-    {
-        uOut = (Uint8)(
-            _SnesPPUMode5PackMask4(uMask0, bPreferredOdd) |
-            (_SnesPPUMode5PackMask4(uMask1, bPreferredOdd) << 4)
-        );
-    }
-    else
-    {
-        uOut = (Uint8)(
-            _SnesPPUMode5PackMask4Coverage(uMask0, bPreferredOdd) |
-            (_SnesPPUMode5PackMask4Coverage(uMask1, bPreferredOdd) << 4)
-        );
-    }
+    /* AURORA_SNES_PPU_ACCURACY_V8_MODE56_PHASE_20260919: opacity belongs to the same selected physical phase.
+     * Do not OR coverage from the opposite hires column. */
+    uOut = (Uint8)(
+        _SnesPPUMode5PackMask4(uMask0, bPreferredOdd) |
+        (_SnesPPUMode5PackMask4(uMask1, bPreferredOdd) << 4)
+    );
 
     if (bHFlip)
         uOut = SnesPPUChrCacheReverseMask(uOut);
@@ -2292,8 +2281,8 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 	Bool bBG3Pri;
 	/* AURORA_MODE7_EXTBG_COMPOSITOR_V1_20260903: EXTBG BG2 main/sub priority masks. */
 	SnesBGInfoT	BGInfo[4];
-	/* Physical S-PPU time-over capacity: at most 34 OBJ slivers/scanline. */
-	SnesRenderObj8T ObjLine[SNPPU_MAXOBJCHR];
+	/* AURORA_SUNSET_RIDERS_CRC_OBJ128_V2_ARRAY_20260825 */
+	SnesRenderObj8T ObjLine[AURORA_SUNSET_RIDERS_OBJ_FETCH_MAX];
 	Int32 nObjLine;
 	const SnesPPURegsT *pRegs = m_pPPU->GetRegs();
 	/* AURORA_SAFE_CODE_PERF_V1_PPU
@@ -2301,12 +2290,6 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 	 * scanline. Snapshot fields repeatedly used across helper calls. */
 	const Uint8 uBGModeReg = pRegs->bgmode;
 	const Uint8 uBGMode = (Uint8)(uBGModeReg & 7);
-	/* AURORA_PPU_HIRES_TS_CORRECTNESS_V1_20260929
-	 * In Modes 5/6 and SETINI pseudo-hires, TS is not merely a color-math
-	 * operand: it supplies alternating visible sub-screen half-pixels. */
-	const Bool bHiresSubscreenVisible =
-		(uBGMode == 5) || (uBGMode == 6) ||
-		((pRegs->setini & SNESPPU_SETINI_PSEUDOHIR) != 0);
 	const Bool bMode7ExtBG =
 		(uBGMode == 7) && ((pRegs->setini & 0x40) != 0);
 	const Uint8 uOBSEL = pRegs->obsel;
@@ -2386,10 +2369,10 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		tsw &= uMode7LayerMask;
 	}
 
-	/* AURORA_PPU_HIRES_TS_CORRECTNESS_V1_20260929
-	 * In ordinary 256-dot modes, fixed-color/no-CGADSUB can elide TS.
-	 * Hires is the exception because TS itself is visible. */
-	if (!bHiresSubscreenVisible && (!(cgwsel & 0x02) || cgadsub == 0))
+	/* Fixed-color math never samples the sub screen.  With no CGADSUB target,
+	   color math cannot affect a pixel at all.  Apply both facts before
+	   tile/OBJ fetch so disabled layers do no invisible EE work. */
+	if (!(cgwsel & 0x02) || cgadsub == 0)
 		ts = 0;
 	uFetchLayers = tm | ts;
 
@@ -2440,6 +2423,12 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		Uint8 *list=m_ObjLine[iLine];
 		Int32 count=m_nObjLine[iLine];
 		Int32 budget=SNPPURenderGetObjTileBudget();
+		/* AURORA_SUNSET_RIDERS_CRC_OBJ128_V2_BUDGET_20260825
+		 * Diagnostic equivalent to reference emulator's raised MaxSpriteTilesPerLine:
+		 * bypass time-over only for the two exact Sunset Riders CRCs.
+		 * The existing m_ObjLine list still enforces max 32 OBJ/scanline. */
+		if (g_SnesCompatSunsetRidersObj128)
+			budget = AURORA_SUNSET_RIDERS_OBJ_FETCH_MAX;
 		/* AURORA_SAFE_HOTPATH_V4: when budget is the physical 34-tile limit, limiter
 		   pressure is inactive and the potential cache is intentionally ignored. */
 		if (budget<SNPPU_MAXOBJCHR && count>1 &&

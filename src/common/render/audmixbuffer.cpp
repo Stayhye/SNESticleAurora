@@ -201,14 +201,15 @@ Int32 AudMixBuffer::ConvertSamples2to3(Int16 *pOut, Int16 *pIn, Int32 nSamples, 
         pOut[0] = (Int16)s0;
 
         /* phase 2/3 between s0 and s1, using [hist, s0, s1, s2] */
-        y = -4 * hist + 30 * s0 + 60 * s1 - 5 * s2;
+        /* AURORA_CODEPATH_SIMPLIFY_V5_20260927: 30*s0 + 60*s1 == 30*(s0 + 2*s1). */
+        y = 30 * (s0 + 2 * s1) - 4 * hist - 5 * s2;
         y = (y >= 0 ? y + 40 : y - 40) / 81;
         if (y > 32767)  y = 32767;
         if (y < -32768) y = -32768;
         pOut[1] = (Int16)y;
 
         /* phase 1/3 (= 4/3 from s0) between s1 and s2, using [s0, s1, s2, s3] */
-        y = -5 * s0 + 60 * s1 + 30 * s2 - 4 * s3;
+        y = 30 * (2 * s1 + s2) - 5 * s0 - 4 * s3;
         y = (y >= 0 ? y + 40 : y - 40) / 81;
         if (y > 32767)  y = 32767;
         if (y < -32768) y = -32768;
@@ -486,13 +487,13 @@ Bool AudMixBuffer::OutputLibretroInterleaved(
                 m_OutData[0][m_nOutSamples] = (Int16)l0;
                 m_OutData[1][m_nOutSamples++] = (Int16)r0;
                 m_OutData[0][m_nOutSamples] = _AudMixCubic81(
-                    -4 * histL + 30 * l0 + 60 * l1 - 5 * l2);
+                    30 * (l0 + 2 * l1) - 4 * histL - 5 * l2);
                 m_OutData[1][m_nOutSamples++] = _AudMixCubic81(
-                    -4 * histR + 30 * r0 + 60 * r1 - 5 * r2);
+                    30 * (r0 + 2 * r1) - 4 * histR - 5 * r2);
                 m_OutData[0][m_nOutSamples] = _AudMixCubic81(
-                    -5 * l0 + 60 * l1 + 30 * l2 - 4 * l3);
+                    30 * (2 * l1 + l2) - 5 * l0 - 4 * l3);
                 m_OutData[1][m_nOutSamples++] = _AudMixCubic81(
-                    -5 * r0 + 60 * r1 + 30 * r2 - 4 * r3);
+                    30 * (2 * r1 + r2) - 5 * r0 - 4 * r3);
                 histL = l1;
                 histR = r1;
             }

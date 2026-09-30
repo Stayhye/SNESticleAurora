@@ -105,7 +105,7 @@ static const char *AuroraGpSPVariable(const char *key)
     if (!strcmp(key, "gpsp_frameskip"))           return "disabled";
     if (!strcmp(key, "gpsp_frameskip_threshold")) return "33";
     if (!strcmp(key, "gpsp_frameskip_interval"))  return "0";
-    if (!strcmp(key, "gpsp_color_correction"))    return "enabled"; /* AURORA_GPSP_GBA_V13_PS2_COLOR_CORRECTION_20260911: native GBA LCD colour model */
+    if (!strcmp(key, "gpsp_color_correction"))    return "disabled"; /* AURORA_GPSP_GBA_V13_PS2_COLOR_CORRECTION_20260911: native GBA LCD colour model */
     if (!strcmp(key, "gpsp_frame_mixing"))        return "enabled"; /* AURORA_GPSP_GBA_V13_BITMASK_TURBO_INPUT_20260911: default ON */
     if (!strcmp(key, "gpsp_turbo_period"))        return "4";
     return NULL;
@@ -200,58 +200,60 @@ static void AuroraGpSPInputPoll(void)
 {
 }
 
+/* AURORA_CODEPATH_SIMPLIFY_V5_20260927
+ * The arithmetic below uses libretro's public 0..15 joypad bit layout. */
+typedef char AuroraGpSPLibretroPadLayoutV5[
+    (RETRO_DEVICE_ID_JOYPAD_B == 0 &&
+     RETRO_DEVICE_ID_JOYPAD_Y == 1 &&
+     RETRO_DEVICE_ID_JOYPAD_SELECT == 2 &&
+     RETRO_DEVICE_ID_JOYPAD_START == 3 &&
+     RETRO_DEVICE_ID_JOYPAD_UP == 4 &&
+     RETRO_DEVICE_ID_JOYPAD_DOWN == 5 &&
+     RETRO_DEVICE_ID_JOYPAD_LEFT == 6 &&
+     RETRO_DEVICE_ID_JOYPAD_RIGHT == 7 &&
+     RETRO_DEVICE_ID_JOYPAD_A == 8 &&
+     RETRO_DEVICE_ID_JOYPAD_X == 9 &&
+     RETRO_DEVICE_ID_JOYPAD_L == 10 &&
+     RETRO_DEVICE_ID_JOYPAD_R == 11 &&
+     RETRO_DEVICE_ID_JOYPAD_L3 == 14 &&
+     RETRO_DEVICE_ID_JOYPAD_R3 == 15) ? 1 : -1];
+
+static _INLINE unsigned AuroraGpSPJoyMask(const GpSPSystem::Impl *p)
+{
+    const Uint16 pad = p->pad;
+    const Uint8 nes = SnesIOPadToNes8(pad);
+
+    /* Select/Start/U/D/L/R already occupy libretro bits 2..7.
+     * Move carrier Cross(A) 0->8 and Square(B) 1->0, then add X/Y/L/R. */
+    unsigned mask =
+        ((unsigned)nes & 0xFCU) |
+        (((unsigned)nes & 0x01U) << 8) |
+        (((unsigned)nes & 0x02U) >> 1);
+
+    mask |= ((unsigned)(pad & SNESIO_JOY_A) << 2); /* Circle   -> X */
+    mask |= ((unsigned)(pad & SNESIO_JOY_X) >> 5); /* Triangle -> Y */
+    mask |= ((unsigned)(pad & SNESIO_JOY_L) << 5);
+    mask |= ((unsigned)(pad & SNESIO_JOY_R) << 7);
+    if (p->turboShoulderL) mask |= 1U << RETRO_DEVICE_ID_JOYPAD_L3;
+    if (p->turboShoulderR) mask |= 1U << RETRO_DEVICE_ID_JOYPAD_R3;
+    return mask & 0xffffU;
+}
+
 static int16_t AuroraGpSPInputState(unsigned port, unsigned device,
                                     unsigned index, unsigned id)
 {
     GpSPSystem::Impl *p = s_GpSPHost;
-    Uint16 pad;
     (void)index;
 
     if (!p || port != 0 || device != RETRO_DEVICE_JOYPAD)
         return 0;
-    pad = p->pad;
 
+    const unsigned mask = AuroraGpSPJoyMask(p);
     if (id == RETRO_DEVICE_ID_JOYPAD_MASK)
-    {
-        unsigned mask = 0; /* AURORA_GPSP_GBA_V13_BITMASK_INPUT_20260911 */
-        if (pad & SNESIO_JOY_B)      mask |= 1U << RETRO_DEVICE_ID_JOYPAD_A;
-        if (pad & SNESIO_JOY_Y)      mask |= 1U << RETRO_DEVICE_ID_JOYPAD_B;
-        if (pad & SNESIO_JOY_A)      mask |= 1U << RETRO_DEVICE_ID_JOYPAD_X;
-        if (pad & SNESIO_JOY_X)      mask |= 1U << RETRO_DEVICE_ID_JOYPAD_Y;
-        if (pad & SNESIO_JOY_L)      mask |= 1U << RETRO_DEVICE_ID_JOYPAD_L;
-        if (pad & SNESIO_JOY_R)      mask |= 1U << RETRO_DEVICE_ID_JOYPAD_R;
-        if (pad & SNESIO_JOY_SELECT) mask |= 1U << RETRO_DEVICE_ID_JOYPAD_SELECT;
-        if (pad & SNESIO_JOY_START)  mask |= 1U << RETRO_DEVICE_ID_JOYPAD_START;
-        if (pad & SNESIO_JOY_UP)     mask |= 1U << RETRO_DEVICE_ID_JOYPAD_UP;
-        if (pad & SNESIO_JOY_DOWN)   mask |= 1U << RETRO_DEVICE_ID_JOYPAD_DOWN;
-        if (pad & SNESIO_JOY_LEFT)   mask |= 1U << RETRO_DEVICE_ID_JOYPAD_LEFT;
-        if (pad & SNESIO_JOY_RIGHT)  mask |= 1U << RETRO_DEVICE_ID_JOYPAD_RIGHT;
-        if (p->turboShoulderL)        mask |= 1U << RETRO_DEVICE_ID_JOYPAD_L3;
-        if (p->turboShoulderR)        mask |= 1U << RETRO_DEVICE_ID_JOYPAD_R3;
-        return (int16_t)(mask & 0xffffU);
-    }
-
-    switch (id)
-    {
-        case RETRO_DEVICE_ID_JOYPAD_A:      return (pad & SNESIO_JOY_B) ? 1 : 0; /* Cross -> A */
-        case RETRO_DEVICE_ID_JOYPAD_B:      return (pad & SNESIO_JOY_Y) ? 1 : 0; /* Square -> B */
-        case RETRO_DEVICE_ID_JOYPAD_X:      return (pad & SNESIO_JOY_A) ? 1 : 0; /* Circle -> Turbo A */
-        case RETRO_DEVICE_ID_JOYPAD_Y:      return (pad & SNESIO_JOY_X) ? 1 : 0; /* Triangle -> Turbo B */
-        case RETRO_DEVICE_ID_JOYPAD_L:      return (pad & SNESIO_JOY_L) ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_R:      return (pad & SNESIO_JOY_R) ? 1 : 0;
-        /* AURORA_GPSP_GBA_V13_BITMASK_TURBO_INPUT_20260911
-         * L3/R3 are private virtual transport bits; physical stick clicks are
-         * not exposed. Staged gpSP consumes them only as Turbo L/Turbo R. */
-        case RETRO_DEVICE_ID_JOYPAD_L3:     return p->turboShoulderL ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_R3:     return p->turboShoulderR ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_SELECT: return (pad & SNESIO_JOY_SELECT) ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_START:  return (pad & SNESIO_JOY_START) ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_UP:     return (pad & SNESIO_JOY_UP) ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_DOWN:   return (pad & SNESIO_JOY_DOWN) ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_LEFT:   return (pad & SNESIO_JOY_LEFT) ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_RIGHT:  return (pad & SNESIO_JOY_RIGHT) ? 1 : 0;
-        default: return 0;
-    }
+        return (int16_t)mask;
+    if (id > RETRO_DEVICE_ID_JOYPAD_R3)
+        return 0;
+    return (mask & (1U << id)) ? 1 : 0;
 }
 
 /* AURORA_GPSP_GBA_V13_SCALER_LUT_20260911

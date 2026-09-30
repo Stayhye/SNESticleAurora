@@ -666,35 +666,21 @@ static void qResetTransient(void)
 
 static Uint8 qMapPad(Uint16 pad)
 {
-    Uint8 nes = 0;
-
-    /* SysInputT uses this sentinel for a physically absent controller.
-     * Treating it as a bitfield would otherwise press every NES button. */
+    /* AURORA_CODEPATH_SIMPLIFY_V5_20260927 */
     if (pad == EMUSYS_DEVICE_DISCONNECTED)
         return 0;
 
-    if (pad & SNESIO_JOY_B)      nes |= 0x01; /* Cross  -> NES A */
-    if (pad & SNESIO_JOY_Y)      nes |= 0x02; /* Square -> NES B */
+    Uint8 nes = SnesIOPadToNes8(pad);
 
-    if ((pad & SNESIO_JOY_A) && s_TurboPhase)
-        nes |= 0x01;                         /* Circle   -> turbo A */
-    if ((pad & SNESIO_JOY_X) && s_TurboPhase)
-        nes |= 0x02;                         /* Triangle -> turbo B */
-
-    if (pad & SNESIO_JOY_SELECT) nes |= 0x04;
-    if (pad & SNESIO_JOY_START)  nes |= 0x08;
-    if (pad & SNESIO_JOY_UP)     nes |= 0x10;
-    if (pad & SNESIO_JOY_DOWN)   nes |= 0x20;
-    if (pad & SNESIO_JOY_LEFT)   nes |= 0x40;
-    if (pad & SNESIO_JOY_RIGHT)  nes |= 0x80;
+    if (s_TurboPhase)
+    {
+        nes |= (Uint8)(
+            ((pad & SNESIO_JOY_A) >> 7) |   /* Circle   -> turbo A */
+            ((pad & SNESIO_JOY_X) >> 5));   /* Triangle -> turbo B */
+    }
 
     /* Same policy as the old QuickNES option "up_down_allowed=disabled". */
-    if ((nes & 0x10) && (nes & 0x20))
-        nes &= (Uint8)~(0x10 | 0x20);
-    if ((nes & 0x40) && (nes & 0x80))
-        nes &= (Uint8)~(0x40 | 0x80);
-
-    return nes;
+    return SnesIOFilterOppositeDirections8(nes);
 }
 
 static void qRenderFrame(CRenderSurface *pTarget)

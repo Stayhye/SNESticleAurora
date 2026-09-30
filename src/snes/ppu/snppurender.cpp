@@ -167,6 +167,53 @@ void SNPPURenderSetObjLimitMode(Uint8 uMode)
 SnesChrLookupT _SnesPPU_PlaneLookup[2] _ALIGN(32);
 Uint8 _SnesPPU_HFlipLookup[2][256] _ALIGN(32);
 
+#if CODE_PLATFORM == CODE_PS2
+/* AURORA_DKC_SPR_LUT_MIRROR_V23_20260928
+ * Visible SNES rendering already owns SPR [0, RenderInfo) and the GS blender
+ * owns a DMA staging SNPPUBlendInfoT at 6 KiB. Reserve the next aligned range:
+ *   8 KiB .. 12 KiB       complete _SnesPPU_PlaneLookup[2]
+ *   12 KiB .. 12 KiB+256 reverse-mask row _SnesPPU_HFlipLookup[1]
+ *
+ * The audio mixer may reuse SPR between frames, therefore these immutable host
+ * LUTs are refreshed after _BuildPlaneLookup() on every visible BeginRender.
+ */
+#define AURORA_DKC_SPR_PLANE_OFFSET (8 * 1024)
+#define AURORA_DKC_SPR_MASK_OFFSET  (12 * 1024)
+#define AURORA_DKC_SPR_BYTES        (16 * 1024)
+
+typedef char AuroraDKCSprRenderInfoGuard[
+    (sizeof(SnesRender8pInfoT) <= 6 * 1024) ? 1 : -1];
+typedef char AuroraDKCSprBlendStageGuard[
+    ((6 * 1024 + sizeof(SNPPUBlendInfoT)) <= AURORA_DKC_SPR_PLANE_OFFSET) ? 1 : -1];
+typedef char AuroraDKCSprPlaneSizeGuard[
+    (sizeof(_SnesPPU_PlaneLookup) == 4 * 1024) ? 1 : -1];
+typedef char AuroraDKCSprPlaneEndGuard[
+    ((AURORA_DKC_SPR_PLANE_OFFSET + sizeof(_SnesPPU_PlaneLookup)) <=
+      AURORA_DKC_SPR_MASK_OFFSET) ? 1 : -1];
+typedef char AuroraDKCSprMaskSizeGuard[
+    (sizeof(_SnesPPU_HFlipLookup[1]) == 256) ? 1 : -1];
+typedef char AuroraDKCSprFinalGuard[
+    ((AURORA_DKC_SPR_MASK_OFFSET + sizeof(_SnesPPU_HFlipLookup[1])) <=
+      AURORA_DKC_SPR_BYTES) ? 1 : -1];
+
+#ifndef AURORA_PPU_R5900_ASM
+#define AURORA_PPU_R5900_ASM 1
+#endif
+#if AURORA_PPU_R5900_ASM
+extern void SnesPPURender8RefreshPaletteLutsScratchPS2(void);
+#endif
+
+static void _SnesPPURefreshHotLutsScratchPS2(void)
+{
+    memcpy((void *)(PS2MEM_SCRATCHPAD + AURORA_DKC_SPR_PLANE_OFFSET),
+           (const void *)&_SnesPPU_PlaneLookup[0],
+           sizeof(_SnesPPU_PlaneLookup));
+    memcpy((void *)(PS2MEM_SCRATCHPAD + AURORA_DKC_SPR_MASK_OFFSET),
+           (const void *)&_SnesPPU_HFlipLookup[1][0],
+           sizeof(_SnesPPU_HFlipLookup[1]));
+}
+#endif
+
 
 static Bool _SnesPPU_bInitialized=FALSE;
 
@@ -923,6 +970,18 @@ void SnesPPURender::BeginRender(CRenderSurface *pTarget)
 	    _BuildPlaneLookup();
         _SnesPPU_bInitialized = TRUE;
     }
+
+#if CODE_PLATFORM == CODE_PS2
+    /* AURORA_DKC_SPR_LUT_MIRROR_V23_20260928_REFRESH */
+    if (pTarget)
+    {
+        _SnesPPURefreshHotLutsScratchPS2();
+#if AURORA_PPU_R5900_ASM
+        /* AURORA_DKC_CHR_PALETTE_SPR_V27_20260928_REFRESH */
+        SnesPPURender8RefreshPaletteLutsScratchPS2();
+#endif
+    }
+#endif
 }
 
 

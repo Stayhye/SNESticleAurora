@@ -272,21 +272,30 @@ static size_t pceAudioBatch(const int16_t *data, size_t frames)
 }
 
 static void pceInputPoll(void) {}
-static bool pcePadHas(Uint16 p, Uint16 bit) { return p != EMUSYS_DEVICE_DISCONNECTED && (p & bit); }
+
+/* AURORA_CODEPATH_SIMPLIFY_V5_20260927
+ * This is libretro's stable joypad bit layout. Fail at compile time rather
+ * than silently mis-map if a nonstandard header ever changes it. */
+typedef char AuroraPceLibretroPadLayoutV5[
+    (RETRO_DEVICE_ID_JOYPAD_B == 0 &&
+     RETRO_DEVICE_ID_JOYPAD_SELECT == 2 &&
+     RETRO_DEVICE_ID_JOYPAD_START == 3 &&
+     RETRO_DEVICE_ID_JOYPAD_UP == 4 &&
+     RETRO_DEVICE_ID_JOYPAD_DOWN == 5 &&
+     RETRO_DEVICE_ID_JOYPAD_LEFT == 6 &&
+     RETRO_DEVICE_ID_JOYPAD_RIGHT == 7 &&
+     RETRO_DEVICE_ID_JOYPAD_A == 8) ? 1 : -1];
 
 static int16_t pceJoyMask(unsigned port)
 {
     if (!s_pInput || port >= EMUSYS_DEVICE_NUM) return 0;
-    Uint16 p = s_pInput->uPad[port]; if (p == EMUSYS_DEVICE_DISCONNECTED) return 0;
-    unsigned m = 0;
-    if (pcePadHas(p, SNESIO_JOY_UP))     m |= 1u << RETRO_DEVICE_ID_JOYPAD_UP;
-    if (pcePadHas(p, SNESIO_JOY_DOWN))   m |= 1u << RETRO_DEVICE_ID_JOYPAD_DOWN;
-    if (pcePadHas(p, SNESIO_JOY_LEFT))   m |= 1u << RETRO_DEVICE_ID_JOYPAD_LEFT;
-    if (pcePadHas(p, SNESIO_JOY_RIGHT))  m |= 1u << RETRO_DEVICE_ID_JOYPAD_RIGHT;
-    if (pcePadHas(p, SNESIO_JOY_Y))      m |= 1u << RETRO_DEVICE_ID_JOYPAD_A; /* I */
-    if (pcePadHas(p, SNESIO_JOY_B))      m |= 1u << RETRO_DEVICE_ID_JOYPAD_B; /* II */
-    if (pcePadHas(p, SNESIO_JOY_SELECT)) m |= 1u << RETRO_DEVICE_ID_JOYPAD_SELECT;
-    if (pcePadHas(p, SNESIO_JOY_START))  m |= 1u << RETRO_DEVICE_ID_JOYPAD_START;
+    Uint16 p = s_pInput->uPad[port];
+    if (p == EMUSYS_DEVICE_DISCONNECTED) return 0;
+
+    const Uint8 nes = SnesIOPadToNes8(p);
+    const unsigned m =
+        ((unsigned)nes & 0xFDU) |       /* B, Select/Run, directions */
+        (((unsigned)nes & 0x02U) << 7); /* carrier Y -> libretro A (PCE I) */
     return (int16_t)m;
 }
 

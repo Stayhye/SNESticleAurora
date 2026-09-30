@@ -1254,138 +1254,125 @@ private:
 };
 
 
+/* AURORA_VIKINGS_APUIO_EDGE_SCHED_V3_20260928
+ * Run one positive SPC budget while preserving the existing profiler and
+ * crash-diagnostic coverage. SyncSPC() may now split one catch-up interval
+ * at CPU->SPC APUIO edge timestamps, but the sum of all budgets is unchanged.
+ */
+static void AuroraRunSpcBudget(SNSpcT *pSpc, Int32 nCycles)
+{
+    if (nCycles <= 0)
+        return;
+
+    AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_SPC);
+    PROF_ENTER("SNSpcExecute");
+#if SNDBG_LOG
+    Uint32 _tAPU = ProfCtrGetCycle();
+#endif
+    AuroraEECrashDiagBreadcrumb(
+        AED_SPC_EXEC_ENTER, (Uint32)nCycles,
+        (Uint32)SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME));
+    SNSPCExecute(pSpc, nCycles);
+    AuroraEECrashDiagBreadcrumb(
+        AED_SPC_EXEC_RETURN,
+        (Uint32)SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME),
+        (Uint32)pSpc->Cycles);
+#if SNDBG_LOG
+    g_TmgCycAPU += ProfCtrGetCycle() - _tAPU;
+#endif
+    PROF_LEAVE("SNSpcExecute");
+    AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_SPC);
+}
+
+
 void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
 {
-	Int32 nCycles;
+    const Int32 CpuTime =
+        SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME);
+    const Int32 TargetTime = CpuTime + uExtra;
+    Int32 nCycles;
 
-	/* AURORA_EE_CRASH_DIAG_DKC_V1_20260918: host progress only; never touches trace storage. */
-	AuroraEECrashDiagBreadcrumb(
-	    AED_SYNCSPC_ENTER, m_uFrame, m_uLine);
-
-/*#if SNES_DEBUG
-    if (g_bStateDebug)
-    {
-        ConDebug("SyncSPC cpu=%06d spc=%06d\n", 
-            SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME),
-            SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME)
-            );
-
-    }
-#endif */     
-
-    /* AURORA_CPU_SPC_HOST_WORK_REDUCTION_V2_20260920_SCHED */
-    /* AURORA_TOPGEAR_SPC_SYNC_ALGEBRA_V3_20260917
-     * SNSPCGetCounter(FRAME) is Counter[FRAME] - Cycles. The legacy
-     * expression subtracted that getter and then subtracted Cycles
-     * again, so the residual cancels exactly. Use scheduled FRAME
-     * time directly; the resulting nCycles is bit-for-bit identical. */
-    Int32 CpuTime = SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME);
-    nCycles = CpuTime - m_Spc.Counter[SNSPC_COUNTER_FRAME];
-    nCycles += uExtra;
     AuroraEECrashDiagBreadcrumb(
-        AED_SYNCSPC_TIMING, (Uint32)CpuTime, (Uint32)nCycles);
-    if (nCycles > (SNSPC_CYCLE * SNES_SPCMINCYCLES))
-    {
-        //SnesDebug("SNSPCExec: %d\n", nCycles);
-        // execute SPC
-        /* profiler: SPC700 execution */
-        AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_SPC);
-        PROF_ENTER("SNSpcExecute");
-#if SNDBG_LOG
-        Uint32 _tAPU = ProfCtrGetCycle();
-#endif
-        AuroraEECrashDiagBreadcrumb(
-            AED_SPC_EXEC_ENTER, (Uint32)nCycles,
-            (Uint32)SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
-        SNSPCExecute(&m_Spc, nCycles);
-        AuroraEECrashDiagBreadcrumb(
-            AED_SPC_EXEC_RETURN,
-            (Uint32)SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME),
-            (Uint32)m_Spc.Cycles);
-#if SNDBG_LOG
-        g_TmgCycAPU += ProfCtrGetCycle() - _tAPU;
-#endif
-        PROF_LEAVE("SNSpcExecute");
-        AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_SPC);
+        AED_SYNCSPC_ENTER, m_uFrame, m_uLine);
 
 #if SNSPCIO_WRITEQUEUE
-        /* AURORA_BLIZZARD_APUIO_QUEUE_ORDER_V1_20260914
-         * CPU APUIO reads are an observation point, not permission to make
-         * future CPU->SPC writes visible early.  The SPC executor may stop a
-         * few master clocks short of CpuTime at instruction granularity and
-         * carry that remainder in m_Spc.Cycles.  Respect its actually consumed
-         * FRAME timestamp on reads so an IPL/driver handshake cannot collapse
-         * several queued latch values into the newest one.
-         *
-         * Frame rollover and queue-full recovery deliberately retain the old
-         * full flush through bFlushAll=TRUE. */
-        AuroraEECrashDiagBreadcrumb(
-            AED_APUIO_QUEUE_ENTER,
-            bFlushAll ? 1u : 0u,
-            (Uint32)SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
-        if (bFlushAll)
-            m_SpcIO.SyncQueueAll();
-        else if (!m_SpcIO.m_Queue.IsEmpty())
-            m_SpcIO.SyncQueue(SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
-        AuroraEECrashDiagBreadcrumb(
-            AED_APUIO_QUEUE_RETURN,
-            bFlushAll ? 1u : 0u,
-            (Uint32)SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
-#endif
+    /*
+     * Hardware changes CPU->SMP port latches at the bus edge; it does not wait
+     * for the SPC700 to read the port. Aurora keeps CPU writes queued because
+     * its S-CPU callbacks are instruction-granular, so catch-up must publish
+     * those edges at their emulated timestamps rather than after one large SPC
+     * execution block.
+     *
+     * Stop the scheduled SPC timeline at each due queue timestamp, commit the
+     * entire same-timestamp group, then continue. This preserves Blackthorne's
+     * same-timestamp $2140/$2141 group while giving Lost Vikings' genuinely
+     * older 02 -> 00 -> 01 transitions their real observation window.
+     *
+     * SNSPCExecute() keeps any sub-instruction remainder in pSpc->Cycles.
+     * Splitting the added budget does not create or discard time: Counter[]
+     * still advances by exactly TargetTime - its entry value in total.
+     */
+    while (!m_SpcIO.m_Queue.IsEmpty())
+    {
+        SNQueueElementT *pEdge = m_SpcIO.m_Queue.Peek();
+        Uint32 uEdgeCycle;
+        Int32 iEdgeCycle;
+
+        if (!pEdge)
+            break;
+
+        uEdgeCycle = pEdge->uCycle;
+        iEdgeCycle = (Int32)uEdgeCycle;
+
+        if (iEdgeCycle > TargetTime)
+            break;
+
+        nCycles = iEdgeCycle - m_Spc.Counter[SNSPC_COUNTER_FRAME];
+        if (nCycles > 0)
+            AuroraRunSpcBudget(&m_Spc, nCycles);
+
+        /*
+         * SyncQueue() uses <= and therefore commits every byte in the same
+         * timestamp group atomically. It is also safe if an SPC-side port
+         * read already consumed this edge during the run above.
+         */
+        m_SpcIO.SyncQueue(uEdgeCycle);
     }
+#endif
+
+    nCycles = TargetTime - m_Spc.Counter[SNSPC_COUNTER_FRAME];
+
+    AuroraEECrashDiagBreadcrumb(
+        AED_SYNCSPC_TIMING, (Uint32)CpuTime, (Uint32)nCycles);
+
+    if (nCycles > (SNSPC_CYCLE * SNES_SPCMINCYCLES))
+        AuroraRunSpcBudget(&m_Spc, nCycles);
+
+#if SNSPCIO_WRITEQUEUE
+    /*
+     * All queued CPU->SPC edges at or before TargetTime were handled above.
+     * Preserve the legacy forced flush used by frame rollover / queue-full
+     * recovery, but do not lazily publish a later edge merely because this
+     * catch-up call completed.
+     */
+    AuroraEECrashDiagBreadcrumb(
+        AED_APUIO_QUEUE_ENTER,
+        bFlushAll ? 1u : 0u,
+        (Uint32)SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
+
+    if (bFlushAll)
+        m_SpcIO.SyncQueueAll();
+
+    AuroraEECrashDiagBreadcrumb(
+        AED_APUIO_QUEUE_RETURN,
+        bFlushAll ? 1u : 0u,
+        (Uint32)SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
+#endif
 
     AuroraEECrashDiagBreadcrumb(
         AED_SYNCSPC_RETURN, m_uFrame, m_uLine);
-
-//#if SNES_DEBUG
-//    if (g_bStateDebug)
-//    {
-//        ConDebug("DoneSyncSPC cpu=%06d spc=%06d\n", 
-//            SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME),
-//            SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME)
-//            );
-//
-//    }
-//#endif      
-
-    
-    
-    
-    
-    /*
-    // get cycle count 
-    nCycles = SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME) - SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME);
-    nCycles += uExtra;
-
-    // get cycle count 
-    PROF_ENTER("SNSpcExecute");
-    SNSPCExecuteToCycle( &m_Spc, nCycles );
-    PROF_LEAVE("SNSpcExecute");
-
-#if SNSPCIO_WRITEQUEUE
-    m_SpcIO.SyncQueueAll();
-#endif
-*/
-
-
-    /*
-	// get cycle count 
-	nCycles = SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME) - SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME);
-	nCycles += uExtra;
-	if (nCycles > (SNSPC_CYCLE * SNES_SPCMINCYCLES))
-	{
-		//SnesDebug("SNSPCExec: %d\n", nCycles);
-		// execute SPC
-        PROF_ENTER("SNSpcExecute");
-		SNSPCExecute(&m_Spc, nCycles);
-        PROF_LEAVE("SNSpcExecute");
-
-		#if SNSPCIO_WRITEQUEUE
-		m_SpcIO.SyncQueueAll();
-		#endif
-	}
-    */
 }
+
 
 
 inline void SnesSystem::SyncPPU()
@@ -1876,19 +1863,18 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 		SNQueueElementT *pPendingAPUIO = pSnes->m_SpcIO.m_Queue.Peek();
 		if (pPendingAPUIO && pPendingAPUIO->uCycle < uAPUIOWriteCycle)
 		{
-			/* AURORA_VIKINGS_APUIO_PREPUBLISH_V2_20260919
-			 * SyncSPC() executes the SPC before its normal due-write drain, and
-			 * that drain is skipped entirely when no positive SPC budget is
-			 * available.  Therefore an older APUIO edge can remain queued until
-			 * after a newer edge is appended, allowing 02 -> 00 -> 01 style
-			 * handshakes to collapse.
+			/* AURORA_VIKINGS_APUIO_EDGE_SCHED_V3_20260928_WRITE
 			 *
-			 * The current APUIO write latency is zero, so every timestamp strictly
-			 * below uAPUIOWriteCycle is already due at this S-CPU bus access.
-			 * Publish only those older timestamps BEFORE SPC catch-up.  Equality
-			 * is intentionally excluded: same-instruction $2140/$2141 writes
-			 * (Blackthorne) remain one atomic timestamp group. */
-			pSnes->m_SpcIO.SyncQueue(uAPUIOWriteCycle - 1u);
+			 * Do not publish the older latch value early here. SyncSPC()
+			 * now walks queued CPU->SPC edges in timestamp order: it runs
+			 * the SPC up to the old edge, commits the complete timestamp
+			 * group, then continues to this S-CPU bus time.
+			 *
+			 * This preserves an actual execution/observation interval for
+			 * Lost Vikings-style 02 -> 00 -> 01 handshakes without adding
+			 * SPC cycles. Equal timestamps are still excluded so Aurora's
+			 * instruction-granular $2140/$2141 writes remain atomic.
+			 */
 			pSnes->SyncSPC(0, FALSE);
 		}
 		#endif

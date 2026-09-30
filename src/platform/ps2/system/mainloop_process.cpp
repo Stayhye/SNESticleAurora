@@ -73,6 +73,16 @@ Bool MainLoopProcess()
     NetPlayRPCInputT NetInput;
     /* AURORA_PD_CADENCE_RESUME_FIRST_FRAME_V7_20260821 */
     Bool bGameplayJustStarted = FALSE;
+    /* AURORA_MENU_RESUME_COLDSTART_SPLIT_V15_20260928
+     * Audio must be re-primed after the menu hard-cut, but same-core UI
+     * resume is not a new gameplay/cadence epoch. */
+    Bool bGameplayAudioNeedsPrime = FALSE;
+
+    /* AURORA_CODEPATH_SIMPLIFY_V5_20260927
+     * InputPoll freezes these values for the rest of this frontend tick. */
+    Uint32 uPadDataSnapshot[INPUT_MAXPADS];
+    Uint32 uPadAnalogDpadSnapshot[INPUT_MAXPADS];
+    Bool bPadConnectedSnapshot[INPUT_MAXPADS];
 
     /* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919
      * Runtime trace is controlled only by the visible settings row now.
@@ -89,6 +99,13 @@ Bool MainLoopProcess()
 
     PROF_LEAVE("InputProcess");
 
+    for (Int32 iSnapshot = 0; iSnapshot < INPUT_MAXPADS; ++iSnapshot)
+    {
+        bPadConnectedSnapshot[iSnapshot] = InputGetPadSnapshot(
+            (Uint32)iSnapshot,
+            &uPadDataSnapshot[iSnapshot],
+            &uPadAnalogDpadSnapshot[iSnapshot]);
+    }
 
 	{
 	    /* OR the digital pad bits with d-pad bits synthesised from each
@@ -99,10 +116,10 @@ Bool MainLoopProcess()
 	       drives menu navigation just like InfinityStation, without
 	       leaking into the running game. */
 	    Uint32 buttons =
-	          InputGetPadData(0) | InputGetPadData(1)
-	        | InputGetPadData(2) | InputGetPadData(3)
-	        | InputGetPadDpadFromAnalog(0) | InputGetPadDpadFromAnalog(1)
-	        | InputGetPadDpadFromAnalog(2) | InputGetPadDpadFromAnalog(3);
+	          uPadDataSnapshot[0] | uPadDataSnapshot[1]
+	        | uPadDataSnapshot[2] | uPadDataSnapshot[3]
+	        | uPadAnalogDpadSnapshot[0] | uPadAnalogDpadSnapshot[1]
+	        | uPadAnalogDpadSnapshot[2] | uPadAnalogDpadSnapshot[3];
 
 	    _MainLoopInputProcess(buttons);
 	}
@@ -126,15 +143,29 @@ Bool MainLoopProcess()
         const Bool bGameplayNow =
             (!_bMenu && _pSystem && !_MainLoop_BlackScreen) ? TRUE : FALSE;
 
-        bGameplayJustStarted =
+        /* AURORA_SAFE_FRAMESKIP_MENU_NEUTRAL_V7_20260926
+         * Observe the actual gameplay/UI state after input has resolved _bMenu.
+         * This covers direct quick-state menu paths as well as _MenuEnable(). */
+        MainLoopSafeFrameskipSetGameplayActive(bGameplayNow);
+
+        bGameplayAudioNeedsPrime =
             (bGameplayNow &&
              (!_AudioGameplayWasActive ||
               _AudioGameplaySystem != _pSystem)) ? TRUE : FALSE;
 
-        if (bGameplayJustStarted)
+        /* V15: a normal menu round-trip keeps the same System and frame
+         * sequence. Do not reset PicoDrive cadence or turbo host phase just
+         * because the audio backend needs its safety reservoir rebuilt. */
+        bGameplayJustStarted =
+            (bGameplayNow &&
+             (_AudioGameplaySystem != _pSystem ||
+              (_pSystem && _pSystem->GetFrame() == 0))) ? TRUE : FALSE;
+
+        if (bGameplayAudioNeedsPrime)
         {
-            /* Start SMS/GG autofire in its ON half whenever gameplay resumes. */
-            MainLoopTurboRearmHostPhase();
+            /* True core/cadence start only; NOT ordinary same-core UI resume. */
+            if (bGameplayJustStarted)
+                MainLoopTurboRearmHostPhase();
             /* AURORA_FCEUMM_FDS_V14_AUDIO_BURST_STABILITY_20260827
              * FDS also produces roughly one 48 kHz frame of audio per host
              * tick. 1024 drains faster than production while preventing an
@@ -206,7 +237,7 @@ Bool MainLoopProcess()
 			{
 				Input.uPad[iPad] = EMUSYS_DEVICE_DISCONNECTED;
 			}
-			else if (InputIsPadConnected(iPad))
+			else if (bPadConnectedSnapshot[iPad])
 			{
 				/* OR the digital pad bits with d-pad bits synthesised from
 				   the left analog stick so the analog stick drives the SNES
@@ -214,17 +245,17 @@ Bool MainLoopProcess()
 				   inputs are merged: if both press the same direction the
 				   result is identical to a single press, so users can use
 				   whichever they prefer (or both). */
-				Uint32 uAnalogDpad = InputGetPadDpadFromAnalog(iPad);
+				Uint32 uAnalogDpad = uPadAnalogDpadSnapshot[iPad];
 
 				/* AURORA_QN_ARKANOID_ANALOG_ONLY_V2_20260828
 				 * Arkanoid (Japan) owns P1 left-stick X as an absolute Vaus
 				 * paddle. Do not also synthesize LEFT/RIGHT from that stick;
-				 * the physical D-pad from InputGetPadData() remains available. */
+				 * the cached physical D-pad snapshot remains available. */
 				if (iPad == 0 && _pSystem == _pNes &&
 				    QuicknesBridge_IsArkanoidVaus())
 				    uAnalogDpad = 0;
 
-				Uint32 uHostPad = InputGetPadData(iPad) | uAnalogDpad;
+				Uint32 uHostPad = uPadDataSnapshot[iPad] | uAnalogDpad;
 				Input.uPad[iPad] = _MainLoopInput(uHostPad);
 
 				/* AURORA_FAMICOM_MIC_CFG41_20260828
