@@ -86,6 +86,93 @@ AuroraPceDrawBgTilesPS2:
     nop
     .end AuroraPceDrawBgTilesPS2
 
+
+/* AURORA_PCE_SPR_CLEAR128_R5900_V16_20260929
+ * Sprite-line zero clear selected only after an optimizer-aware audit.
+ *
+ * Current Aurora PCE invariant:
+ *   - destination is at least 8-byte aligned;
+ *   - current call count is even;
+ *   - the region is plain host scratch memory, not emulated I/O.
+ *
+ * If the incoming address is 8 mod 16, peel one SD before using SQ, because
+ * R5900 SQ silently aligns its address down and must not be issued on the
+ * unpeeled pointer.
+ *
+ * EABI: $4 = uint32 *dst, $5 = uint32 count.
+ */
+    .p2align 4
+    .globl AuroraPceClearSpriteLinePS2
+    .ent AuroraPceClearSpriteLinePS2
+AuroraPceClearSpriteLinePS2:
+    blez    $5, .Lsprclr_done
+    andi    $8, $4, 8
+
+    beqz    $8, .Lsprclr_aligned16
+    sltiu   $9, $5, 2
+    bnez    $9, .Lsprclr_one_misaligned
+    nop
+    sd      $0, 0($4)
+    addiu   $4, $4, 8
+    addiu   $5, $5, -2
+    beqz    $5, .Lsprclr_done
+    nop
+
+.Lsprclr_aligned16:
+    sltiu   $8, $5, 16
+    bnez    $8, .Lsprclr_tail8
+    nop
+
+.Lsprclr_loop64:
+    sq      $0, 0x00($4)
+    sq      $0, 0x10($4)
+    sq      $0, 0x20($4)
+    sq      $0, 0x30($4)
+    addiu   $5, $5, -16
+    sltiu   $8, $5, 16
+    beqz    $8, .Lsprclr_loop64
+    addiu   $4, $4, 0x40
+
+.Lsprclr_tail8:
+    sltiu   $8, $5, 8
+    bnez    $8, .Lsprclr_tail4
+    nop
+    sq      $0, 0x00($4)
+    sq      $0, 0x10($4)
+    addiu   $4, $4, 0x20
+    addiu   $5, $5, -8
+
+.Lsprclr_tail4:
+    sltiu   $8, $5, 4
+    bnez    $8, .Lsprclr_tail2
+    nop
+    sq      $0, 0x00($4)
+    addiu   $4, $4, 0x10
+    addiu   $5, $5, -4
+
+.Lsprclr_tail2:
+    sltiu   $8, $5, 2
+    bnez    $8, .Lsprclr_tail1
+    nop
+    sd      $0, 0($4)
+    addiu   $4, $4, 8
+    addiu   $5, $5, -2
+
+.Lsprclr_tail1:
+    beqz    $5, .Lsprclr_done
+    nop
+    sw      $0, 0($4)
+
+.Lsprclr_done:
+    jr      $31
+    nop
+
+.Lsprclr_one_misaligned:
+    sw      $0, 0($4)
+    jr      $31
+    nop
+    .end AuroraPceClearSpriteLinePS2
+
 /* Byte-at-a-time on purpose: HuC6280 block moves have sequential overlap
  * semantics.  Preloading multiple bytes before stores would be incorrect. */
     .globl AuroraPceBmtCopyIncPS2

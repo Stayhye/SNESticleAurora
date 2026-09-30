@@ -245,6 +245,43 @@ void Blip_Buffer_mix_samples'''
     path.write_text(text2, encoding="utf-8")
 
 
+
+def patch_vdc_sprite_clear(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    include_anchor = '#include "../state_helpers.h"\n'
+    decl = (
+        "\n#ifdef AURORA_PS2_PCE_FAST\n"
+        "/* AURORA_PCE_SPR_CLEAR128_STAGE_V16_20260929\n"
+        " * Only the sprite-line zero clear uses the new R5900 kernel.\n"
+        " * Revision-v2 DrawBG remains C. */\n"
+        "extern void AuroraPceClearSpriteLinePS2(uint32 *dst, uint32 count);\n"
+        "#endif\n"
+    )
+    text = replace_once(
+        text, include_anchor, include_anchor + decl,
+        "vdc.c sprite-clear declaration anchor"
+    )
+
+    old = (
+        "   MDFN_FastU32MemsetM8(\n"
+        "      (uint32 *)spr_linebuf, 0, ((end + 3) >> 1) & ~1);\n"
+    )
+    new = (
+        "#ifdef AURORA_PS2_PCE_FAST\n"
+        "   AuroraPceClearSpriteLinePS2(\n"
+        "      (uint32 *)spr_linebuf, "
+        "(uint32)(((end + 3) >> 1) & ~1));\n"
+        "#else\n"
+        "   MDFN_FastU32MemsetM8(\n"
+        "      (uint32 *)spr_linebuf, 0, ((end + 3) >> 1) & ~1);\n"
+        "#endif\n"
+    )
+    text = replace_once(
+        text, old, new, "vdc.c sprite-line zero clear"
+    )
+    path.write_text(text, encoding="utf-8")
+
+
 def patch_vdc(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     include_anchor = '#include "../state_helpers.h"\n'
@@ -339,6 +376,7 @@ def main():
         # recreate stale C here: the pristine pinned Beetle commit is exported
         # first, so all existing Aurora C fast paths remain exactly intact.
         patch_huc(tmp / "mednafen/pce_fast/huc6280.c")
+        patch_vdc_sprite_clear(tmp / "mednafen/pce_fast/vdc.c")
         asm_dst = tmp / "mednafen/pce_fast/aurora_pce_hotpaths_ps2.S"
         shutil.copy2(asm, asm_dst)
         (tmp / ".aurora-pce-mips-stage-v1").write_text(
