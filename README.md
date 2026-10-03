@@ -90,6 +90,7 @@ User interface:
 * Pilotwings (SNES) and Secret of Mana (SNES) mode 7 rendering, also fixes other games that rely on it
 * Secret of Mana (SNES) mode 5 rendering, also fixes other games that rely on it
 * Addams Family (SNES) graphical glitches and timing issues fixed
+* Sunset Riders (SNES) graphical glitches fixed
 * Sonic Blast Man (SNES) wrong colors fixed
 * J.R.R. Tolkien's The Lord of the Rings (SNES) black screen fixed
 * Blackthorne (SNES) black screen fixed
@@ -110,7 +111,6 @@ User interface:
 * SMB (ethernet crossover cable) connection
 * Krazy Creatures (NES) minor graphical glitches
 * Super Mario World 2 (SNES) performance (Super FX2)
-* Sunset Riders (SNES) graphical glitches
 * Any other games with performance or graphical issues
 
 **TO BE ADDED:**
