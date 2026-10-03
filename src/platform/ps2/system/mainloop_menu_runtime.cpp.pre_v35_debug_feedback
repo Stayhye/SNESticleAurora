@@ -29,7 +29,6 @@
 #include "mainloop_state.h"
 #include "mainloop_ui.h"
 #include "mainloop_iop.h"
-#include "mainloop_debug_state.h" /* AURORA_SNES_DEBUG_STATE_V35_UI_FEEDBACK_20261002 */
 
 #include "types.h"
 #include "console.h"
@@ -124,14 +123,6 @@ static void _MenuSavePendingSRAM(void)
 
 void _MenuRuntimeUpdate(void)
 {
-#if AURORA_SNES_DEBUG_STATE
-	/* AURORA_SNES_DEBUG_STATE_V35_UI_FEEDBACK_20261002
-	 * Automatic SRAM persistence keeps storage priority. Once it is clear,
-	 * advance the debug request exactly once per visible menu tick. */
-	if (_bMenu && !s_sramSavePending)
-		MainLoopSnesDebugStateUpdate();
-#endif
-
 	if (!_bMenu || !s_sramSavePending)
 		return;
 	/* PCE-CD: don't overlap the final pre-menu async read with SRAM I/O. */
@@ -316,11 +307,6 @@ void _MenuEnable(Bool bEnable)
 			   game directly while a save was queued for the previous ROM. */
 			s_sramSavePending = FALSE;
 			s_sramSaveDelay = 0;
-#if AURORA_SNES_DEBUG_STATE
-			/* AURORA_SNES_DEBUG_STATE_V35_UI_FEEDBACK_20261002:
-			 * never carry a queued capture into a later menu session. */
-			MainLoopCancelSnesDebugStateRequest();
-#endif
 			s_NormalMenuBgmSession = FALSE;
 			_bMenu = FALSE;
 			BgmStop();

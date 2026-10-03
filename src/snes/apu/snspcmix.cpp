@@ -11,6 +11,7 @@
 #include "snspcdefs.h"
 #include "sndbglog.h"
 #include "platform/ps2/system/aurora_runtime_trace.h"
+#include "snspctracer.h" /* AURORA_SNES_GENERIC_TRACER_V36_20261002 */
 /* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918 */
 extern "C" {
 #include "snspcbrr.h"
@@ -1458,16 +1459,70 @@ static Uint32 _FilterEchoStereoARAM(SNSpcEchoSampleT *L,SNSpcEchoSampleT *R,Int3
 	f[0].iPos=fp; f[1].iPos=fp;
 	return pos;
 }
+#if AURORA_SNES_TRACER
+void SNSpcDspMixFull::FilterEcho(Int16 *L,Int16 *R,Int32 n,Int32 rate,Bool wr,Uint32 uMixCycle)
+#else
 void SNSpcDspMixFull::FilterEcho(Int16 *L,Int16 *R,Int32 n,Int32 rate,Bool wr)
+#endif
 {
-	Uint32 pos=m_Echo.uEchoAddr;
-	Uint32 size=(m_pDsp->GetReg(SNSPCDSP_REG_EDL)&15)<<11;
-	Uint32 base=((Uint32)m_pDsp->GetReg(SNSPCDSP_REG_ESA))<<8;
-	Int16 c[8];
-	if(rate!=SNSPCDSP_SAMPLERATE && size)size=size*rate/SNSPCDSP_SAMPLERATE;
-	if(!size)size=4;
-	c[0]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR0);c[1]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR1);c[2]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR2);c[3]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR3);c[4]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR4);c[5]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR5);c[6]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR6);c[7]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR7);
-	m_Echo.uEchoAddr=(Uint16)_FilterEchoStereoARAM(L,R,n,(Int8)m_pDsp->GetReg(SNSPCDSP_REG_EFB),m_pDsp,base,pos,size,c,m_Echo.Filter,wr);
+    Uint32 pos=m_Echo.uEchoAddr;
+    const Uint8 regESA=m_pDsp->GetReg(SNSPCDSP_REG_ESA);
+    const Uint8 regEDL=(Uint8)(m_pDsp->GetReg(SNSPCDSP_REG_EDL)&15u);
+    const Uint8 regFLG=m_pDsp->GetReg(SNSPCDSP_REG_FLG);
+    const Uint32 base=((Uint32)regESA)<<8;
+    Int16 c[8];
+    Int32 done=0;
+
+    if(!m_Echo.bEchoLatchValid)
+    {
+        m_Echo.uEchoEDL=regEDL;
+        m_Echo.bEchoLatchValid=1;
+    }
+
+    c[0]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR0);c[1]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR1);c[2]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR2);c[3]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR3);c[4]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR4);c[5]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR5);c[6]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR6);c[7]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR7);
+
+    while(done<n)
+    {
+        Uint32 size;
+        Uint32 run=(Uint32)(n-done);
+        Uint32 before;
+
+        /* S-DSP EDL is sampled only when the echo offset is zero. This keeps
+         * a mid-ring EDL write from instantly resizing the active buffer. */
+        if(pos==0)
+            m_Echo.uEchoEDL=regEDL;
+
+        size=((Uint32)m_Echo.uEchoEDL)<<11;
+        if(rate!=SNSPCDSP_SAMPLERATE && size)
+            size=size*(Uint32)rate/SNSPCDSP_SAMPLERATE;
+        if(!size) size=4;
+        if(pos>=size) pos%=size;
+        before=pos;
+
+        /* Only split at the next wrap when a different EDL is actually
+         * pending. The ordinary case (including stable EDL=0) stays one
+         * helper call per mixer chunk. */
+        if(regEDL!=m_Echo.uEchoEDL)
+        {
+            Uint32 toWrap=(size-pos+3u)>>2;
+            if(!toWrap) toWrap=1u;
+            if(run>toWrap) run=toWrap;
+        }
+
+        pos=_FilterEchoStereoARAM(
+            L+done,R+done,(Int32)run,(Int8)m_pDsp->GetReg(SNSPCDSP_REG_EFB),
+            m_pDsp,base,pos,size,c,m_Echo.Filter,wr);
+
+#if AURORA_SNES_TRACER
+        if (SNSPC_TRACER_FAST_ACTIVE())
+            SNSPCTracerEchoRun(
+            uMixCycle + (Uint32)done * (32u*SNSPC_CYCLE), (Uint32)rate,
+            base,size,before,pos,run,regFLG,regESA,regEDL,
+            m_Echo.uEchoEDL,wr?1u:0u);
+#endif
+        done+=(Int32)run;
+    }
+    m_Echo.uEchoAddr=(Uint16)pos;
 }
 
 
@@ -1585,18 +1640,45 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 		// dequeue write queue up to current cycle time
 		m_pDsp->Sync(uCycle);
 
+		// dont update more than samples-per-update at a time
+		nSamples = nTotalSamples;
+		if (nSamples > nSamplesPerUpdate) nSamples = nSamplesPerUpdate;
+
+		/* AURORA_SDSP_DUAL_TIMELINE_V36_20261002
+		 * AURORA_SDSP_RESAMPLE_CHUNK_ALIGNMENT_V36_2_20261002
+		 * The old block mixer could delay a DSP write for an entire ~68-sample
+		 * chunk. KI exposed this as EDL=$02 becoming visible while ESA=$FF
+		 * remained stale long enough for echo to wrap through page zero.
+		 *
+		 * v36 originally split at arbitrary one-sample boundaries. The shared
+		 * SNES 32->48 kHz converter consumes input in 2:3 pairs and the frontend
+		 * intentionally schedules SNES production in 4-sample quanta. An odd
+		 * internal chunk can therefore strand/drop one input sample at the call
+		 * boundary. Keep every mixer/output chunk divisible by four: replay sees
+		 * a write at the first 4-sample boundary after its timestamp (<=125 us),
+		 * while normal 68-sample chunks remain completely unchanged. */
+		{
+			const Uint32 uNextWrite = m_pDsp->GetNextWriteCycle();
+			if (uNextWrite != 0xFFFFFFFFu && uNextWrite > uCycle)
+			{
+				const Uint32 uDelta = uNextWrite - uCycle;
+				Uint32 uToWrite = (uDelta + uCyclesPerSample - 1u) / uCyclesPerSample;
+				if (!uToWrite) uToWrite = 1u;
+				/* Preserve the frontend's native 4-sample scheduling quantum.
+				 * nSamples and nTotalSamples are already multiples of four here. */
+				uToWrite = (uToWrite + 3u) & ~3u;
+				if ((Uint32)nSamples > uToWrite) nSamples = (Int32)uToWrite;
+			}
+		}
+
 		// EON remains active even while FLG protects echo writes.
 		uEchoEnable = m_pDsp->GetReg(SNSPCDSP_REG_EON);
 
 		/* Voice 0 cannot be pitch-modulated on real hardware. */
 		uPitchMod = m_pDsp->GetReg(SNSPCDSP_REG_PMON) & 0xFE;
 		uNoiseEnable = m_pDsp->GetReg(SNSPCDSP_REG_NOV);
-		/* AURORA_SNES_SAFE_PERF_V2_20260919: no DSP Sync/write occurs again until the next chunk. */
+		/* Registers are stable until this event-bounded chunk ends. */
 		uFlags = m_pDsp->GetReg(SNSPCDSP_REG_FLG);
-
-		// dont update more than samples-per-update at a time
-		nSamples = nTotalSamples;
-		if (nSamples > nSamplesPerUpdate) nSamples = nSamplesPerUpdate;
 
 		// clear main and echo buffers
 		/* AURORA_SNES_SAFE_PERF_V7_20260919: identical L/R byte spans; calculate each 64-bit count once. */
@@ -1731,7 +1813,11 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 
 			/* FLG.5 protects echo writes only; read/FIR/address continue. */
 			/* AURORA_SNES_SAFE_PERF_V2_20260919: use the same post-Sync FLG snapshot for this chunk. */
+#if AURORA_SNES_TRACER
+			FilterEcho(pData->Echo[0], pData->Echo[1], nSamples, nSampleRate, (uFlags&0x20)==0, uCycle);
+#else
 			FilterEcho(pData->Echo[0], pData->Echo[1], nSamples, nSampleRate, (uFlags&0x20)==0);
+#endif
 		}
 
 		// mix main + echo to output buffer

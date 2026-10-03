@@ -170,15 +170,26 @@ Bool MainLoopProcess()
              * FDS also produces roughly one 48 kHz frame of audio per host
              * tick. 1024 drains faster than production while preventing an
              * accumulated backlog from becoming one 4095-frame SIF RPC. */
-            /* AURORA_V3_SAFE_AUDIO_BURST_20260828:
-             * <=960 host frames/tick at PAL50 worst case for these cores. */
+            /* AURORA_V24_AUDIO_FRAME_BUDGET_SONICMAX_AUDIT_20261001
+             * v22.1/v22.3 reduce host work without changing core timing.
+             * v23's 1536 ceiling was semantically safe, but during backlog
+             * recovery it allowed one audsrv/SIF transaction to be 50% larger
+             * than the old 1024 ceiling. Safe Frameskip measures real host
+             * work, so that larger recovery spike can itself become timing
+             * debt even though healthy frames are unchanged.
+             *
+             * Keep the normal <=~960-frame production path untouched and cap
+             * every real-time cartridge/core path below at 1024. GBA also
+             * uses 1024 rather than either v23's 1536 or the old 4095 fallback.
+             * This is a ceiling, not a target: normal sends stay identical. */
             Aud_SetAsyncBurstLimit(
                 (_pSystem == _pSnes ||
                  _pSystem == _pFds ||
                  _pSystem == _pPce ||
                  _pSystem == _pSega ||
                  _pSystem == _pNes ||
-                 _pSystem == _pGb) ? 1024 : 4095); /* AURORA_GAMBATTE_MAINLOOP_PRESENT_V2R6_20260908 */
+                 _pSystem == _pGb ||
+                 _pSystem == _pGba) ? 1024 : 4095); /* AURORA_GAMBATTE_MAINLOOP_PRESENT_V2R6_20260908 */
 
             /* AURORA_AUDIO_SPLIT_VOLUMES_V36_20260823
              * Select which saved final gain the shared mixer will use. */

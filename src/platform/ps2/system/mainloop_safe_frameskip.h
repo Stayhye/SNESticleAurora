@@ -12,6 +12,11 @@ Bool MainLoopSafeFrameskipGetEnabled(void);
 void MainLoopSafeFrameskipSetEnabled(Bool enabled);
 /* AURORA_SAFE_FRAMESKIP_MENU_NEUTRAL_V7_20260926: host-only gameplay/UI scheduler transition. */
 void MainLoopSafeFrameskipSetGameplayActive(Bool active);
+/* AURORA_SAFE_FRAMESKIP_CRC_UNLIMITED_V21_2_20261001
+ * Generic ROM identity API. CRC matching is resolved only when media is
+ * attached; the per-frame scheduler uses only a cached owner pointer. */
+Uint32 MainLoopSafeFrameskipRomCRC32(const void *pData, Uint32 nBytes);
+void MainLoopSafeFrameskipSetRomIdentityCRC32(const void *pSystemOwner, Uint32 crc32);
 /* AURORA_SAFE_FRAMESKIP_PICODRIVE_AUTO_V1: PicoDrive-style Auto decision once per host tick. */
 Bool MainLoopSafeFrameskipTake(Bool allowed);
 Bool MainLoopSafeFrameskipConsumePresentationSkip(void);

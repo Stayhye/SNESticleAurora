@@ -2012,6 +2012,40 @@ static _INLINE void _DecodeOBJRow4(SnesChrLookupT *pLookup, Uint8 *pHFlip,
 }
 
 
+#if CODE_PLATFORM == CODE_PS2 && AURORA_PPU_R5900_ASM
+/* AURORA_DKC_OBJ_HOTPATH_V20_20260930
+ * Default OBJ cache stores canonical rows, so cache misses do not need eight
+ * 32-bit planar-LUT loads.  BeginRender() already mirrors the exact canonical
+ * 256x64-bit plane LUT and normal opacity reverse table into scratchpad for
+ * the BG kernels.  Reuse those immutable host-derived copies here: four 64-bit
+ * LUT loads produce the same eight indexed pixels, then the existing cache
+ * owns canonical/H-flipped representation exactly as before. */
+static _INLINE void _DecodeOBJRow4ScratchPS2(
+	Uint16 uPair01, Uint16 uPair23, Uint64 *pRowData, Uint32 *pOpaque)
+{
+	const Uint32 uSource =
+		(Uint32)(((uPair01 | uPair23) |
+		          ((uPair01 | uPair23) >> 8)) & 0x00ffu);
+
+	if (!uSource)
+	{
+		*pRowData = 0;
+		*pOpaque = 0;
+		return;
+	}
+
+	const Uint64 *pLookup = AURORA_DKC_SPR_PLANE0;
+	Uint64 uRow = pLookup[uPair01 & 0x00ffu];
+	uRow |= pLookup[uPair01 >> 8] << 1;
+	uRow |= pLookup[uPair23 & 0x00ffu] << 2;
+	uRow |= pLookup[uPair23 >> 8] << 3;
+
+	*pRowData = uRow;
+	*pOpaque = AURORA_DKC_SPR_MASKREV[uSource];
+}
+#endif
+
+
 /* AURORA_OBJ_STAT77_V2_RENDER8_20260915 */
 static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList,
 	SnesRenderObj8T *pObjLine, Int32 MaxObj8Line, Int32 iLine,
@@ -2192,19 +2226,26 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 					}
 					else
 					{
+#if SNDBG_LOG
+						uCacheMisses++;
+#endif
+#if CODE_PLATFORM == CODE_PS2 && AURORA_PPU_R5900_ASM
+						const Uint16 uPair01 = pVram[uRowAddr];
+						const Uint16 uPair23 = pVram[uRowAddr + 8];
+						_DecodeOBJRow4ScratchPS2(
+							uPair01, uPair23, &uRowData, &uOpaque);
+#else
 						const SnesPPUTile4T *pTile4 =
 							(const SnesPPUTile4T *)(pVram + uRowAddr);
 						Uint32 uPlane0 = pTile4->uPlane01[0][0];
 						Uint32 uPlane1 = pTile4->uPlane01[0][1];
 						Uint32 uPlane2 = pTile4->uPlane23[0][0];
 						Uint32 uPlane3 = pTile4->uPlane23[0][1];
-#if SNDBG_LOG
-						uCacheMisses++;
-#endif
 						_DecodeOBJRow4(&_SnesPPU_PlaneLookup[0],
 							_SnesPPU_HFlipLookup[1], uPlane0, uPlane1,
 							uPlane2, uPlane3, &uTile0, &uTile1, &uOpaque);
 						uRowData = (Uint64)uTile0 | ((Uint64)uTile1 << 32);
+#endif
 						SnesPPUChrCacheStore4(&_SnesPPU_ChrCache,
 							uRowAddr, uRowData, uOpaque);
 						/* AURORA_HFLIP_MISS_REUSE_V1 */

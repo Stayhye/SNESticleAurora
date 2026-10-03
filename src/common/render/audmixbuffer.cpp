@@ -271,31 +271,134 @@ static Int32 AudMixConvertSamples2to3Fast(
 
 Int32 AudMixBuffer::ConvertSamplesStereo_32000(Int16 *pLeftSamples, Int16 *pRightSamples, Int16 *pOutLeft, Int16 *pOutRight, Int32 nInSamples)
 {
-    Int32 nOutSamples;
+    /* AURORA_V22_FRONTEND_AUDIO_DSP1_HOTPATH_20261001
+     * The old stereo path called the mono 2:3 converter twice.  That was
+     * mathematically correct but walked loop/control state twice and reloaded
+     * the same positions independently for L and R.  Keep every original
+     * equation, rounding rule, clamp and history rule, but advance both
+     * channels in one loop.  PCM output is bit-identical. */
+    Int32 i;
+    Int32 nOutSamples = 0;
 
-    if (nInSamples > AUDMIXBUFFER_MAXENQUEUE*2/3) nInSamples = AUDMIXBUFFER_MAXENQUEUE*2/3;
+    if (nInSamples > AUDMIXBUFFER_MAXENQUEUE * 2 / 3)
+        nInSamples = AUDMIXBUFFER_MAXENQUEUE * 2 / 3;
 
     PROF_ENTER("Aud_Convert");
+
+    /* The fast converter historically records its literal last input sample
+     * even when a one-sample chunk cannot emit a pair.  Cubic does not. */
+    if (nInSamples < 2)
+    {
+        if (s_fastResample && nInSamples > 0)
+        {
+            m_iPrevSample[0] = pLeftSamples[0];
+            m_iPrevSample[1] = pRightSamples[0];
+        }
+        PROF_LEAVE("Aud_Convert");
+        return 0;
+    }
+
     if (s_fastResample)
     {
-        AudMixConvertSamples2to3Fast(
-            pOutLeft, pLeftSamples, nInSamples, &m_iPrevSample[0]);
-        nOutSamples = AudMixConvertSamples2to3Fast(
-            pOutRight, pRightSamples, nInSamples, &m_iPrevSample[1]);
+        for (i = 0; i + 1 < nInSamples; i += 2)
+        {
+            const Int32 l0 = pLeftSamples[i];
+            const Int32 l1 = pLeftSamples[i + 1];
+            const Int32 l2 = (i + 2 < nInSamples) ? pLeftSamples[i + 2] : l1;
+            const Int32 r0 = pRightSamples[i];
+            const Int32 r1 = pRightSamples[i + 1];
+            const Int32 r2 = (i + 2 < nInSamples) ? pRightSamples[i + 2] : r1;
+
+            pOutLeft[nOutSamples + 0] = (Int16)l0;
+            pOutLeft[nOutSamples + 1] = (Int16)((l0 + 2 * l1) / 3);
+            pOutLeft[nOutSamples + 2] = (Int16)((2 * l1 + l2) / 3);
+            pOutRight[nOutSamples + 0] = (Int16)r0;
+            pOutRight[nOutSamples + 1] = (Int16)((r0 + 2 * r1) / 3);
+            pOutRight[nOutSamples + 2] = (Int16)((2 * r1 + r2) / 3);
+            nOutSamples += 3;
+        }
+
+        /* Preserve AudMixConvertSamples2to3Fast(): history is the literal
+         * final input sample, including an odd unconsumed tail sample. */
+        if (nInSamples > 0)
+        {
+            m_iPrevSample[0] = pLeftSamples[nInSamples - 1];
+            m_iPrevSample[1] = pRightSamples[nInSamples - 1];
+        }
     }
     else
     {
-        ConvertSamples2to3(
-            pOutLeft, pLeftSamples, nInSamples, &m_iPrevSample[0]);
-        nOutSamples = ConvertSamples2to3(
-            pOutRight, pRightSamples, nInSamples, &m_iPrevSample[1]);
-    }
-    PROF_LEAVE("Aud_Convert");
+        Int32 histL = m_iPrevSample[0];
+        Int32 histR = m_iPrevSample[1];
 
+        for (i = 0; i + 3 < nInSamples; i += 2)
+        {
+            const Int32 l0 = pLeftSamples[i];
+            const Int32 l1 = pLeftSamples[i + 1];
+            const Int32 l2 = pLeftSamples[i + 2];
+            const Int32 l3 = pLeftSamples[i + 3];
+            const Int32 r0 = pRightSamples[i];
+            const Int32 r1 = pRightSamples[i + 1];
+            const Int32 r2 = pRightSamples[i + 2];
+            const Int32 r3 = pRightSamples[i + 3];
+            Int32 yL, yR;
+
+            pOutLeft[nOutSamples] = (Int16)l0;
+            pOutRight[nOutSamples++] = (Int16)r0;
+
+            yL = 30 * (l0 + 2 * l1) - 4 * histL - 5 * l2;
+            yR = 30 * (r0 + 2 * r1) - 4 * histR - 5 * r2;
+            yL = (yL >= 0 ? yL + 40 : yL - 40) / 81;
+            yR = (yR >= 0 ? yR + 40 : yR - 40) / 81;
+            if (yL > 32767) yL = 32767;
+            if (yL < -32768) yL = -32768;
+            if (yR > 32767) yR = 32767;
+            if (yR < -32768) yR = -32768;
+            pOutLeft[nOutSamples] = (Int16)yL;
+            pOutRight[nOutSamples++] = (Int16)yR;
+
+            yL = 30 * (2 * l1 + l2) - 5 * l0 - 4 * l3;
+            yR = 30 * (2 * r1 + r2) - 5 * r0 - 4 * r3;
+            yL = (yL >= 0 ? yL + 40 : yL - 40) / 81;
+            yR = (yR >= 0 ? yR + 40 : yR - 40) / 81;
+            if (yL > 32767) yL = 32767;
+            if (yL < -32768) yL = -32768;
+            if (yR > 32767) yR = 32767;
+            if (yR < -32768) yR = -32768;
+            pOutLeft[nOutSamples] = (Int16)yL;
+            pOutRight[nOutSamples++] = (Int16)yR;
+
+            histL = l1;
+            histR = r1;
+        }
+
+        /* Same linear tail used by ConvertSamples2to3(). */
+        for (; i + 1 < nInSamples; i += 2)
+        {
+            const Int32 l0 = pLeftSamples[i];
+            const Int32 l1 = pLeftSamples[i + 1];
+            const Int32 l2 = (i + 2 < nInSamples) ? pLeftSamples[i + 2] : l1;
+            const Int32 r0 = pRightSamples[i];
+            const Int32 r1 = pRightSamples[i + 1];
+            const Int32 r2 = (i + 2 < nInSamples) ? pRightSamples[i + 2] : r1;
+
+            pOutLeft[nOutSamples] = (Int16)l0;
+            pOutRight[nOutSamples++] = (Int16)r0;
+            pOutLeft[nOutSamples] = (Int16)((l0 + 2 * l1) / 3);
+            pOutRight[nOutSamples++] = (Int16)((r0 + 2 * r1) / 3);
+            pOutLeft[nOutSamples] = (Int16)((2 * l1 + l2) / 3);
+            pOutRight[nOutSamples++] = (Int16)((2 * r1 + r2) / 3);
+            histL = l1;
+            histR = r1;
+        }
+
+        m_iPrevSample[0] = histL;
+        m_iPrevSample[1] = histR;
+    }
+
+    PROF_LEAVE("Aud_Convert");
     return nOutSamples;
 }
-
-
 /* AURORA_PD_POLISH_V3_20260820_LINEAR_RESAMPLER
  * PicoDrive may synthesize at the same Frequency selected for menu music.
  * SNES and QuickNES remain on their existing 32 kHz cubic path unchanged.

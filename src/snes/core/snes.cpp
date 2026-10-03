@@ -15,6 +15,7 @@
 #include "sndbglog.h"
 #include "platform/ps2/system/aurora_runtime_trace.h"
 #include "platform/ps2/system/aurora_snes_cost_profiler.h"
+#include "platform/ps2/system/mainloop_safe_frameskip.h"
 #include "platform/ps2/system/aurora_ee_crash_diag.h"
 
 /* AURORA_SNES_NATIVE_32K_V1_20260822
@@ -1332,11 +1333,34 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
             AuroraRunSpcBudget(&m_Spc, nCycles);
 
         /*
-         * SyncQueue() uses <= and therefore commits every byte in the same
-         * timestamp group atomically. It is also safe if an SPC-side port
-         * read already consumed this edge during the run above.
+         * AURORA_KI_APUIO_EDGE_RESIDUAL_FIX_V25_20261001
+         *
+         * Counter[FRAME] is the SCHEDULED SPC timeline. SNSPCExecute() may
+         * finish with positive residual Cycles when the budget ends between
+         * SPC700 instruction boundaries, so the actually consumed timeline is
+         * SNSPCGetCounter(FRAME) = Counter[FRAME] - Cycles.
+         *
+         * V3 used SyncQueue(uEdgeCycle) here after scheduling Counter[] to the
+         * edge. That can expose a CPU->SPC latch a few master clocks EARLY
+         * while the SPC700 is still before the edge.
+         *
+         * Publish only through the timestamp the SPC has actually consumed.
+         * Equal-timestamp groups remain atomic in SNSpcIO::SyncQueue().
+         * If instruction residual means this edge has not been reached yet,
+         * stop splitting here. The remaining normal catch-up below advances
+         * the SPC, and any $F4-$F7 read synchronizes the queue at its precise
+         * consumed timestamp via SNSpcIO::Read8Trap().
          */
-        m_SpcIO.SyncQueue(uEdgeCycle);
+        {
+            const Int32 iReachedCycle =
+                SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME);
+
+            if (!m_SpcIO.m_Queue.IsEmpty())
+                m_SpcIO.SyncQueue((Uint32)iReachedCycle);
+
+            if (iReachedCycle < iEdgeCycle)
+                break;
+        }
     }
 #endif
 
@@ -1350,10 +1374,15 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
 
 #if SNSPCIO_WRITEQUEUE
     /*
-     * All queued CPU->SPC edges at or before TargetTime were handled above.
-     * Preserve the legacy forced flush used by frame rollover / queue-full
-     * recovery, but do not lazily publish a later edge merely because this
-     * catch-up call completed.
+     * AURORA_KI_APUIO_EDGE_RESIDUAL_FIX_V25_20261001
+     *
+     * Forced frame/queue recovery keeps the historical full flush. Otherwise
+     * retire only edges that the SPC has ACTUALLY reached after the remaining
+     * aggregate catch-up. This also completes an edge deferred above solely
+     * because an instruction residual kept actual execution before it.
+     *
+     * This is not an early publish: $F4-$F7 reads inside the run already call
+     * the same SyncQueue(actual FRAME counter) at the observation point.
      */
     AuroraEECrashDiagBreadcrumb(
         AED_APUIO_QUEUE_ENTER,
@@ -1361,7 +1390,15 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
         (Uint32)SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
 
     if (bFlushAll)
+    {
         m_SpcIO.SyncQueueAll();
+    }
+    else if (!m_SpcIO.m_Queue.IsEmpty())
+    {
+        const Int32 iReachedCycle =
+            SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME);
+        m_SpcIO.SyncQueue((Uint32)iReachedCycle);
+    }
 
     AuroraEECrashDiagBreadcrumb(
         AED_APUIO_QUEUE_RETURN,
@@ -2958,6 +2995,18 @@ Bool SnesSystem::EnsureBSXMemoryPack()
 void SnesSystem::SetRom(class Emu::Rom *pRom)
 {
 	SetSnesRom((SnesRom *)pRom);
+
+    /* ROM identity is the normalized/headerless CRC captured by SnesRom at
+     * load time. No ZIP/container bytes and no second ROM scan are involved. */
+    MainLoopSafeFrameskipSetRomIdentityCRC32(
+        (const void *)this,
+        pRom ? ((SnesRom *)pRom)->GetRuntimeCRC32() : 0u);
+
+#if AURORA_SNES_TRACER
+    SNSPCTracerConfigureGame(
+        pRom ? ((SnesRom *)pRom)->GetRuntimeCRC32() : 0u,
+        pRom ? ((SnesRom *)pRom)->GetRomTitle() : NULL);
+#endif
 }
 
 void SnesSystem::SetSnesRom(SnesRom *pRom)

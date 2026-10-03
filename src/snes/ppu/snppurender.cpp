@@ -96,9 +96,6 @@ static void _SNPPURenderRefreshObjLimitCache()
 		 g_SnesObjLimitLevel!=SNPPU_OBJ_LIMIT_OFF) ? nBudget : SNESPPU_OBJ_NUM;
 }
 
-/* AURORA_SONIC_BLAST_MAN_COLOR_V7
- * Set by the ROM loader only for exact Sonic Blast Man CRCs. */
-extern Bool g_SnesCompatSonicBlastManColorMath;
 static Uint8 g_SoftwareFramePhase = 0;
 
 void SNPPURenderSetSoftwareLayerMask(Uint8 uMask)
@@ -554,12 +551,6 @@ void SnesPPURender::RenderLine32(Int32 iLine, Bool bPlanar)
 		? (Uint8)(pRegs->cgwsel & 0x03) : pRegs->cgwsel;
 	Uint8 uEffectiveCGADSUB =
 		(uHackFlags & SNPPU_HACK_COLOR_MATH_OFF) ? 0 : pRegs->cgadsub;
-#if SNES_SONIC_COLOR_WORKAROUND
-	/* Sonic Blast Man workaround: preserve windows/layers, suppress only
-	 * CGADSUB color math. This is deliberately narrower than the menu hack. */
-	if (g_SnesCompatSonicBlastManColorMath)
-		uEffectiveCGADSUB = 0;
-#endif
 
 	pRenderInfo = m_pRenderInfo;
     pBlendInfo = &pRenderInfo->BlendInfo;
@@ -682,14 +673,19 @@ static Bool bPrint = TRUE;
 #endif
 
 #if CODE_PLATFORM == CODE_PS2
-		/* If no main-screen source is selected by CGADSUB, the sub screen and
-		   all add/sub masks are mathematically unable to change the result.
-		   With main clipping disabled and brightness at 15, the GS can expand
-		   the indexed main line directly into the output texture. */
-		bDirectMain = !bPseudoHires && !bBG1DirectPixels &&
-		              (uEffectiveCGADSUB & 0x3F) == 0 &&
-		              (uEffectiveCGWSEL & 0xC0) == 0 &&
-		              uIntensity == 15;
+        /* AURORA_SNES_PPU_CANONICAL_COMPOSITOR_V37_20261002
+         *
+         * Ordinary indexed scanlines are NOT pre-resolved final carriers.
+         * Keep them on the canonical compositor even when SNES color math is
+         * algebraically a no-op.  The compositor CLUT intentionally gives
+         * logical index 0 transparent-input alpha; bypassing composition would
+         * propagate that host representation into the final render target.
+         *
+         * Pre-resolved pseudo-hires/direct-color paths below remain free to
+         * use their dedicated carrier logic (and explicitly make index 0
+         * opaque before doing so).
+         */
+        bDirectMain = FALSE;
 #endif
 
 		// determine color window mask for main screen
@@ -869,7 +865,7 @@ static Bool bPrint = TRUE;
             pBlendInfo,
             iLine,
             uFixedColor,
-			bDirectMain ? NULL : ColorMask,
+			ColorMask,
             (uEffectiveCGADSUB & 0x80),
             uIntensity
             );

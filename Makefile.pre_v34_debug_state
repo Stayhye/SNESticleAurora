@@ -261,6 +261,10 @@ SNES_HVIRQ_RESCHEDULE ?= 1
 SNES_ROM_COMPAT_PATCHES ?= 0
 SNES_ROM_COMPAT_REGIONAL ?= 0
 
+# AURORA_SONIC_COLOR_V7
+# CRC-gated Sonic Blast Man color-math workaround; set 0 for A/B testing.
+SNES_SONIC_COLOR_WORKAROUND ?= 0
+
 # AURORA_CRC_ZERO_INIT_V8
 # Exact-CRC cold-boot compatibility. Selected SNES titles reproduce the
 # ReyFxck/SNESticleRevive cold boot: WRAM=0x00 and SRAM backing=0x00.
@@ -312,6 +316,7 @@ CFLAGS := -G0 -O2 -pipe -fomit-frame-pointer -Wall $(CONSERVATIVE_FLAGS) \
 	-DSNES_HVIRQ_RESCHEDULE=$(SNES_HVIRQ_RESCHEDULE) \
 	-DSNES_ROM_COMPAT_PATCHES=$(SNES_ROM_COMPAT_PATCHES) \
 	-DSNES_ROM_COMPAT_REGIONAL=$(SNES_ROM_COMPAT_REGIONAL) \
+	-DSNES_SONIC_COLOR_WORKAROUND=$(SNES_SONIC_COLOR_WORKAROUND) \
 	-DSNES_CRC_ZERO_INIT=$(SNES_CRC_ZERO_INIT) \
 	-DSNES_HK97_SPC_BOOT=$(SNES_HK97_SPC_BOOT)
 
@@ -324,6 +329,7 @@ CXXFLAGS := -G0 -O2 -pipe -fomit-frame-pointer -Wall $(CONSERVATIVE_FLAGS) -Wno-
 	-DSNES_HVIRQ_RESCHEDULE=$(SNES_HVIRQ_RESCHEDULE) \
 	-DSNES_ROM_COMPAT_PATCHES=$(SNES_ROM_COMPAT_PATCHES) \
 	-DSNES_ROM_COMPAT_REGIONAL=$(SNES_ROM_COMPAT_REGIONAL) \
+	-DSNES_SONIC_COLOR_WORKAROUND=$(SNES_SONIC_COLOR_WORKAROUND) \
 	-DSNES_CRC_ZERO_INIT=$(SNES_CRC_ZERO_INIT) \
 	-DSNES_HK97_SPC_BOOT=$(SNES_HK97_SPC_BOOT)
 
@@ -479,22 +485,6 @@ AURORA_SNES_COST_PROFILER ?= 0
 CFLAGS   += -DAURORA_SNES_COST_PROFILER=$(AURORA_SNES_COST_PROFILER)
 CXXFLAGS += -DAURORA_SNES_COST_PROFILER=$(AURORA_SNES_COST_PROFILER)
 
-# AURORA_SNES_DEBUG_STATE_V34_FINAL_20261002
-# Generic manual SNES laboratory snapshot.  =0 removes the UI row, writer
-# object and embedded source archive from the ELF; no gameplay check remains.
-AURORA_SNES_DEBUG_STATE ?= 0
-CFLAGS   += -DAURORA_SNES_DEBUG_STATE=$(AURORA_SNES_DEBUG_STATE)
-CXXFLAGS += -DAURORA_SNES_DEBUG_STATE=$(AURORA_SNES_DEBUG_STATE)
-
-# AURORA_DIAGNOSTIC_FLAGS_DEFAULT_OFF_V36_1_20261002
-# AURORA_SDSP_TIMELINE_TRACER_FINAL_V36_20261002
-# AURORA_SNES_GENERIC_TRACER_V36_20261002
-# Build capability only. =0 removes the menu row and every tracer buffer,
-# string and hot-path hook in preprocessing. Runtime starts Off when =1.
-AURORA_SNES_TRACER ?= 0
-CFLAGS   += -DAURORA_SNES_TRACER=$(AURORA_SNES_TRACER)
-CXXFLAGS += -DAURORA_SNES_TRACER=$(AURORA_SNES_TRACER)
-
 # AURORA_EE_CRASH_DIAG_DKC_V1_20260918
 # EE exception capture follows the runtime trace switch by default.
 # AURORA_TRACE_LOST_VIKINGS_LOG_ONLY_V2_20260918
@@ -632,6 +622,8 @@ LIBS := \
 SRCS := \
     src/platform/ps2/ps2sdk_stubs.c \
     src/platform/ps2/system/cdda_async_filexio.c \
+	src/platform/ps2/system/aurora_runtime_trace.c \
+	src/platform/ps2/system/aurora_snes_cost_profiler.cpp \
 	src/platform/ps2/system/aurora_ee_crash_diag.c \
 	src/common/media/bmpfile.cpp \
 	src/platform/ps2/cdvd/cd.c \
@@ -806,20 +798,6 @@ SRCS := \
 	src/pce/beetle/pce_bridge.cpp \
 	src/pce/beetle/pcesystem_beetle.cpp
 
-# Diagnostic implementation objects are absent from a normal build, not just
-# runtime-disabled. Headers collapse their callsites to no-ops at =0.
-ifeq ($(AURORA_RUNTIME_TRACE),1)
-SRCS += src/platform/ps2/system/aurora_runtime_trace.c
-endif
-ifeq ($(AURORA_SNES_COST_PROFILER),1)
-SRCS += src/platform/ps2/system/aurora_snes_cost_profiler.cpp
-endif
-
-# AURORA_SNES_DEBUG_STATE_V34_FINAL_20261002: compile the writer only in debug-state builds.
-ifeq ($(AURORA_SNES_DEBUG_STATE),1)
-SRCS += src/platform/ps2/system/mainloop_debug_state.cpp
-endif
-
 OBJS := \
 	$(patsubst src/%.c,$(OBJ_DIR)/%.o,$(filter %.c,$(SRCS))) \
 	$(patsubst src/%.cpp,$(OBJ_DIR)/%.o,$(filter %.cpp,$(SRCS))) \
@@ -989,7 +967,7 @@ FORCE_COMPILE_MODE:
 
 $(BUILD_CONFIG_FILE): FORCE_COMPILE_MODE | $(OBJ_DIR)
 	@mkdir -p "$(BUILD_META_DIR)"; \
-	mode='SNES_DIAGNOSTICS=$(SNES_DIAGNOSTICS) SNES_OBJ_CACHE=$(SNES_OBJ_CACHE) SNES_BG_CACHE=$(SNES_BG_CACHE) SNES_CHR_HFLIP_CACHE=$(SNES_CHR_HFLIP_CACHE) PROFILE=$(PROFILE) DSP4_CAPTURE=$(DSP4_CAPTURE) DSP4_STUB=$(DSP4_STUB) AURORA_SNES_COST_PROFILER=$(AURORA_SNES_COST_PROFILER) AURORA_RUNTIME_TRACE=$(AURORA_RUNTIME_TRACE) AURORA_EE_CRASH_DIAG=$(AURORA_EE_CRASH_DIAG) AURORA_EE_WATCHDOG_SELFTEST=$(AURORA_EE_WATCHDOG_SELFTEST) AURORA_SNES_DEBUG_STATE=$(AURORA_SNES_DEBUG_STATE) AURORA_SNES_TRACER=$(AURORA_SNES_TRACER)'; \
+	mode='SNES_DIAGNOSTICS=$(SNES_DIAGNOSTICS) SNES_OBJ_CACHE=$(SNES_OBJ_CACHE) SNES_BG_CACHE=$(SNES_BG_CACHE) SNES_CHR_HFLIP_CACHE=$(SNES_CHR_HFLIP_CACHE) PROFILE=$(PROFILE) DSP4_CAPTURE=$(DSP4_CAPTURE) DSP4_STUB=$(DSP4_STUB) AURORA_SNES_COST_PROFILER=$(AURORA_SNES_COST_PROFILER) AURORA_RUNTIME_TRACE=$(AURORA_RUNTIME_TRACE) AURORA_EE_CRASH_DIAG=$(AURORA_EE_CRASH_DIAG) AURORA_EE_WATCHDOG_SELFTEST=$(AURORA_EE_WATCHDOG_SELFTEST)'; \
 	if [ ! -f "$@" ] || [ "$$(cat "$@")" != "$$mode" ]; then \
 		printf '%s\n' "$$mode" > "$@"; \
 	fi
@@ -999,21 +977,6 @@ $(PKG_DIR):
 
 $(EMBED_DIR):
 	@mkdir -p "$(EMBED_DIR)"
-
-# AURORA_SNES_DEBUG_STATE_V34_FINAL_20261002: exact source/ASM bundle is present only in debug-state builds.
-ifeq ($(AURORA_SNES_DEBUG_STATE),1)
-SNES_DEBUG_SOURCE_TGZ := $(EMBED_DIR)/snes_debug_sources.tar.gz
-SNES_DEBUG_SOURCE_HEADER := $(EMBED_DIR)/snes_debug_sources.h
-SNES_DEBUG_SOURCE_INPUTS := $(shell find src/snes src/platform/ps2/system src/platform/ps2/ui -type f 2>/dev/null)
-
-$(SNES_DEBUG_SOURCE_TGZ): tools/make_snes_debug_source_bundle.py Makefile $(SNES_DEBUG_SOURCE_INPUTS) | $(EMBED_DIR)
-	@python3 tools/make_snes_debug_source_bundle.py "$@"
-
-$(SNES_DEBUG_SOURCE_HEADER): $(SNES_DEBUG_SOURCE_TGZ) | $(EMBED_DIR)
-	$(call RUN_BIN2C,$<,$@,snes_debug_sources)
-
-$(OBJ_DIR)/platform/ps2/system/mainloop_debug_state.o: $(SNES_DEBUG_SOURCE_HEADER)
-endif
 
 # bin2c emits a .c file containing both the array definition and the size
 # value, with internal "#ifndef __<label>__" header guards. Renaming to .h

@@ -287,90 +287,139 @@ static const DSP1_CmdInfo g_CmdTable[0x40] = {
 //  Helpers de matematica  (sin / cos / inverso / normalize / shiftR)
 //==========================================================================
 
-static Int16 DSP1_Sin(Int16 iAngle)
+static inline Int16 DSP1_Sin(Int16 iAngle)
 {
-    if (iAngle < 0) {
-        if (iAngle == -32768) return 0;
-        Int16 v = DSP1_Sin(-iAngle);
-        return (Int16)-v;
-    }
-    Int32 s = g_SinTable[iAngle >> 8]
-            + ((Int32)g_MulTable[iAngle & 0xFF] * g_SinTable[0x40 + (iAngle >> 8)] >> 15);
+    /* AURORA_V22_FRONTEND_AUDIO_DSP1_HOTPATH_20261001
+     * Same interpolation as before, without the recursive negative-angle call. */
+    if (iAngle == -32768)
+        return 0;
+
+    const Bool neg = iAngle < 0 ? TRUE : FALSE;
+    const Int16 a = neg ? (Int16)-iAngle : iAngle;
+    const Uint16 ua = (Uint16)a;
+    const Uint32 idx = (Uint32)(ua >> 8);
+    Int32 s = g_SinTable[idx]
+            + ((Int32)g_MulTable[ua & 0xFFu] * g_SinTable[0x40u + idx] >> 15);
     if (s > 32767) s = 32767;
-    return (Int16)s;
+    return neg ? (Int16)-s : (Int16)s;
+}
+static inline Int16 DSP1_Cos(Int16 iAngle)
+{
+    if (iAngle == -32768)
+        return -32768;
+    if (iAngle < 0)
+        iAngle = (Int16)-iAngle;
+
+    const Uint16 ua = (Uint16)iAngle;
+    const Uint32 idx = (Uint32)(ua >> 8);
+    Int32 c = g_SinTable[0x40u + idx]
+            - ((Int32)g_MulTable[ua & 0xFFu] * g_SinTable[idx] >> 15);
+    if (c < -32768) c = -32767;
+    return (Int16)c;
+}
+/* AURORA_V22_FRONTEND_AUDIO_DSP1_HOTPATH_20261001
+ * R5900 PLZCW counts leading sign bits minus one in each 32-bit word.  The
+ * DSP-1 normalization scans the 15 payload bits below an Int16 sign bit; a
+ * sign-extended Int16 therefore maps exactly to PLZCW-16.  This replaces up
+ * to fifteen dependent branch/shift iterations with one EE instruction.
+ * The portable fallback is the original algorithm. */
+static inline Int16 DSP1_NormalizeShiftCount(Int16 v)
+{
+#ifdef _EE
+    Int32 count;
+    const Int32 x = (Int32)v;
+    __asm__ __volatile__("plzcw %0, %1" : "=r"(count) : "r"(x));
+    return (Int16)(count - 16);
+#else
+    Int16 i = 0x4000;
+    Int16 e = 0;
+    if (v < 0) {
+        while ((v & i) && i) { i >>= 1; ++e; }
+    } else {
+        while (!(v & i) && i) { i >>= 1; ++e; }
+    }
+    return e;
+#endif
 }
 
-static Int16 DSP1_Cos(Int16 iAngle)
+/* Compute both values in one table setup when an opcode needs both.  This is
+ * exactly DSP1_Sin()/DSP1_Cos(): same abs-angle rule, interpolation, shifts,
+ * clamps and the DSP-1B -32768 corner case. */
+static inline void DSP1_SinCos(Int16 iAngle, Int16 &sinOut, Int16 &cosOut)
 {
-    if (iAngle < 0) {
-        // cos(-32768) = -1.  O DSP-1 real (e o bsnes) devolvem 0x8000
-        // (-32768) aqui.  Multiplicacoes (Int32)X * (-32768) >> 15 nao
-        // estouram em Int32, entao seguimos a referencia exatamente.
-        if (iAngle == -32768) return -32768;
-        iAngle = -iAngle;
+    if (iAngle == -32768)
+    {
+        sinOut = 0;
+        cosOut = -32768;
+        return;
     }
-    Int32 s = g_SinTable[0x40 + (iAngle >> 8)]
-            - ((Int32)g_MulTable[iAngle & 0xFF] * g_SinTable[iAngle >> 8] >> 15);
-    if (s < -32768) s = -32767;
-    return (Int16)s;
+
+    const Bool neg = iAngle < 0 ? TRUE : FALSE;
+    const Int16 a = neg ? (Int16)-iAngle : iAngle;
+    const Uint16 ua = (Uint16)a;
+    const Uint32 idx = (Uint32)(ua >> 8);
+    const Int32 mul = g_MulTable[ua & 0xFFu];
+    const Int32 baseSin = g_SinTable[idx];
+    const Int32 baseCos = g_SinTable[0x40u + idx];
+
+    Int32 s = baseSin + ((mul * baseCos) >> 15);
+    Int32 c = baseCos - ((mul * baseSin) >> 15);
+    if (s > 32767) s = 32767;
+    if (c < -32768) c = -32767;
+
+    sinOut = neg ? (Int16)-s : (Int16)s;
+    cosOut = (Int16)c;
 }
 
 // Normalize: representa m como (Coefficient * 2^Exponent) com
 // |Coefficient| em [1/2, 1].  Coefficient saida em 1.15 (signed 16).
 // Exponent passado como referencia e decrementado pelo shift.
-static void DSP1_Normalize(Int16 m, Int16 &Coefficient, Int16 &Exponent)
+static inline void DSP1_Normalize(Int16 m, Int16 &Coefficient, Int16 &Exponent)
 {
-    Int16 i = 0x4000;
-    Int16 e = 0;
-    if (m < 0) {
-        while ((m & i) && i) { i >>= 1; e++; }
-    } else {
-        while (!(m & i) && i) { i >>= 1; e++; }
-    }
+    const Int16 e = DSP1_NormalizeShiftCount(m);
     if (e > 0)
         Coefficient = (Int16)((Int32)m * g_DataRom[0x21 + e] << 1);
     else
         Coefficient = m;
-    Exponent -= e;
+    Exponent = (Int16)(Exponent - e);
 }
-
 // Mesmo que DSP1_Normalize, mas com entrada int32 (Product).  Mantem
 // a parte alta normalizada e adiciona contribuicao da parte baixa
 // conforme o expoente.
-static void DSP1_NormalizeDouble(Int32 Product, Int16 &Coefficient, Int16 &Exponent)
+static inline void DSP1_NormalizeDouble(Int32 Product, Int16 &Coefficient, Int16 &Exponent)
 {
-    Int16 n = (Int16)(Product & 0x7FFF);
-    Int16 m = (Int16)(Product >> 15);
-    Int16 i = 0x4000;
-    Int16 e = 0;
-    if (m < 0) {
-        while ((m & i) && i) { i >>= 1; e++; }
-    } else {
-        while (!(m & i) && i) { i >>= 1; e++; }
-    }
-    if (e > 0) {
+    const Int16 n = (Int16)(Product & 0x7FFF);
+    const Int16 m = (Int16)(Product >> 15);
+    Int16 e = DSP1_NormalizeShiftCount(m);
+
+    if (e > 0)
+    {
         Coefficient = (Int16)((Int32)m * g_DataRom[0x0021 + e] << 1);
-        if (e < 15) {
-            Coefficient = (Int16)(Coefficient + ((Int32)n * g_DataRom[0x0040 - e] >> 15));
-        } else {
-            i = 0x4000;
-            if (m < 0) {
-                while ((n & i) && i) { i >>= 1; e++; }
-            } else {
-                while (!(n & i) && i) { i >>= 1; e++; }
-            }
-            if (e > 15) {
-                Coefficient = (Int16)((Int32)n * g_DataRom[0x0012 + e] << 1);
-            } else {
-                Coefficient = (Int16)(Coefficient + n);
-            }
+        if (e < 15)
+        {
+            Coefficient = (Int16)(Coefficient +
+                ((Int32)n * g_DataRom[0x0040 - e] >> 15));
         }
-    } else {
+        else
+        {
+            /* Original code continues the bit scan through n using m's sign,
+             * not n's sign.  Supply that synthetic sign bit to PLZCW. */
+            const Int16 probe = (m < 0)
+                ? (Int16)((Uint16)n | 0x8000u) : n;
+            e = (Int16)(e + DSP1_NormalizeShiftCount(probe));
+            if (e > 15)
+                Coefficient = (Int16)((Int32)n * g_DataRom[0x0012 + e] << 1);
+            else
+                Coefficient = (Int16)(Coefficient + n);
+        }
+    }
+    else
+    {
         Coefficient = m;
     }
+
     Exponent = e;
 }
-
 // Desnormaliza: dado Coefficient (1.15) e Exponent, devolve o valor em
 // inteiro 16-bit, saturando se o expoente exceder o range.
 static Int16 DSP1_DenormalizeAndClip(Int16 C, Int16 E)
@@ -410,9 +459,11 @@ static void DSP1_Inverse(Int16 Coefficient, Int16 Exponent, Int16 &iCoefficient,
     }
 
     // normaliza ate 0x4000 <= |Coefficient| < 0x8000
-    while (Coefficient < 0x4000) {
-        Coefficient = (Int16)(Coefficient << 1);
-        Exponent--;
+    if (Coefficient < 0x4000)
+    {
+        const Int16 shift = DSP1_NormalizeShiftCount(Coefficient);
+        Coefficient = (Int16)((Uint16)Coefficient << shift);
+        Exponent = (Int16)(Exponent - shift);
     }
 
     if (Coefficient == 0x4000) {
@@ -500,12 +551,13 @@ static void DSP1_DoMultiply2(Int16 *in, Int16 *out)
 // ---- 0x04 Triangle ----
 static void DSP1_DoTriangle(Int16 *in, Int16 *out)
 {
-    Int16 a = in[0];
-    Int16 r = in[1];
-    out[0] = (Int16)(((Int32)DSP1_Sin(a) * r) >> 15);  // Y
-    out[1] = (Int16)(((Int32)DSP1_Cos(a) * r) >> 15);  // X
+    const Int16 a = in[0];
+    const Int16 r = in[1];
+    Int16 s, c;
+    DSP1_SinCos(a, s, c);
+    out[0] = (Int16)(((Int32)s * r) >> 15);  // Y
+    out[1] = (Int16)(((Int32)c * r) >> 15);  // X
 }
-
 // ---- 0x08 Radius ----
 static void DSP1_DoRadius(Int16 *in, Int16 *out)
 {
@@ -564,37 +616,41 @@ static void DSP1_DoDistance(Int16 *in, Int16 *out, Bool bOriginalBug)
 // ---- 0x0C Rotate ----
 static void DSP1_DoRotate(Int16 *in, Int16 *out)
 {
-    Int16 A = in[0];
-    Int16 X = in[1];
-    Int16 Y = in[2];
-    Int16 s = DSP1_Sin(A);
-    Int16 c = DSP1_Cos(A);
+    const Int16 A = in[0];
+    const Int16 X = in[1];
+    const Int16 Y = in[2];
+    Int16 s, c;
+    DSP1_SinCos(A, s, c);
     out[0] = (Int16)((((Int32)Y * s) >> 15) + (((Int32)X * c) >> 15));   // X2
     out[1] = (Int16)((((Int32)Y * c) >> 15) - (((Int32)X * s) >> 15));   // Y2
 }
-
 // ---- 0x1C Polar ----   (Rz * Ry * Rx) * (X,Y,Z)
 static void DSP1_DoPolar(Int16 *in, Int16 *out)
 {
-    Int16 Az = in[0], Ay = in[1], Ax = in[2];
+    const Int16 Az = in[0], Ay = in[1], Ax = in[2];
     Int16 X1 = in[3], Y1 = in[4], Z1 = in[5];
     Int16 X, Y, Z;
+    Int16 s, c;
 
     // Rz
-    X = (Int16)((((Int32)Y1 * DSP1_Sin(Az)) >> 15) + (((Int32)X1 * DSP1_Cos(Az)) >> 15));
-    Y = (Int16)((((Int32)Y1 * DSP1_Cos(Az)) >> 15) - (((Int32)X1 * DSP1_Sin(Az)) >> 15));
+    DSP1_SinCos(Az, s, c);
+    X = (Int16)((((Int32)Y1 * s) >> 15) + (((Int32)X1 * c) >> 15));
+    Y = (Int16)((((Int32)Y1 * c) >> 15) - (((Int32)X1 * s) >> 15));
     X1 = X; Y1 = Y;
+
     // Ry
-    Z = (Int16)((((Int32)X1 * DSP1_Sin(Ay)) >> 15) + (((Int32)Z1 * DSP1_Cos(Ay)) >> 15));
-    X = (Int16)((((Int32)X1 * DSP1_Cos(Ay)) >> 15) - (((Int32)Z1 * DSP1_Sin(Ay)) >> 15));
-    out[0] = X;  Z1 = Z;
+    DSP1_SinCos(Ay, s, c);
+    Z = (Int16)((((Int32)X1 * s) >> 15) + (((Int32)Z1 * c) >> 15));
+    X = (Int16)((((Int32)X1 * c) >> 15) - (((Int32)Z1 * s) >> 15));
+    out[0] = X; Z1 = Z;
+
     // Rx
-    Y = (Int16)((((Int32)Z1 * DSP1_Sin(Ax)) >> 15) + (((Int32)Y1 * DSP1_Cos(Ax)) >> 15));
-    Z = (Int16)((((Int32)Z1 * DSP1_Cos(Ax)) >> 15) - (((Int32)Y1 * DSP1_Sin(Ax)) >> 15));
+    DSP1_SinCos(Ax, s, c);
+    Y = (Int16)((((Int32)Z1 * s) >> 15) + (((Int32)Y1 * c) >> 15));
+    Z = (Int16)((((Int32)Z1 * c) >> 15) - (((Int32)Y1 * s) >> 15));
     out[1] = Y;
     out[2] = Z;
 }
-
 // ---- 0x10 Inverse ----
 static void DSP1_DoInverse(Int16 *in, Int16 *out)
 {
@@ -624,12 +680,10 @@ static void DSP1_DoMemoryDump(Int16 *in, Int16 *out)
 //---- Attitude A/B/C (op 01/11/21) ----
 static void DSP1_BuildAttitude(Int16 (*M)[3], Int16 S, Int16 Rz, Int16 Ry, Int16 Rx)
 {
-    Int16 SinRz = DSP1_Sin(Rz);
-    Int16 CosRz = DSP1_Cos(Rz);
-    Int16 SinRy = DSP1_Sin(Ry);
-    Int16 CosRy = DSP1_Cos(Ry);
-    Int16 SinRx = DSP1_Sin(Rx);
-    Int16 CosRx = DSP1_Cos(Rx);
+    Int16 SinRz, CosRz, SinRy, CosRy, SinRx, CosRx;
+    DSP1_SinCos(Rz, SinRz, CosRz);
+    DSP1_SinCos(Ry, SinRy, CosRy);
+    DSP1_SinCos(Rx, SinRx, CosRx);
     S = (Int16)(S >> 1);
 
     M[0][0] = (Int16)((((Int32)S * CosRz) >> 15) * CosRy >> 15);
@@ -681,12 +735,13 @@ static void DSP1_DoGyrate(Int16 *in, Int16 *out)
     Int16 F  = in[4];
     Int16 L  = in[5];
 
-    Int16 SinAy = DSP1_Sin(Ay);
-    Int16 CosAy = DSP1_Cos(Ay);
+    Int16 SinAy, CosAy, SinAx, CosAx;
+    DSP1_SinCos(Ay, SinAy, CosAy);
+    DSP1_SinCos(Ax, SinAx, CosAx);
 
     Int16 CSec, ESec, CSin, C, E;
 
-    DSP1_Inverse(DSP1_Cos(Ax), 0, CSec, ESec);
+    DSP1_Inverse(CosAx, 0, CSec, ESec);
 
     // Rz
     DSP1_NormalizeDouble((Int32)U * CosAy - (Int32)F * SinAy, C, E);
@@ -700,7 +755,7 @@ static void DSP1_DoGyrate(Int16 *in, Int16 *out)
     // Ry
     DSP1_NormalizeDouble((Int32)U * CosAy + (Int32)F * SinAy, C, E);
     E = (Int16)(ESec - E);
-    DSP1_Normalize(DSP1_Sin(Ax), CSin, E);
+    DSP1_Normalize(SinAx, CSin, E);
     DSP1_Normalize((Int16)(-(((Int32)C * (((Int32)CSec * CSin) >> 15)) >> 15)), C, E);
     out[2] = (Int16)(Ay + DSP1_DenormalizeAndClip(C, E) + L);
 }
@@ -778,10 +833,8 @@ void SNDSP1::Execute(Uint8 uCmd)
         m_E_Les = 0;
         DSP1_Normalize(Les, m_C_Les, m_E_Les);
 
-        m_SinAas = DSP1_Sin(Aas);
-        m_CosAas = DSP1_Cos(Aas);
-        m_SinAzs = DSP1_Sin(Azs);
-        m_CosAzs = DSP1_Cos(Azs);
+        DSP1_SinCos(Aas, m_SinAas, m_CosAas);
+        DSP1_SinCos(Azs, m_SinAzs, m_CosAzs);
 
         m_Nx = (Int16)(((Int32)m_SinAzs * -m_SinAas) >> 15);
         m_Ny = (Int16)(((Int32)m_SinAzs *  m_CosAas) >> 15);
@@ -828,8 +881,7 @@ void SNDSP1::Execute(Uint8 uCmd)
             if (AZS > MaxAZS) AZS = MaxAZS;
         }
 
-        m_SinAZS = DSP1_Sin(AZS);
-        m_CosAZS = DSP1_Cos(AZS);
+        DSP1_SinCos(AZS, m_SinAZS, m_CosAZS);
 
         DSP1_Inverse(m_CosAZS, 0, m_SecAZS_C1, m_SecAZS_E1);
         DSP1_Normalize((Int16)(((Int32)C * m_SecAZS_C1) >> 15), C, E);

@@ -715,9 +715,19 @@ void SnesDMAC::TransferData(SnesDMAChT *pChan, Uint8 *pData, Int32 nBytes)
             while (nBytes > 0) { m_pPPU->WriteCGDATA(*pData++); nBytes--; }
             break;
         default:
+            /* AURORA_MDMA_MODE0_PPU_ORDERING_V38_20261002
+             * MDMA has already synchronized the queued PPU state at transfer
+             * start.  Do not enqueue an ordinary PPU register write here:
+             * a following DMA channel may write a data port immediately and
+             * must observe this control/address write first (e.g. $2121 then
+             * $2122).  Modes 1..7 already use this same immediate B-bus rule. */
             while (nBytes > 0)
             {
-                SNCPUWrite8(m_pCPU, 0x2100 + pChan->bbadx, *pData++);
+                Uint8 uData = *pData++;
+                if (pChan->bbadx < 0x40)
+                    SnesDMAWritePPUPort(m_pPPU, pChan->bbadx, uData);
+                else
+                    SNCPUWrite8(m_pCPU, 0x2100 + pChan->bbadx, uData);
                 nBytes--;
             }
             break;
@@ -799,7 +809,38 @@ void SnesDMAC::ProcessMDMAChAccurate(Uint32 uChan)
 		uPhase = (Uint8)((uPhase + 1) & 3);
 
 		uData = SnesDMAReadA(m_pCPU, uAddrA);
-		SnesDMAWriteB(m_pCPU, uAddrA, uPortB, uData);
+
+		/* AURORA_MDMA_ACCURATE_PPU_ORDERING_V39_20261002
+		 * MDMA entry has already synchronized the queued PPU timeline.
+		 * Accurate/decrement transfers must therefore obey the same immediate
+		 * B-bus ordering as the ordinary fast TransferData() path.  Sending a
+		 * PPU byte back through SnesDMAWriteB()->Write2000() would enqueue it,
+		 * allowing a later fast DMA channel to overtake it (Sunset Riders'
+		 * low-OAM decrement DMA followed by high-OAM DMA is the canonical
+		 * reproducer).
+		 *
+		 * Preserve the old enqueue-time memory-bus phase exactly: the generic
+		 * Write2000() path sampled the current H counter before this byte's
+		 * eight master clocks were consumed. */
+		if (uPortB < 0x40)
+		{
+			Uint8 uMemoryAccessFlags = 0;
+			if (uPortB == 0x04 || uPortB == 0x18 ||
+			    uPortB == 0x19 || uPortB == 0x22)
+			{
+				uMemoryAccessFlags = m_pPPU->BuildMemoryAccessFlags(
+					m_uRasterLine,
+					(Uint32)SNCPUGetCounter(m_pCPU, SNCPU_COUNTER_LINE));
+			}
+			m_pPPU->SetMemoryAccessFlags(uMemoryAccessFlags);
+			SnesDMAWritePPUPort(m_pPPU, uPortB, uData);
+			m_pPPU->SetMemoryAccessFlags(0);
+		}
+		else
+		{
+			SnesDMAWriteB(m_pCPU, uAddrA, uPortB, uData);
+		}
+
 		pChan->a1tx = (Uint16)(pChan->a1tx + iSrcDelta);
 		pChan->dasx--;
 		SNCPUConsumeCycles(m_pCPU, SNCPU_CYCLE_SLOW);

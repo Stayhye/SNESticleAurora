@@ -303,34 +303,63 @@ static inline u32 Aud_PackStereo(short left, short right)
 static void Aud_AsyncPackSegment(
     int dst, const short *left, const short *right, int size, int gainPct)
 {
+    /* AURORA_V22_FRONTEND_AUDIO_DSP1_HOTPATH_20261001
+     * Select gain policy once per contiguous FIFO span, not once per sample.
+     * Default Aurora gain is 200%, so its hot loop is now only load, x2,
+     * saturate, pack, store.  0/100/generic keep byte-for-byte PCM semantics. */
+    u32 *out;
     int i;
-    if (size <= 0) return;
+
+    if (size <= 0)
+        return;
     if (gainPct < 0) gainPct = 0;
     if (gainPct > 400) gainPct = 400;
 
+    out = &_async_stereo[dst];
+
     if (gainPct == 0)
     {
-        memset(&_async_stereo[dst], 0, (size_t)size * sizeof(u32));
+        memset(out, 0, (size_t)size * sizeof(u32));
+        return;
+    }
+
+    if (gainPct == 100)
+    {
+        for (i = 0; i < size; ++i)
+            out[i] = Aud_PackStereo(left[i], right[i]);
+        return;
+    }
+
+    if (gainPct == 200)
+    {
+        for (i = 0; i < size; ++i)
+        {
+            /* AURORA_V22_3_AUDIO_C_TYPE_HOTFIX_20261001
+             * audio_audsrv.c is C. On EE/PS2, native int is 32-bit.
+             * This changes only the source-language typedef spelling;
+             * arithmetic, clipping and packed PCM bytes are unchanged. */
+            int l = (int)left[i] * 2;
+            int r = (int)right[i] * 2;
+            if (l > 32767) l = 32767;
+            if (l < -32768) l = -32768;
+            if (r > 32767) r = 32767;
+            if (r < -32768) r = -32768;
+            out[i] = Aud_PackStereo((short)l, (short)r);
+        }
         return;
     }
 
     for (i = 0; i < size; ++i)
     {
-        int l = left[i];
-        int r = right[i];
-        if (gainPct != 100)
-        {
-            if (gainPct == 200) { l *= 2; r *= 2; }
-            else { l = (l * gainPct) / 100; r = (r * gainPct) / 100; }
-            if (l > 32767) l = 32767;
-            if (l < -32768) l = -32768;
-            if (r > 32767) r = 32767;
-            if (r < -32768) r = -32768;
-        }
-        _async_stereo[dst + i] = Aud_PackStereo((short)l, (short)r);
+        int l = ((int)left[i] * gainPct) / 100;
+        int r = ((int)right[i] * gainPct) / 100;
+        if (l > 32767) l = 32767;
+        if (l < -32768) l = -32768;
+        if (r > 32767) r = 32767;
+        if (r < -32768) r = -32768;
+        out[i] = Aud_PackStereo((short)l, (short)r);
     }
 }
-
 static void Aud_AsyncCopyInGain(
     short *left, short *right, int size, int gainPct)
 {

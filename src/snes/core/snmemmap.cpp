@@ -62,6 +62,21 @@ static SnesMemMapT _SnesMemMap_LoRom_SRAMFullHigh[]=
 	{0, 0, 0, 0, SNESMEM_TYPE_NONE}
 };
 
+/* AURORA_REVIVE_AUDIT_SRAM128K_V10_20260930
+ * LoROM CPU/PPU/WRAM overlays without generic cartridge SRAM. Used only by
+ * the two explicitly identified 128-KiB sliding-SRAM boards. */
+static SnesMemMapT _SnesMemMap_LoRom_CoreOnly[]=
+{
+	{0x7E, 0x7F, 0x0000, 0xFFFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_RAM},
+	{0x00, 0x3F, 0x0000, 0x1FFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_LORAM},
+	{0x00, 0x3F, 0x2000, 0x3FFF, SNCPU_CYCLE_FAST, SNESMEM_TYPE_PPU0},
+	{0x00, 0x3F, 0x4000, 0x5FFF, SNCPU_CYCLE_FAST, SNESMEM_TYPE_PPU1},
+	{0x80, 0xBF, 0x0000, 0x1FFF, SNCPU_CYCLE_SLOW, SNESMEM_TYPE_LORAM},
+	{0x80, 0xBF, 0x2000, 0x3FFF, SNCPU_CYCLE_FAST, SNESMEM_TYPE_PPU0},
+	{0x80, 0xBF, 0x4000, 0x5FFF, SNCPU_CYCLE_FAST, SNESMEM_TYPE_PPU1},
+	{0, 0, 0, 0, SNESMEM_TYPE_NONE}
+};
+
 static SnesMemMapT	_SnesMemMap_HiRom[]=
 {
 	// map slow rom
@@ -938,6 +953,18 @@ static Bool _SnesBSCUses32KPackDecode(SnesRom *pRom)
     return FALSE;
 }
 
+static void _SnesMapSRAM128KWindows(SNCpuT *pCpu, Uint8 *pSRAM)
+{
+	Uint32 uBank;
+	for (uBank = 0x70; uBank <= 0x73; ++uBank)
+	{
+		const Uint32 uOffset = (uBank - 0x70u) * 0x8000u;
+		const Uint32 uAddr = uBank << 16;
+		SNCPUSetMemSpeed(pCpu, uAddr, 0x10000u, SNCPU_CYCLE_SLOW);
+		SNCPUSetBank(pCpu, uAddr, 0x10000u, pSRAM + uOffset, TRUE);
+	}
+}
+
 void SnesSystem::MapBSCLoRom(void)
 {
     SNCpuT *pCpu = &m_Cpu;
@@ -954,8 +981,15 @@ void SnesSystem::MapBSCLoRom(void)
     Uint32 r, bank, a;
     Uint32 slotEnd = _SnesBSCUses32KPackDecode(m_pRom)
         ? 0xDFU : 0xEFU; /* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908 */
+    const Bool bSRAM128K =
+        m_pRom && (m_pRom->m_Flags & SNROM_FLAG_SRAM128K_SPECIAL);
 
-    MapMem(_SnesMemMap_BSCLoRom_Sys);
+    /* RPG Tsukuru 2 keeps Aurora's BSC ROM + Memory Pack topology. Only the
+     * cartridge SRAM overlay changes to the physical sliding $70-$73 decode. */
+    MapMem(bSRAM128K ? _SnesMemMap_LoRom_CoreOnly
+                     : _SnesMemMap_BSCLoRom_Sys);
+    if (bSRAM128K)
+        _SnesMapSRAM128KWindows(pCpu, m_SRam);
 
     for (r = 0; r < sizeof(Regions) / sizeof(Regions[0]); ++r)
     {
@@ -1647,6 +1681,29 @@ static void _MapExLoRomRegion(SNCpuT *pCpu, Uint8 *pRom, Uint32 romBytes,
 	}
 }
 
+void SnesSystem::MapMemLoRomSRAM128K(void)
+{
+	SNCpuT *pCpu = &m_Cpu;
+	Uint8 *pRom = m_pRom ? m_pRom->GetData() : NULL;
+	Uint32 uRomBytes = m_pRom ? m_pRom->GetBytes() : 0;
+
+	if (!pRom || !uRomBytes)
+	{
+		MapMem(_SnesMemMap_LoRom);
+		return;
+	}
+
+	/* Ordinary LoROM ROM wiring, but without the standard $70-$7D/$F0-$FF
+	 * SRAM overlays. $70-$73 are replaced below by the physical board. */
+	_MapExLoRomRegion(pCpu, pRom, uRomBytes, 0x00, 0x3F, FALSE, 0x000000);
+	_MapExLoRomRegion(pCpu, pRom, uRomBytes, 0x40, 0x7D, TRUE,  0x200000);
+	_MapExLoRomRegion(pCpu, pRom, uRomBytes, 0x80, 0xBF, FALSE, 0x000000);
+	_MapExLoRomRegion(pCpu, pRom, uRomBytes, 0xC0, 0xFF, TRUE,  0x200000);
+
+	MapMem(_SnesMemMap_LoRom_CoreOnly);
+	_SnesMapSRAM128KWindows(pCpu, m_SRam);
+}
+
 // ----------------------------------------------------------------------
 void SnesSystem::MapMemExLoRom(void)
 {
@@ -1702,15 +1759,22 @@ void SnesSystem::MapMem(SNRomMappingE eRomMapping, Uint32 uFlags)
 
 		// mode 20h
 		case SNROM_MAPPING_LOROM:
-			MapMem(_SnesMemMap_LoRom);
-
-			/* v3.1: generic small-LoROM full-bank SRAM decode. The first
-			 * MapMem call above has already resolved/capped m_uSramSize. */
-			if (!(uFlags & (SNROM_FLAG_SUPERFX | SNROM_FLAG_SA1)) &&
-			    m_pRom->GetBytes() <= 0x200000 &&
-			    m_uSramSize > 0 && m_uSramSize <= 0x8000)
+			if (uFlags & SNROM_FLAG_SRAM128K_SPECIAL)
 			{
-				MapMem(_SnesMemMap_LoRom_SRAMFullHigh);
+				MapMemLoRomSRAM128K();
+			}
+			else
+			{
+				MapMem(_SnesMemMap_LoRom);
+
+				/* v3.1: generic small-LoROM full-bank SRAM decode. The first
+				 * MapMem call above has already resolved/capped m_uSramSize. */
+				if (!(uFlags & (SNROM_FLAG_SUPERFX | SNROM_FLAG_SA1)) &&
+				    m_pRom->GetBytes() <= 0x200000 &&
+				    m_uSramSize > 0 && m_uSramSize <= 0x8000)
+				{
+					MapMem(_SnesMemMap_LoRom_SRAMFullHigh);
+				}
 			}
 
 #if SNES_DSP1

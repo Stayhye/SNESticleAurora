@@ -50,17 +50,20 @@ AuroraPPUFetchCHR2Direct64PS2:
         blez    $7,.Lchr2_v25_done
         lw      $15,12($11)              /* palette LUT; safe delay-slot load */
 
+/* AURORA_DKC_R5900_HOTPATH_V20_20260930
+ * CHR2/CHR4 host-only algebra: the final row-address mask already performs
+ * the exact VRAM modulo, so masking before adding row 0..7 is redundant.
+ * V-flip uses branch-likely so XOR executes only for flipped rows without a
+ * dead NOP.  Emulated addressing/timing/state are unchanged. */
 .Lchr2_v25_loop:
         lhu     $2,0($6)
         lbu     $3,3($6)
         lbu     $11,4($6)
         sll     $2,$2,3
         addu    $2,$2,$5
-        andi    $2,$2,0x7fff
         addu    $11,$11,$8
         andi    $24,$3,2
-        beq     $24,$0,.Lchr2_v25_no_vflip
-        nop
+        bnel    $24,$0,.Lchr2_v25_no_vflip
         xori    $11,$11,7
 .Lchr2_v25_no_vflip:
         addu    $2,$2,$11
@@ -76,13 +79,13 @@ AuroraPPUFetchCHR2Direct64PS2:
         beq     $25,$0,.Lchr2_v25_normal
         move    $25,$13                  /* H-flip lookup in delay slot */
         b       .Lchr2_v25_mask_ready
-        nop
+        sb      $24,0($10)               /* H-flip: identity opacity */
 .Lchr2_v25_normal:
         move    $25,$12
         addu    $24,$14,$24
         lbu     $24,0($24)
+        sb      $24,0($10)               /* normal: reversed opacity */
 .Lchr2_v25_mask_ready:
-        sb      $24,0($10)               /* exact opacity result */
         beq     $24,$0,.Lchr2_v25_transparent
         sll     $2,$2,3                  /* first lookup address work */
 
@@ -148,44 +151,39 @@ AuroraPPUFetchCHR4Direct64PS2:
         lbu     $11,4($6)
         sll     $2,$2,4
         addu    $2,$2,$5
-        andi    $2,$2,0x7fff
         addu    $11,$11,$8
         andi    $24,$3,2
-        beq     $24,$0,.Lchr4_v25_no_vflip
-        nop
+        bnel    $24,$0,.Lchr4_v25_no_vflip
         xori    $11,$11,7
 .Lchr4_v25_no_vflip:
         addu    $2,$2,$11
 
-        andi    $24,$2,0x7fff
-        sll     $24,$24,1
-        addu    $24,$4,$24
-        lhu     $24,0($24)               /* pair01 */
+        /* BG CHR bases are nibble<<12, tile4 is 16-word aligned and row is
+         * 0..7.  Therefore canonical pair01 is <= $7ff7 after modulo and
+         * pair23 is exactly +8 words / +16 bytes, never crossing $7fff. */
+        andi    $2,$2,0x7fff
+        sll     $2,$2,1
+        addu    $2,$4,$2
+        lhu     $24,0($2)                /* pair01 */
+        lhu     $25,16($2)               /* pair23 */
+        andi    $3,$3,1                  /* H-flip bit; fills load latency */
 
-        addiu   $25,$2,8
-        andi    $25,$25,0x7fff
-        sll     $25,$25,1
-        addu    $25,$4,$25
-        lhu     $25,0($25)               /* pair23 */
-
-        srl     $11,$24,8
-        or      $11,$11,$24
-        srl     $2,$25,8
-        or      $2,$2,$25
+        /* (lo01|hi01|lo23|hi23) in four ALU ops instead of six. */
+        or      $11,$24,$25
+        srl     $2,$11,8
         or      $11,$11,$2
         andi    $11,$11,0x00ff           /* source opacity */
 
-        andi    $2,$3,1
-        beq     $2,$0,.Lchr4_v25_normal
+        beq     $3,$0,.Lchr4_v25_normal
         move    $2,$13                   /* H-flip lookup in delay slot */
         b       .Lchr4_v25_mask_ready
-        nop
+        sb      $11,0($10)               /* H-flip: identity opacity */
 .Lchr4_v25_normal:
         move    $2,$12
         addu    $3,$14,$11
         lbu     $11,0($3)
+        sb      $11,0($10)               /* normal: reversed opacity */
 .Lchr4_v25_mask_ready:
-        sb      $11,0($10)
         beq     $11,$0,.Lchr4_v25_transparent
         andi    $3,$24,0x00ff            /* first plane extraction */
 
@@ -550,10 +548,10 @@ AuroraPPUFetchBG8x8MapPS2:
         /* AURORA_DKC_BGMAP_DELAY_SCHEDULE_R5900_V29_20260928
          * V17 semantics exactly; only safe delay slots are occupied.
          */
+        /* v20: callers provide the exact 12-bit abstract map address. */
         blez    $6,.Lbg8_v29_done
         srl     $8,$4,10
 
-        andi    $8,$8,3
         sll     $8,$8,2
         addu    $8,$7,$8
         lw      $8,0($8)
@@ -571,7 +569,6 @@ AuroraPPUFetchBG8x8MapPS2:
         addiu   $4,$4,-32
         xori    $4,$4,0x0400
         srl     $8,$4,10
-        andi    $8,$8,3
         sll     $8,$8,2
         addu    $8,$7,$8
         lw      $8,0($8)
@@ -581,8 +578,8 @@ AuroraPPUFetchBG8x8MapPS2:
         srl     $9,$10,10
         andi    $9,$9,0x000f
         sb      $9,2($5)
+        /* lhu makes word>>14 intrinsically 0..3. */
         srl     $9,$10,14
-        andi    $9,$9,3
         sb      $9,3($5)
         sb      $0,4($5)
 
@@ -601,10 +598,10 @@ AuroraPPUFetchBG16x16MapPS2:
          * Same V17 map wrap, 16x16 quadrant, flip/palette metadata and
          * nTiles accounting. Only branch delay slots carry invariant work.
          */
+        /* v20: callers provide the exact 12-bit abstract map address. */
         blez    $6,.Lbg16_v29_done
         srl     $9,$4,10
 
-        andi    $9,$9,3
         sll     $9,$9,2
         addu    $9,$7,$9
         lw      $9,0($9)
@@ -622,14 +619,13 @@ AuroraPPUFetchBG16x16MapPS2:
         addiu   $4,$4,-32
         xori    $4,$4,0x0400
         srl     $9,$4,10
-        andi    $9,$9,3
         sll     $9,$9,2
         addu    $9,$7,$9
         lw      $9,0($9)
 
 .Lbg16_v29_no_wrap:
+        /* lhu makes word>>14 intrinsically 0..3. */
         srl     $12,$10,14
-        andi    $12,$12,3
         srl     $13,$10,10
         andi    $13,$13,0x000f
 

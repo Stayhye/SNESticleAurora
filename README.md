@@ -90,10 +90,12 @@ User interface:
 * Pilotwings (SNES) and Secret of Mana (SNES) mode 7 rendering, also fixes other games that rely on it
 * Secret of Mana (SNES) mode 5 rendering, also fixes other games that rely on it
 * Addams Family (SNES) graphical glitches and timing issues fixed
+* Sonic Blast Man (SNES) wrong colors fixed
 * J.R.R. Tolkien's The Lord of the Rings (SNES) black screen fixed
 * Blackthorne (SNES) black screen fixed
 * Magical Pop'n (SNES) freeze fixed
 * Accele Brid (SNES) freeze fixed
+* Killer Instinct (SNES) freeze fixed
 * Kishin Douji Zenki: Tenchi Meidou (SNES) black screen fixed
 * The Lost Vikings 1 and 2 (SNES) black screen fixed
 * Many other graphical glitches and inaccuracies on many games and emulated systems were fixed
@@ -104,12 +106,11 @@ User interface:
 * SNES SA-1 Emulation (experimental state)
 * SNES FX1 and FX2 emulation (experimental state)
 * PC Engine CD and Sega CD performance (experimental state)
-* 32X emulation (experimental state)
+* 32X emulation (experimental state) *(currently disabled)*
 * SMB (ethernet crossover cable) connection
 * Krazy Creatures (NES) minor graphical glitches
 * Super Mario World 2 (SNES) performance (Super FX2)
 * Sunset Riders (SNES) graphical glitches
-* Sonic Blast Man (SNES) wrong colors
 * Any other games with performance or graphical issues
 
 **TO BE ADDED:**
