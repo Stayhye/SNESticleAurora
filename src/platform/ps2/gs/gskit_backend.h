@@ -100,6 +100,11 @@ void GSK_SetGbSquarePixelPresentation(int on);
  * Must be disabled again before frontend overlays, status text or modals. */
 void GSK_SetGbSquarePixelDraw(int on);
 
+/* AURORA_GBA_480I_MATCH_240P_ASPECT_V3_2_20261005
+ * Transient GBA-only interlaced transform matching the tested 240p width.
+ * Must be disabled again before frontend overlays/status/modals. */
+void GSK_SetGba240pMatchedDraw(int on);
+
 /* Tear down and rebuild the GS for the current g_GskVideoMode. The caller
    MUST re-upload any textures it owns afterwards (e.g. FontInit). Intended
    to run once at boot after the saved settings are read from the card. */

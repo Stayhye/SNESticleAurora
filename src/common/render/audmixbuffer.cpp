@@ -3,14 +3,47 @@
 #include <stdio.h>
 #include "types.h"
 #include "prof.h"
+#include "platform/ps2/system/aurora_frontend_profiler.h"
 #include "mixbuffer.h"
 #include "audmixbuffer.h"
 #include "audframeschedule.h"
+#if AURORA_C4_PROFILER
+#include "platform/ps2/system/aurora_c4_profiler.h"
+#endif
+/* AURORA_C4_AUDIO_COST_V8_2_20261004 */
 #include <string.h>
 
 extern "C" {
 #include "audio.h"
 };
+
+#if AURORA_FRONTEND_PROFILER
+class AuroraAudioConvertAutoScope
+{
+public:
+    explicit AuroraAudioConvertAutoScope(Uint32 frames)
+    {
+        AuroraFrontendProfilerAudioConvertBegin(frames);
+    }
+    ~AuroraAudioConvertAutoScope()
+    {
+        AuroraFrontendProfilerAudioConvertEnd();
+    }
+};
+
+class AuroraAudioFlushAutoScope
+{
+public:
+    explicit AuroraAudioFlushAutoScope(Uint32 frames)
+    {
+        AuroraFrontendProfilerAudioFlushBegin(frames);
+    }
+    ~AuroraAudioFlushAutoScope()
+    {
+        AuroraFrontendProfilerAudioFlushEnd();
+    }
+};
+#endif
 
 /* Output gain for the emulated game audio (SNES/NES). The SPU2/audsrv
    volume is already at 100%, so to match players like reference emulator/RetroArch we
@@ -520,6 +553,9 @@ Bool AudMixBuffer::OutputLibretroInterleaved(
 
     if (!pStereo || nFrames <= 0)
         return TRUE;
+#if AURORA_FRONTEND_PROFILER
+    AuroraAudioConvertAutoScope auroraAudioConvert((Uint32)nFrames);
+#endif
 
     if (m_uSampleRate == 48000)
     {
@@ -938,6 +974,9 @@ Bool AudMixBuffer::OutputPicoDriveInterleaved32000(
 
 void AudMixBuffer::OutputSamplesStereo(Int16 *pLeftSamples, Int16 *pRightSamples, Int32 nSamples)
 {
+#if AURORA_FRONTEND_PROFILER
+    AuroraAudioConvertAutoScope auroraAudioConvert((Uint32)(nSamples > 0 ? nSamples : 0));
+#endif
     /* AURORA_PD_POLISH_V3_20260820_RATE_DISPATCH */
     if (m_uSampleRate != 32000 && m_uSampleRate != 48000)
     {
@@ -984,6 +1023,19 @@ void AudMixBuffer::OutputSamplesStereo(Int16 *pLeftSamples, Int16 *pRightSamples
     switch(m_uSampleRate)
     {
         case 32000:
+#if AURORA_C4_PROFILER
+            if(g_AuroraC4ProfilerActive)
+            {
+                const Uint32 c4ResampleStart=ProfCtrGetCycle();
+                const Int32 c4Produced=ConvertSamplesStereo_32000(
+                    pLeftSamples,pRightSamples,pOutLeft,pOutRight,nSamples);
+                const Uint32 c4ResampleCycles=(Uint32)(ProfCtrGetCycle()-c4ResampleStart);
+                m_nOutSamples+=c4Produced;
+                AuroraC4AudioDiagResample(c4ResampleCycles,(Uint32)nSamples,
+                    c4Produced>0?(Uint32)c4Produced:0u);
+                break;
+            }
+#endif
             m_nOutSamples += ConvertSamplesStereo_32000(pLeftSamples, pRightSamples, pOutLeft, pOutRight, nSamples);
             break;
 
@@ -1006,6 +1058,9 @@ void AudMixBuffer::Flush()
 
     if (nOutSamples > 0)
     {
+#if AURORA_FRONTEND_PROFILER
+        AuroraAudioFlushAutoScope auroraAudioFlush((Uint32)nOutSamples);
+#endif
         /* AURORA_AUDIO_SPLIT_VOLUMES_V36_20260823
          * Shared mixer, separate final gain by active core family. */
         const Int32 gainPct =

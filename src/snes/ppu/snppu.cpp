@@ -8,6 +8,7 @@
 #include "sntiming.h"
 #include "sndebug.h"
 #include "sndbglog.h"
+#include "platform/ps2/system/aurora_snes_cost_profiler.h" /* AURORA_SNES_DEEP_OPT_V3_14_20261005 */
 
 #define SNPPU_VERSION_5C77 (0x01)
 #define SNPPU_VERSION_5C78 (0x01)
@@ -1073,15 +1074,26 @@ void SnesPPU::AdvanceField()
 void SnesPPU::ApplyQueuedWritesBefore(Uint32 uRasterTime)
 {
     SNQueueElementT *pElement;
+#if AURORA_FRONTEND_PROFILER
+    const Uint32 uAuroraQueueStart = ProfCtrGetCycle();
+    Uint32 uAuroraQueueWrites = 0;
+#endif
     while ((pElement = m_Queue.Dequeue(uRasterTime)) != NULL)
     {
         m_uMemoryAccessFlags = pElement->uPad;
         Write8(pElement->uAddr, pElement->uData);
+#if AURORA_FRONTEND_PROFILER
+        ++uAuroraQueueWrites;
+#endif
 #if SNDBG_LOG
         g_DbgPPUAppliedWrites++;
 #endif
     }
     m_uMemoryAccessFlags = 0;
+#if AURORA_FRONTEND_PROFILER
+    AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_PPU_QUEUE_APPLY,
+        ProfCtrGetCycle() - uAuroraQueueStart, uAuroraQueueWrites);
+#endif
 }
 
 void SnesPPU::Sync(Uint32 uLine, Uint32 uHClock)
@@ -1099,15 +1111,26 @@ void SnesPPU::Sync(Uint32 uLine, Uint32 uHClock)
     if (m_bVBlank)
     {
         SNQueueElementT *pElement;
+#if AURORA_FRONTEND_PROFILER
+        const Uint32 uAuroraVBlankDrainStart = ProfCtrGetCycle();
+        Uint32 uAuroraVBlankWrites = 0;
+#endif
         while ((pElement = m_Queue.Dequeue()) != NULL)
         {
             m_uMemoryAccessFlags = pElement->uPad;
             Write8(pElement->uAddr, pElement->uData);
+#if AURORA_FRONTEND_PROFILER
+            ++uAuroraVBlankWrites;
+#endif
 #if SNDBG_LOG
             g_DbgPPUAppliedWrites++;
 #endif
         }
         m_uMemoryAccessFlags = 0;
+#if AURORA_FRONTEND_PROFILER
+        AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_PPU_VBLANK_DRAIN,
+            ProfCtrGetCycle() - uAuroraVBlankDrainStart, uAuroraVBlankWrites);
+#endif
         return;
     }
 

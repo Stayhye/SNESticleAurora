@@ -6,6 +6,10 @@
 class CRenderSurface;
 class CMixBuffer;
 
+/* AURORA_GBA_BLEND_UI_CFG53_V1_20261004: frontend-owned gpSP interframe blending option. */
+Bool GpSPGetFrameBlending(void);
+void GpSPSetFrameBlending(Bool enabled);
+
 /* AURORA_GPSP_GBA_V1_20260911
  * Aurora-owned adapter around the pinned gpSP PS2/libretro core.
  * The frontend contract remains Emu::System, just like Gambatte: gpSP does

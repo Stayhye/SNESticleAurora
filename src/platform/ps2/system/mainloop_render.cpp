@@ -14,11 +14,17 @@
 
 #include "mainloop_debug.h"
 #include "mainloop_shared.h"
+#if AURORA_C4_PROFILER
+#include "platform/ps2/system/aurora_c4_profiler.h"
+#endif
 #include "mainloop_ui.h"
 #include "mainloop_menu.h" /* AURORA_FINAL_V1_5_RENDER_MENU_API_INCLUDE_20260901 */
 #include "mainloop_bgm.h"
 #include "mainloop_safe_frameskip.h" /* AURORA_SAFE_FRAMESKIP_GG_ZOOM_V2_2 */
 #include "platform/ps2/system/aurora_snes_cost_profiler.h" /* AURORA_SNES_COST_PROFILER_V1_20260920 */
+#if AURORA_FRONTEND_PROFILER
+#include "platform/ps2/system/aurora_frontend_profiler.h"
+#endif
 #include "sega/picodrive/picodrive_bridge.h"
 /* AURORA_ALLCORES_PERF_V5_20260824 */
 #include "nes/quicknes/quicknes_bridge.h"
@@ -113,6 +119,13 @@ static Uint32 s_SafeFrameskipLastPresentedWork = 0;
 static Bool   s_SafeFrameskipLastPresentedWorkValid = FALSE;
 static Bool   s_SafeFrameskipOverrunPending = FALSE;
 
+/* AURORA_SAFE_FRAMESKIP_HEALTHY_REBASE_V22_20261004
+ * A normal-policy skip arms one recovery proof. The next real
+ * presented gameplay tick may clear stale Aim debt only if its
+ * measured Take()->pre-VBlank work fits the learned period.
+ * CRC-unlimited policy never arms this state. */
+static Bool   s_SafeFrameskipRecoveryPending = FALSE;
+
 /* Exact 2/5 token bucket. Capacity 6 preserves the one-unit remainder
  * when +2 credit crosses the 5-unit skip cost; <10 still banks at most one
  * complete skip. The no-consecutive guard remains the hard burst bound. */
@@ -199,6 +212,7 @@ void MainLoopSafeFrameskipSetRomIdentityCRC32(
     s_SafeFrameskipCredit = 5u;
     s_SafeFrameskipPreviousSkipped = FALSE;
     s_SafeFrameskipPhaseSwapCount = 0u;
+    s_SafeFrameskipRecoveryPending = FALSE;
 }
 
 /* UI pause preserves scheduler phase without sampling time spent in menus. */
@@ -242,6 +256,7 @@ static void _MainLoopSafeFrameskipResetRuntime(void)
     s_SafeFrameskipLastPresentedWork = 0;
     s_SafeFrameskipLastPresentedWorkValid = FALSE;
     s_SafeFrameskipOverrunPending = FALSE;
+    s_SafeFrameskipRecoveryPending = FALSE;
     s_SafeFrameskipCredit = 5;
     s_SafeFrameskipPreviousSkipped = FALSE;
     s_SafeFrameskipPhaseSwapCount = 0;
@@ -458,6 +473,8 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
 {
     Bool skip = FALSE;
     Bool meaningfulDebt = FALSE;
+    Bool measuredOverrunForDiag = FALSE;
+    Int32 diffForDiag = 0;
     Uint32 now;
 
     s_SafeFrameskipSkipPresentation = FALSE;
@@ -492,6 +509,8 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
     {
         const Int32 diff = (Int32)(s_SafeFrameskipAim - now);
         const Bool measuredOverrun = s_SafeFrameskipOverrunPending;
+        diffForDiag = diff;
+        measuredOverrunForDiag = measuredOverrun;
         s_SafeFrameskipOverrunPending = FALSE;
 
         if (measuredOverrun)
@@ -512,6 +531,31 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
                 meaningfulDebt = TRUE;
             }
         }
+    }
+
+    /* AURORA_SAFE_FRAMESKIP_BALANCED_RECOVERY_V23_20261005
+     *
+     * v22 already gave us the important safety proof: a REAL presented frame
+     * is measured after a normal-policy skip. Keep that proof, but do not
+     * throw away residual Aim debt too early.
+     *
+     * During an armed recovery only, more than half a learned host period of
+     * residual lateness is still actionable debt. Below that threshold normal
+     * VBlank cadence can absorb the phase error, so disarm recovery without
+     * manufacturing another skip. The public 2/5 token bucket and the
+     * no-consecutive-skip rule below remain untouched. */
+    if (s_SafeFrameskipRecoveryPending &&
+        s_SafeFrameskipPeriod > 0u)
+    {
+        const Int32 recoveryThreshold =
+            (s_SafeFrameskipPeriod > 1u)
+                ? (Int32)(s_SafeFrameskipPeriod >> 1)
+                : 1;
+
+        if (diffForDiag < -recoveryThreshold)
+            meaningfulDebt = TRUE;
+        else if (!measuredOverrunForDiag)
+            s_SafeFrameskipRecoveryPending = FALSE;
     }
 
     /* AURORA_SAFE_FRAMESKIP_CRC_UNLIMITED_V21_2_20261001
@@ -557,7 +601,10 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
         if (!phaseSwapPresent)
         {
             if (!unlimitedSkip)
+            {
                 s_SafeFrameskipCredit -= 5u;
+                s_SafeFrameskipRecoveryPending = TRUE;
+            }
             s_SafeFrameskipPreviousSkipped = TRUE;
             s_SafeFrameskipCdAudioWindowRequested = FALSE;
             skip = TRUE;
@@ -573,6 +620,14 @@ Bool MainLoopSafeFrameskipTake(Bool allowed)
     {
         s_SafeFrameskipPreviousSkipped = FALSE;
     }
+
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerSafeFrameskipDecision(
+        s_SafeFrameskipPeriod, diffForDiag,
+        s_SafeFrameskipLastPresentedWork, meaningfulDebt,
+        measuredOverrunForDiag, unlimitedSkip, skip,
+        s_SafeFrameskipRecoveryPending);
+#endif
 
     s_SafeFrameskipAim += s_SafeFrameskipPeriod;
     s_SafeFrameskipSkipPresentation = skip;
@@ -601,6 +656,9 @@ static void _MainLoopSafeFrameskipAfterFlip(void)
             (s_SafeFrameskipTickStart != 0u && preFlip != 0u) ? TRUE : FALSE;
         const Uint32 hostWork =
             hostWorkValid ? (preFlip - s_SafeFrameskipTickStart) : 0u;
+        const Bool recoveryWasPending =
+            s_SafeFrameskipRecoveryPending;
+        Bool recoveryRebased = FALSE;
 
         s_SafeFrameskipFrontendLastFlip = 0;
 
@@ -620,6 +678,34 @@ static void _MainLoopSafeFrameskipAfterFlip(void)
                 (hostWorkValid && hostWork <= s_SafeFrameskipPeriod))
                 _MainLoopSafeFrameskipLearn(delta, TRUE);
         }
+
+        /* AURORA_SAFE_FRAMESKIP_HEALTHY_REBASE_V22_20261004
+         * A skipped NORMAL-policy tick is followed by a real presentation
+         * because the 2/5 policy forbids consecutive skips. v3.3 deliberately
+         * asks for >=25% host-work headroom before declaring the catch-up
+         * complete immediately. A merely just-under-budget frame is stable,
+         * but not strong proof that residual Aim debt has disappeared.
+         *
+         * Sustained/near-sustained load keeps recovery armed; Take() then uses
+         * the v3.3 half-period residual threshold. CRC unlimited mode never
+         * arms recovery, so Top Gear/Top Racer max policy is unchanged. */
+        if (recoveryWasPending &&
+            hostWorkValid &&
+            s_SafeFrameskipPeriod > 0u &&
+            ((Uint64)hostWork * 4u) <=
+                ((Uint64)s_SafeFrameskipPeriod * 3u))
+        {
+            s_SafeFrameskipAim = now + s_SafeFrameskipPeriod;
+            s_SafeFrameskipOverrunPending = FALSE;
+            s_SafeFrameskipRecoveryPending = FALSE;
+            s_SafeFrameskipPreviousSkipped = FALSE;
+            recoveryRebased = TRUE;
+        }
+
+#if AURORA_FRONTEND_PROFILER
+        AuroraFrontendProfilerSafeFrameskipRecovery(
+            hostWork, recoveryWasPending, recoveryRebased);
+#endif
 
         s_SafeFrameskipLastFlip = now;
         s_SafeFrameskipTickStart = 0;
@@ -645,6 +731,9 @@ static void _MainLoopSafeFrameskipAfterFlip(void)
 void MainLoopRender()
 {
 	static Uint32 _iFrame=0;
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerRenderBegin();
+#endif
 
         /* AURORA_SAFE_FRAMESKIP_UI_EDGE_RENDER_FALLBACK_V9_20260926
          *
@@ -676,14 +765,29 @@ void MainLoopRender()
                  * spend that recovered host time on at most one EXTRA
                  * nonblocking async-audio drain. No wait_audio(), no PCM drop.
                  * With no backlog the second call returns immediately. */
+#if AURORA_C4_PROFILER
+                const Uint32 c4SkipAud=g_AuroraC4ProfilerActive?ProfCtrGetCycle():0u;
+#endif
+#if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerAudioDrainBegin();
+#endif
                 Aud_BufferedAsyncStart();
                 Aud_BufferedAsyncStart();
+#if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerAudioDrainEnd();
+#endif
+#if AURORA_C4_PROFILER
+                if(g_AuroraC4ProfilerActive)AuroraC4ProfilerPostAudio((Uint32)(ProfCtrGetCycle()-c4SkipAud),TRUE);
+#endif
 
                 /* V15 completed hidden-host-tick boundary. Core/audio have
                  * already advanced; no VBlank/presentation wait follows. */
                 _MainLoopSafeFrameskipCommitGameplayBoundary(
                     ProfCtrGetCycle());
             }
+#if AURORA_FRONTEND_PROFILER
+            AuroraFrontendProfilerRenderEnd();
+#endif
             ++_iFrame;
             return;
         }
@@ -848,6 +952,9 @@ void MainLoopRender()
         GSK_SetNative240pPar(0);
     }
 
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerRenderSetupBegin();
+#endif
     GSK_SetGameplaySkipClear(
         (!_bMenu && !_MainLoop_BlackScreen &&
          ((bSegaDirectGs &&
@@ -888,6 +995,10 @@ void MainLoopRender()
     PolyTexture(NULL);
     PolyBlend(FALSE);
     PolyColor4f(0.0f, 0.0f, 0.0f, 1.0f);
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerRenderSetupEnd();
+    AuroraFrontendProfilerGameDrawBegin();
+#endif
 
 	if (!_MainLoop_BlackScreen)
 	{
@@ -957,12 +1068,12 @@ void MainLoopRender()
                  bSquareHandheldGameplay) ? TRUE : FALSE;
 
             if (bGbaSquareDraw)
-                GSK_SetGbSquarePixelDraw(1);
+                GSK_SetGba240pMatchedDraw(1); /* AURORA_GBA_480I_MATCH_240P_ASPECT_V3_2_20261005 */
 
             _pGba->DrawDirectGs(_MainLoop_uOutTexTBP, fColor);
 
             if (bGbaSquareDraw)
-                GSK_SetGbSquarePixelDraw(0);
+                GSK_SetGba240pMatchedDraw(0);
         }
         else if (bSegaDirectGs)
         {
@@ -980,7 +1091,12 @@ void MainLoopRender()
                 (GSK_GetActiveVideoMode() != GSK_VIDMODE_240P &&
                  bSquareHandheldGameplay) ? TRUE : FALSE;
             if (bHandheldSquareDraw)
-                GSK_SetGbSquarePixelDraw(1);
+            {
+                if (_pSystem == _pGba)
+                    GSK_SetGba240pMatchedDraw(1); /* AURORA_GBA_480I_MATCH_240P_ASPECT_V3_2_20261005 */
+                else
+                    GSK_SetGbSquarePixelDraw(1);
+            }
 
             PolyBlend(FALSE);
             PolyTexture(&_OutTex);
@@ -1027,7 +1143,12 @@ void MainLoopRender()
             PolyBlend(TRUE);
 
             if (bHandheldSquareDraw)
-                GSK_SetGbSquarePixelDraw(0);
+            {
+                if (_pSystem == _pGba)
+                    GSK_SetGba240pMatchedDraw(0);
+                else
+                    GSK_SetGbSquarePixelDraw(0);
+            }
         }
 
         /* AURORA_QN_LIGHTGUN_OVERLAY_V7_20260829
@@ -1040,6 +1161,10 @@ void MainLoopRender()
         //PolyRect(dx,dy,128,120);
     }
 
+
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerGameDrawEnd();
+#endif
 
     #if AURORA_RUNTIME_DIAG_OVERLAY
     /* AURORA_PCE_KRAZY_RUNTIME_DIAG_V11R3_20260830
@@ -1144,6 +1269,9 @@ void MainLoopRender()
     }
 
 
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerUiBegin();
+#endif
 	/* Keep menu audio alive even while a modal overlays the UI. Previously
 	   BgmUpdate lived only in the non-modal branch below, so every fixed-time
 	   message starved audsrv regardless of whether any I/O was happening. */
@@ -1217,6 +1345,9 @@ void MainLoopRender()
 		}
 	}
 
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerUiEnd();
+#endif
 	#if CODE_DEBUG
 	if (_MainLoop_bMCSaveReady && MCSave_WriteSync(FALSE, NULL))
 	{
@@ -1229,9 +1360,21 @@ void MainLoopRender()
 
 
 
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerGpFlushBegin();
+#endif
     PROF_ENTER("GPFlush");
+#if AURORA_C4_PROFILER
+    const Uint32 c4Flush=g_AuroraC4ProfilerActive?ProfCtrGetCycle():0u;
+#endif
     GPFifoFlush();
+#if AURORA_C4_PROFILER
+    if(g_AuroraC4ProfilerActive)AuroraC4ProfilerGpFlush((Uint32)(ProfCtrGetCycle()-c4Flush));
+#endif
     PROF_LEAVE("GPFlush");
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerGpFlushEnd();
+#endif
 
     /* gsKit_sync_flip waits for vsync, swaps the display buffer
        and resets gsKit's draw queue for the next frame. The
@@ -1242,9 +1385,21 @@ void MainLoopRender()
         (s_SafeFrameskipTickStart != 0u) ? ProfCtrGetCycle() : 0u;
 
     PROF_ENTER("WaitVBlank");
+#if AURORA_C4_PROFILER
+    const Uint32 c4Vb=g_AuroraC4ProfilerActive?ProfCtrGetCycle():0u;
+#endif
     if ( (_iFrame&15)==0)   _uVblankCycle = ProfCtrGetCycle();
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerVBlankBegin();
+#endif
     GSK_SyncFlip();
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerVBlankEnd();
+#endif
     if ( (_iFrame&15)==0)   _uVblankCycle = ProfCtrGetCycle() - _uVblankCycle;
+#if AURORA_C4_PROFILER
+    if(g_AuroraC4ProfilerActive)AuroraC4ProfilerVBlank((Uint32)(ProfCtrGetCycle()-c4Vb));
+#endif
     _MainLoopSafeFrameskipAfterFlip();
     PROF_LEAVE("WaitVBlank");
 
@@ -1254,7 +1409,19 @@ void MainLoopRender()
      * deadline. Aud_BufferedAsyncStart uses only wait=0 drains. */
     if (!_bMenu && _pSystem && !_MainLoop_BlackScreen)
     {
+#if AURORA_C4_PROFILER
+        const Uint32 c4PostAud=g_AuroraC4ProfilerActive?ProfCtrGetCycle():0u;
+#endif
+#if AURORA_FRONTEND_PROFILER
+        AuroraFrontendProfilerAudioDrainBegin();
+#endif
         Aud_BufferedAsyncStart();
+#if AURORA_FRONTEND_PROFILER
+        AuroraFrontendProfilerAudioDrainEnd();
+#endif
+#if AURORA_C4_PROFILER
+        if(g_AuroraC4ProfilerActive)AuroraC4ProfilerPostAudio((Uint32)(ProfCtrGetCycle()-c4PostAud),FALSE);
+#endif
 
         /* V15 completed presented-host-tick boundary. Commit AFTER the
          * post-VBlank drain because that work occurs before the next Take()
@@ -1263,6 +1430,9 @@ void MainLoopRender()
             ProfCtrGetCycle());
     }
 
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerRenderEnd();
+#endif
     _iFrame++;
 }
 

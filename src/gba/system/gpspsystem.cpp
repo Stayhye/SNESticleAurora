@@ -90,6 +90,29 @@ struct GpSPSystem::Impl
 
 static GpSPSystem::Impl *s_GpSPHost = NULL;
 
+/* AURORA_GBA_BLEND_UI_CFG53_V1_20261004
+ * Aurora owns this gpSP option. Off is the conservative/default path.
+ * Runtime changes are delivered through RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE. */
+static Bool s_GpSPFrameBlending = FALSE;
+static Bool s_GpSPVariablesDirty = FALSE;
+
+Bool GpSPGetFrameBlending(void)
+{
+    return s_GpSPFrameBlending;
+}
+
+void GpSPSetFrameBlending(Bool enabled)
+{
+    const Bool value = enabled ? TRUE : FALSE;
+    if (s_GpSPFrameBlending == value)
+        return;
+    s_GpSPFrameBlending = value;
+    /* If a core is live, request one normal libretro variable refresh.
+     * With no live core, retro_init/load will read the current value directly. */
+    if (s_GpSPHost && s_GpSPHost->initialized)
+        s_GpSPVariablesDirty = TRUE;
+}
+
 static const char *AuroraGpSPVariable(const char *key)
 {
     if (!key) return NULL;
@@ -106,7 +129,7 @@ static const char *AuroraGpSPVariable(const char *key)
     if (!strcmp(key, "gpsp_frameskip_threshold")) return "33";
     if (!strcmp(key, "gpsp_frameskip_interval"))  return "0";
     if (!strcmp(key, "gpsp_color_correction"))    return "disabled"; /* AURORA_GPSP_GBA_V13_PS2_COLOR_CORRECTION_20260911: native GBA LCD colour model */
-    if (!strcmp(key, "gpsp_frame_mixing"))        return "enabled"; /* AURORA_GPSP_GBA_V13_BITMASK_TURBO_INPUT_20260911: default ON */
+    if (!strcmp(key, "gpsp_frame_mixing"))        return GpSPGetFrameBlending() ? "enabled" : "disabled";
     if (!strcmp(key, "gpsp_turbo_period"))        return "4";
     return NULL;
 }
@@ -134,7 +157,8 @@ static bool AuroraGpSPEnvironment(unsigned cmd, void *data)
     if (cmd == RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE)
     {
         if (!data) return false;
-        *(bool *)data = false;
+        *(bool *)data = s_GpSPVariablesDirty ? true : false;
+        s_GpSPVariablesDirty = FALSE;
         return true;
     }
 

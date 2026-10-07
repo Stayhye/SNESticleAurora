@@ -32,6 +32,7 @@ extern "C" {
 #include "nes/quicknes/quicknes_bridge.h" /* QUICKNES_FAMICLONE_HOOK */
 #include "sega/picodrive/picodrive_bridge.h"
 #include "pce/beetle/pce_bridge.h" /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
+#include "gba/system/gpspsystem.h" /* AURORA_GBA_BLEND_UI_CFG53_V1_20261004 */
 #include "mainloop_safe_frameskip.h" /* AURORA_SAFE_FRAMESKIP_GG_ZOOM_V2_2 */
 #include "platform/ps2/system/aurora_runtime_trace.h" /* AURORA_RUNTIME_DEBUGGER_MENU_V5_20260919 */
 #include "platform/ps2/system/aurora_snes_cost_profiler.h" /* AURORA_SNES_COST_PROFILER_V1_20260920 */
@@ -66,7 +67,7 @@ Bool MainLoopReinitVideoMode(Int32 mode);
 /* ------------------------------------------------------------------ */
 
 #define VIDEOCFG_MAGIC   0x53564944u   /* 'SVID' */
-#define VIDEOCFG_VERSION 52 /* AURORA_CONFIG_RESET_DEFAULTS_V52_20260922: v51-and-older -> fresh defaults */
+#define VIDEOCFG_VERSION 53 /* AURORA_GBA_BLEND_UI_CFG53_V1_20261004: append GBA blending; v52 imported intact */
 /* AURORA_CFG_MODE7_FULL_ONCE_V1_6_20260905: 44 -> 45; same-layout migration, Mode7 Full once. */
 /* AURORA_CD_MUSIC_REDBOOK_V3_20260830: v43 appends shared SCD/PCE CD Red Book toggle; old configs default On. */
 /* AURORA_PCE_SCALING_LIGHTGUN_TOGGLE_V2_20260830: v42 appends Light Gun; old configs default On. */
@@ -150,8 +151,10 @@ typedef struct
 	/* AURORA_VOLUME_TFA_N163_V4_20260913: v50 append-only fields. */
 	Int32  gbcvol;        /* internal 0..400; UI /2; default 200 == unity */
 	Int32  gbavol;        /* internal 0..400; UI /2; default 200 == unity */
+	Int32  gbablending; /* v53: gpSP interframe blending, 0=Off, 1=On */
 } VideoCfgT;
-#define VIDEOCFG_V49_BYTES (sizeof(VideoCfgT) - 2 * sizeof(Int32))
+#define VIDEOCFG_V52_BYTES (sizeof(VideoCfgT) - sizeof(Int32))
+#define VIDEOCFG_V49_BYTES (VIDEOCFG_V52_BYTES - 2 * sizeof(Int32))
 #define VIDEOCFG_V46_BYTES (VIDEOCFG_V49_BYTES - sizeof(Int32))
 #define VIDEOCFG_V45_BYTES (VIDEOCFG_V46_BYTES - sizeof(Int32))
 #define VIDEOCFG_V43_BYTES (VIDEOCFG_V45_BYTES - sizeof(Int32))
@@ -509,6 +512,7 @@ void VideoSettingsSave(void)
 	cfg.gameboymode = 0; /* GBC always */
 	cfg.gbcvol = g_GbcVolume;
 	cfg.gbavol = g_GbaVolume;
+	cfg.gbablending = GpSPGetFrameBlending() ? 1 : 0;
 	_VideoCfgPath(path);
 	BgmIOBegin();
 	MemCardWriteFile(path, (Uint8 *)&cfg, sizeof(cfg));
@@ -535,10 +539,12 @@ void VideoSettingsLoad(void)
 	/* AURORA_VOLUME_TFA_N163_V4_20260913: defaults for v49-and-older/missing config. */
 	g_GbcVolume = 200;
 	g_GbaVolume = 200;
+	GpSPSetFrameBlending(FALSE); /* AURORA_GBA_BLEND_UI_CFG53_V1_20261004: conservative default */
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.gameboymode = 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: old configs default GBC */
 	cfg.gbcvol = 200;
 	cfg.gbavol = 200;
+	cfg.gbablending = 0;
 	cfg.lightgun = 1; /* v42 default and all pre-v42 migrations: On */
 	cfg.cdmusic = 1;  /* AURORA_CD_MUSIC_REDBOOK_V3_20260830: pre-v43 default On */
 	QuicknesBridge_SetLightGunEnabled(true);
@@ -568,6 +574,18 @@ void VideoSettingsLoad(void)
 		else if (header.version == VIDEOCFG_VERSION)
 		{
 			loaded = MemCardReadFile(path, (Uint8 *)&cfg, sizeof(cfg));
+		}
+		else if (header.version == 52)
+		{
+			/* AURORA_GBA_BLEND_UI_CFG53_V1_20261004
+			 * v52 is the exact prefix before gbablending. Preserve every
+			 * existing preference and default only the appended field Off. */
+			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V52_BYTES);
+			if (loaded)
+			{
+				cfg.gbablending = 0;
+				cfg.version = VIDEOCFG_VERSION;
+			}
 		}
 		else if (header.version == 49)
 		{
@@ -913,7 +931,7 @@ void VideoSettingsLoad(void)
 	 * Older migrations retain the previous one-time conservative default. */
 	/* AURORA_CFG_LOADER_REBUILD_V1_13_20260905
  * One-time migration exceptions only. */
-if (loaded && header.version != VIDEOCFG_VERSION && header.version != 49)
+if (loaded && header.version != VIDEOCFG_VERSION && header.version != 52 && header.version != 49)
 {
 	cfg.safeframeskip = 1;
 	cfg.sneshackflags &= ~SNPPU_HACK_MODE7_HALF;
@@ -975,6 +993,8 @@ if (loaded && header.version != VIDEOCFG_VERSION && header.version != 49)
 		/* AURORA_VOLUME_TFA_N163_V4_20260913: independent handheld gains. */
 		if (cfg.gbcvol >= 0 && cfg.gbcvol <= 400) g_GbcVolume = cfg.gbcvol;
 		if (cfg.gbavol >= 0 && cfg.gbavol <= 400) g_GbaVolume = cfg.gbavol;
+		if (cfg.gbablending == 0 || cfg.gbablending == 1)
+			GpSPSetFrameBlending(cfg.gbablending ? TRUE : FALSE);
 		if (cfg.bgmtrack >= 1 && cfg.bgmtrack <= 64) BgmSetTrackIndex(cfg.bgmtrack);
 		if (cfg.mdrendering >= 0 && cfg.mdrendering <= 2)
 			PicoDriveBridge_SetRenderingMode(cfg.mdrendering);
@@ -1090,14 +1110,14 @@ static const char *_VideoMmceStatus()
 
 	if (!MmceSupportIsEnabled()) return "Off";
 	if (MmceNeedsRestart())      return "Restart";
-	if (MmceGetLastError() < 0)  return "Driver Error";
+	if (MmceGetLastError() < 0)  return "Driver error";
 	if (!MmceIsLoaded())         return "On";
 
 	slots = MmceGetAvailableSlots();
 	if (slots == 1) return "Slot 1";
 	if (slots == 2) return "Slot 2";
 	if (slots == 3) return "Slots 1+2";
-	return "Not Found";
+	return "Not found";
 }
 
 static const char *_VideoSafeFrameskipStatus()
@@ -1185,7 +1205,7 @@ static const char *_VideoHackSpriteLimiterStatus()
 static const char *_VideoHackSpriteLimiterModeStatus()
 {
 	return SNPPURenderGetObjLimitMode() == SNPPU_OBJ_LIMIT_MODE_SCREEN
-		? "Per Screen" : "Per Scanline";
+		? "Per screen" : "Per scanline";
 }
 
 static const char *_VideoHackCpuOverclockStatus()
@@ -1261,7 +1281,7 @@ static const char *_VideoMx4sioStatus()
 {
 	if (!Mx4sioIsEnabled())       return "Off";
 	if (Mx4sioNeedsRestart())     return "Restart";
-	if (Mx4sioGetLastError() < 0) return "Driver Error";
+	if (Mx4sioGetLastError() < 0) return "Driver error";
 	return Mx4sioIsLoaded() ? "On" : "Enabled";
 }
 
@@ -1311,18 +1331,18 @@ void CVideoScreen::Draw()
 	FontSelect(0);
 
 	_VideoHeader(vy,
-		iPage == 0 ? "Settings Menu (1/5)" :
-		iPage == 1 ? "Settings Menu (2/5)" :
-		iPage == 2 ? "Settings Menu (3/5)" :
-		iPage == 3 ? "Settings Menu (4/5)" :
-		             "Settings Menu (5/5)");
+		iPage == 0 ? "Settings menu (1/5)" :
+		iPage == 1 ? "Settings menu (2/5)" :
+		iPage == 2 ? "Settings menu (3/5)" :
+		iPage == 3 ? "Settings menu (4/5)" :
+		             "Settings menu (5/5)");
 	vy += 18;
 
 	if (iPage == 0) {
 	_VideoHeader(vy, "Screen");
 	vy += 14;
 
-	_VideoRow(vy, 0, m_iSelect, "Video Mode", pMode);  vy += 12;
+	_VideoRow(vy, 0, m_iSelect, "Video mode", pMode);  vy += 12;
 
 	_VideoRow(vy, 1, m_iSelect, "Widescreen", pWide); vy += 12;
 
@@ -1335,14 +1355,16 @@ void CVideoScreen::Draw()
 	snprintf(buf, sizeof(buf), "%d", g_GskDispOffY);
 	_VideoRow(vy, 4, m_iSelect, "Offset Y", buf);      vy += 12;
 
-	_VideoRow(vy, 5, m_iSelect, "Cover Art", CoverIsEnabled() ? "On" : "Off"); vy += 12;
+	_VideoRow(vy, 5, m_iSelect, "Cover art", CoverIsEnabled() ? "On" : "Off"); vy += 12;
 	_VideoRow(vy, 6, m_iSelect, "SMS VDP border",
 	          PicoDriveBridge_GetSmsColorBorder() ? "On" : "Off"); vy += 12;
 #if 0 /* AURORA_V22_VERSION_GGZOOM_HIDDEN_20260912: hidden, implementation intentionally retained */
-	_VideoRow(vy, 7, m_iSelect, "GG Zoom",
+	_VideoRow(vy, 7, m_iSelect, "GG zoom",
 	          PicoDriveBridge_GetGgZoom() ? "On" : "Off"); vy += 12;
 #endif
-	_VideoRow(vy, 8, m_iSelect, "Safe Frameskip",
+	_VideoRow(vy, 9, m_iSelect, "GBA blending",
+	          GpSPGetFrameBlending() ? "On" : "Off"); vy += 12;
+	_VideoRow(vy, 8, m_iSelect, "Safe frameskip",
 	          _VideoSafeFrameskipStatus()); vy += 12;
 
 	}
@@ -1373,15 +1395,15 @@ void CVideoScreen::Draw()
 	}
 	else if (iPage == 4)
 	{
-		_VideoHeader(vy, "Storage / Devices"); vy += 14;
+		_VideoHeader(vy, "Storage devices"); vy += 14;
 
 		_VideoRow(vy, 10, m_iSelect, "Mass / USB",
 		          MassStorageIsEnabled() ? "On" : "Off"); vy += 12;
-		_VideoRow(vy, 11, m_iSelect, "HDD Support",
+		_VideoRow(vy, 11, m_iSelect, "HDD support",
 		          HddSupportIsEnabled() ? "On" : "Off"); vy += 12;
-		_VideoRow(vy, 12, m_iSelect, "MMCE Cards",
+		_VideoRow(vy, 12, m_iSelect, "MMCE cards",
 		          _VideoMmceStatus()); vy += 12;
-		_VideoRow(vy, 13, m_iSelect, "SMB (Network)",
+		_VideoRow(vy, 13, m_iSelect, "SMB (network)",
 		          SmbGetStatusText()); vy += 12;
 		_VideoRow(vy, 14, m_iSelect, "MX4SIO (SD)",
 		          _VideoMx4sioStatus()); vy += 12;
@@ -1390,10 +1412,10 @@ _VideoHeader(vy, "Misc."); vy += 14;
 
 /* AURORA_SWC_FLOPPY_V5_20260831: SRAM Size hidden; Auto forced. */
 
-_VideoRow(vy, 16, m_iSelect, "Force Region",
+_VideoRow(vy, 16, m_iSelect, "Force region",
           _VideoForceRegionStatus()); vy += 12;
 
-_VideoRow(vy, 17, m_iSelect, "Famiclone Audio",
+_VideoRow(vy, 17, m_iSelect, "Famiclone audio",
           _VideoFamicloneAudioStatus()); vy += 12;
 
 _VideoRow(vy, 18, m_iSelect, "Reset emulator", ""); vy += 12;
@@ -1402,14 +1424,14 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 	}
 	else if (iPage == 3)
 	{
-		_VideoHeader(vy, "SNES Hacks"); vy += 14;
-		_VideoRow(vy, 20, m_iSelect, "BG1 Layer",
+		_VideoHeader(vy, "SNES hacks"); vy += 14;
+		_VideoRow(vy, 20, m_iSelect, "BG1 layer",
 			_VideoHackLayerStatus(SNESPPU_MASK_BG1)); vy += 12;
-		_VideoRow(vy, 21, m_iSelect, "BG2 Layer",
+		_VideoRow(vy, 21, m_iSelect, "BG2 layer",
 			_VideoHackLayerStatus(SNESPPU_MASK_BG2)); vy += 12;
-		_VideoRow(vy, 22, m_iSelect, "BG3 Layer",
+		_VideoRow(vy, 22, m_iSelect, "BG3 layer",
 			_VideoHackLayerStatus(SNESPPU_MASK_BG3)); vy += 12;
-		_VideoRow(vy, 23, m_iSelect, "BG4 Layer",
+		_VideoRow(vy, 23, m_iSelect, "BG4 layer",
 			_VideoHackLayerStatus(SNESPPU_MASK_BG4)); vy += 12;
 		_VideoRow(vy, 24, m_iSelect, "Sprites / OBJ",
 			_VideoHackLayerStatus(SNESPPU_MASK_OBJ)); vy += 12;
@@ -1435,10 +1457,10 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 #endif
 #if AURORA_SNES_COST_PROFILER
 #if AURORA_RUNTIME_TRACE
-		_VideoRow(vy, 39, m_iSelect, "SNES Profiler",
+		_VideoRow(vy, 39, m_iSelect, "SNES profiler",
 			AuroraSnesCostProfilerIsEnabled() ? "On" : "Off"); vy += 12;
 #else
-		_VideoRow(vy, 38, m_iSelect, "SNES Profiler",
+		_VideoRow(vy, 38, m_iSelect, "SNES profiler",
 			AuroraSnesCostProfilerIsEnabled() ? "On" : "Off"); vy += 12;
 #endif
 #endif
@@ -1454,9 +1476,9 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 			PicoDriveBridge_Get6Button() ? "6-button" : "3-button"); vy += 12;
 		_VideoRow(vy, 42, m_iSelect, "MD mapping",
 			MainLoopMdPadGetLayoutName()); vy += 12;
-		_VideoRow(vy, 43, m_iSelect, "Turbo Speed",
+		_VideoRow(vy, 43, m_iSelect, "Turbo speed",
 			MainLoopTurboGetSpeedName()); vy += 12;
-		_VideoRow(vy, 44, m_iSelect, "Light Gun",
+		_VideoRow(vy, 44, m_iSelect, "Light gun",
 			QuicknesBridge_GetLightGunEnabled() ? "On" : "Off"); vy += 12;
 	}
 
@@ -1497,7 +1519,21 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 	{
 		/* Audio keeps its historical indices/cases, but navigation follows
 		 * the visual row order: 50-54, 59-60, 55-58. */
-		if (m_iSelect >= 50 && (trigger & (PAD_UP | PAD_DOWN)))
+		if (m_iSelect < 10 && (trigger & (PAD_UP | PAD_DOWN)))
+		{
+			/* AURORA_GBA_BLEND_UI_CFG53_V1_20261004
+			 * Keep legacy IDs stable: hidden GG Zoom=7, Safe Frameskip=8,
+			 * new GBA blending=9. Visual order intentionally places 9 before 8. */
+			static const Int32 order[] = { 0, 1, 2, 3, 4, 5, 6, 9, 8 };
+			const Int32 count = (Int32)(sizeof(order) / sizeof(order[0]));
+			Int32 pos = 0;
+			while (pos < count && order[pos] != m_iSelect) pos++;
+			if (pos >= count) pos = 0;
+			if (trigger & PAD_UP)   pos = (pos + count - 1) % count;
+			if (trigger & PAD_DOWN) pos = (pos + 1) % count;
+			m_iSelect = order[pos];
+		}
+		else if (m_iSelect >= 50 && (trigger & (PAD_UP | PAD_DOWN)))
 		{
 			static const Int32 order[] = { 50, 51, 52, 53, 54, 59, 60, 55, 56, 57, 58 };
 			const Int32 count = (Int32)(sizeof(order) / sizeof(order[0]));
@@ -1624,6 +1660,10 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 			 * Toggle the exact scheduler level: 0=Off, 1=On. */
 			MainLoopSafeFrameskipSetLevel(
 				MainLoopSafeFrameskipGetLevel() > 0 ? 0 : 1);
+			break;
+
+		case 9: /* GBA blending */
+			GpSPSetFrameBlending(!GpSPGetFrameBlending());
 			break;
 
 		case 50: /* Menu Music ON/OFF. */

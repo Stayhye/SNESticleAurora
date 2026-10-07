@@ -9,6 +9,9 @@
 #include "mainloop_shared.h"
 #include "platform/ps2/system/aurora_runtime_trace.h"
 #include "platform/ps2/system/aurora_ee_crash_diag.h"
+#if AURORA_FRONTEND_PROFILER
+#include "platform/ps2/system/aurora_frontend_profiler.h"
+#endif
 
 /* MAINLOOP_SNESSTATEDEBUG lives in mainloop_shared.h (included above). */
 
@@ -61,7 +64,13 @@ Bool _ExecuteSnes(CRenderSurface *pSurface, CMixBuffer *pMixBuffer, Emu::SysInpu
 			AuroraEECrashDiagBreadcrumb(
 			    AED_HOST_FRAME_CALL_ENTER,
 			    (Uint32)_pSystem->GetFrame(), 0u);
+#if AURORA_FRONTEND_PROFILER
+            AuroraFrontendProfilerCoreBegin();
+#endif
 		    _pSystem->ExecuteFrame(pInput, pSurface, pMixBuffer, eMode);
+#if AURORA_FRONTEND_PROFILER
+            AuroraFrontendProfilerCoreEnd();
+#endif
 			AuroraEECrashDiagBreadcrumb(
 			    AED_HOST_FRAME_CALL_RETURN,
 			    (Uint32)_pSystem->GetFrame(), 0u);

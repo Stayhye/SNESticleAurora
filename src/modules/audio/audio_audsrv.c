@@ -43,6 +43,15 @@
 #include <sio.h>
 
 #include "audio.h"
+#include "platform/ps2/system/aurora_frontend_profiler.h"
+#if AURORA_C4_PROFILER
+/* AURORA_C4_AUDIO_C_TYPES_INCLUDE_FIX_V1_20261004
+ * audio_audsrv.c is C: prof.h/proflog.h use Aurora's Int32/Uint32/Bool
+ * typedefs, so types.h must be visible before prof.h. Diagnostic-only. */
+#include "types.h"
+#include "prof.h"
+#include "platform/ps2/system/aurora_c4_profiler.h"
+#endif
 
 /* ScrPrintf goes to the on-screen log (and stays there during the
    splash). Plain printf on EE-side never reaches the emulator console
@@ -192,6 +201,33 @@ static int aud_async_count = 0;
  * rare backlog is repaid gradually instead of one exceptional ~16 KB RPC. */
 static int aud_async_max_burst_samples = AUD_ASYNC_MAX_BURST_SAMPLES;
 static int aud_async_cached_avail = -1;
+#if AURORA_C4_PROFILER
+static AuroraC4AudioDiagT s_C4Audio;
+static void C4AudioObserveQueue(void)
+{
+    Uint32 q=(Uint32)(aud_async_count<0?0:aud_async_count);
+    s_C4Audio.queueCurrent=q;
+    if(!s_C4Audio.queueObs||q<s_C4Audio.queueMin)s_C4Audio.queueMin=q;
+    if(!s_C4Audio.queueObs||q>s_C4Audio.queueMax)s_C4Audio.queueMax=q;
+    s_C4Audio.queueSum+=q;++s_C4Audio.queueObs;
+}
+void AuroraC4AudioDiagReset(void)
+{
+    memset(&s_C4Audio,0,sizeof(s_C4Audio));
+    s_C4Audio.availableFramesMin=0xFFFFFFFFu;
+    C4AudioObserveQueue();
+}
+void AuroraC4AudioDiagRead(AuroraC4AudioDiagT *o){if(o)*o=s_C4Audio;}
+void AuroraC4AudioDiagResample(Uint32 cycles,Uint32 inFrames,Uint32 outFrames)
+{
+    if(!g_AuroraC4ProfilerActive)return;
+    s_C4Audio.resampleCycles+=cycles;
+    s_C4Audio.resampleInFrames+=inFrames;
+    s_C4Audio.resampleOutFrames+=outFrames;
+    ++s_C4Audio.resampleCalls;
+}
+/* AURORA_C4_AUDIO_COST_V8_2_20261004 */
+#endif
 
 void Aud_SetAsyncBurstLimit(int samples)
 {
@@ -374,6 +410,9 @@ static void Aud_AsyncCopyInGain(
     if (second > 0)
         Aud_AsyncPackSegment(0, left + first, right + first, second, gainPct);
     aud_async_count += size;
+#if AURORA_C4_PROFILER
+    if(g_AuroraC4ProfilerActive){s_C4Audio.enqueuedFrames+=(Uint32)size;C4AudioObserveQueue();}
+#endif
 }
 
 static void Aud_AsyncCopyIn(short *left, short *right, int size)
@@ -393,6 +432,9 @@ static int Aud_AsyncDrainOne(int wait)
 
     if (!sjpcm_inited || aud_async_count <= 0)
         return 0;
+#if AURORA_C4_PROFILER
+    if(g_AuroraC4ProfilerActive)++s_C4Audio.drainCalls;
+#endif
 
     n = AUD_ASYNC_FIFO_SAMPLES - aud_async_head;
     if (n > aud_async_count)
@@ -439,7 +481,11 @@ static int Aud_AsyncDrainOne(int wait)
         if (aud_async_cached_avail < 0 ||
             aud_async_cached_avail <= AUD_ASYNC_RING_MARGIN_SAMPLES)
         {
-            aud_async_cached_avail = Aud_Available();
+#if AURORA_C4_PROFILER
+            if(g_AuroraC4ProfilerActive){Uint32 t=ProfCtrGetCycle();aud_async_cached_avail=Aud_Available();s_C4Audio.availableCycles+=(Uint32)(ProfCtrGetCycle()-t);++s_C4Audio.availableCalls;if(aud_async_cached_avail>=0){Uint32 av=(Uint32)aud_async_cached_avail;s_C4Audio.availableFramesSum+=av;if(!s_C4Audio.availableFrameObs||av<s_C4Audio.availableFramesMin)s_C4Audio.availableFramesMin=av;if(!s_C4Audio.availableFrameObs||av>s_C4Audio.availableFramesMax)s_C4Audio.availableFramesMax=av;++s_C4Audio.availableFrameObs;}}
+            else
+#endif
+            { aud_async_cached_avail = Aud_Available(); }
         }
 
         if (aud_async_cached_avail <= AUD_ASYNC_RING_MARGIN_SAMPLES)
@@ -463,8 +509,11 @@ static int Aud_AsyncDrainOne(int wait)
         /* <= 16380 bytes in Standard mode: exactly one maximum-sized
            PLAY_AUDIO copy in PS2SDK's EE staging buffer. audsrv may accept
            only a prefix; consume exactly the complete stereo frames reported. */
-        sent_bytes = audsrv_play_audio(
-            (const char *)&_async_stereo[aud_async_head], bytes);
+#if AURORA_C4_PROFILER
+        if(g_AuroraC4ProfilerActive){Uint32 t=ProfCtrGetCycle();s_C4Audio.requestedFrames+=(Uint32)n;sent_bytes=audsrv_play_audio((const char *)&_async_stereo[aud_async_head],bytes);s_C4Audio.playCycles+=(Uint32)(ProfCtrGetCycle()-t);++s_C4Audio.playCalls;}
+        else
+#endif
+        { sent_bytes = audsrv_play_audio((const char *)&_async_stereo[aud_async_head], bytes); }
         if (sent_bytes <= 0)
         {
             aud_async_cached_avail = -1;
@@ -484,11 +533,17 @@ static int Aud_AsyncDrainOne(int wait)
            request, some assumption changed (for example another producer).
            Never carry a potentially optimistic cache into the next drain. */
         short_write = (sent_frames < n) ? 1 : 0;
+#if AURORA_C4_PROFILER
+        if(g_AuroraC4ProfilerActive){s_C4Audio.sentFrames+=(Uint32)sent_frames;if(short_write)++s_C4Audio.shortWrites;}
+#endif
 
         aud_async_head += sent_frames;
         if (aud_async_head >= AUD_ASYNC_FIFO_SAMPLES)
             aud_async_head -= AUD_ASYNC_FIFO_SAMPLES;
         aud_async_count -= sent_frames;
+#if AURORA_C4_PROFILER
+        if(g_AuroraC4ProfilerActive)C4AudioObserveQueue();
+#endif
 
         if (short_write)
         {
@@ -502,6 +557,9 @@ static int Aud_AsyncDrainOne(int wait)
         }
 
         sjpcm_playing = 1;
+#if AURORA_FRONTEND_PROFILER
+        AuroraFrontendProfilerAudioDrainFrames((Uint32)sent_frames);
+#endif
         return sent_frames;
     }
 }
@@ -910,6 +968,9 @@ void Aud_Enqueue(short *left, short *right, int size, int wait)
 void Aud_BufferedAsyncStart(void)
 {
     int budget = aud_compat_small_chunks ? 4 : 1;
+#if AURORA_C4_PROFILER
+    if(g_AuroraC4ProfilerActive)++s_C4Audio.asyncStartCalls;
+#endif
 
     while (budget-- > 0 && aud_async_count > 0)
     {
@@ -945,7 +1006,12 @@ void Aud_EnqueueAsync(short *left, short *right, int size)
      * already-staged sample in order and drop only this NEW block. Under
      * normal operation this branch is never reached. */
     if (aud_async_count + size > AUD_ASYNC_FIFO_SAMPLES)
+    {
+#if AURORA_C4_PROFILER
+        if(g_AuroraC4ProfilerActive){s_C4Audio.droppedFrames+=(Uint32)size;C4AudioObserveQueue();}
+#endif
         return;
+    }
 
     Aud_AsyncCopyIn(left, right, size);
 }
@@ -964,9 +1030,27 @@ void Aud_EnqueueAsyncGain(
         size = AUD_MAX_ENQUEUE_SAMPLES;
 
     if (aud_async_count + size > AUD_ASYNC_FIFO_SAMPLES)
+    {
+#if AURORA_C4_PROFILER
+        if(g_AuroraC4ProfilerActive){s_C4Audio.droppedFrames+=(Uint32)size;C4AudioObserveQueue();}
+#endif
         return;
+    }
 
-    Aud_AsyncCopyInGain(left, right, size, gainPct);
+#if AURORA_C4_PROFILER
+    if(g_AuroraC4ProfilerActive)
+    {
+        Uint32 c4PackStart=ProfCtrGetCycle();
+        Aud_AsyncCopyInGain(left, right, size, gainPct);
+        s_C4Audio.packCycles+=(Uint32)(ProfCtrGetCycle()-c4PackStart);
+        s_C4Audio.packFrames+=(Uint32)size;
+        ++s_C4Audio.packCalls;
+    }
+    else
+#endif
+    {
+        Aud_AsyncCopyInGain(left, right, size, gainPct);
+    }
 }
 
 

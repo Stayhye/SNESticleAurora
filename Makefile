@@ -229,12 +229,21 @@ PACK       ?= 1
 
 IRX_DIR     ?= $(PS2SDK)/iop/irx
 
+# AURORA_C4_PROFILER_V8_20261003
+AURORA_C4_PROFILER ?= 0
+# AURORA_FRONTEND_PROFILER_V3_FINAL_20261004
+AURORA_FRONTEND_PROFILER ?= 0
+# V8 reuses the existing exclusive cost-scope profiler only in C4 builds.
+ifneq ($(filter-out 0,$(AURORA_C4_PROFILER)),)
+override AURORA_SNES_COST_PROFILER := 1
+endif
+
 # SNES_DIAGNOSTICS=1 enables the low-overhead, once-per-second general
 # CPU/PPU/GS report.  SNES_DIAGNOSTICS=2 also enables deep OBJ/DMA hashes,
 # per-scanline staging validation and per-instruction GSU counters.  Keep the
 # deep mode for short captures because its probes are measurable work on EE.
 SNES_DIAGNOSTICS ?= 0
-SNES_DIAG_ENABLED := $(if $(filter-out 0,$(SNES_DIAGNOSTICS)),1,0)
+SNES_DIAG_ENABLED := $(if $(filter-out 0,$(SNES_DIAGNOSTICS) $(AURORA_C4_PROFILER)),1,0)
 SNES_DIAG_DEEP := $(if $(filter 2,$(SNES_DIAGNOSTICS)),1,0)
 
 # Cache CHR fisico compartilhado: OBJ 4bpp consulta diretamente o tile
@@ -478,6 +487,21 @@ CXXFLAGS += -DAURORA_RUNTIME_TRACE=$(AURORA_RUNTIME_TRACE)
 AURORA_SNES_COST_PROFILER ?= 0
 CFLAGS   += -DAURORA_SNES_COST_PROFILER=$(AURORA_SNES_COST_PROFILER)
 CXXFLAGS += -DAURORA_SNES_COST_PROFILER=$(AURORA_SNES_COST_PROFILER)
+
+# AURORA_SMK_PROFILER_V1_20261003
+# Exact-CRC Super Mario Kart DSP-1/Mode7 profiler. =0 removes the
+# implementation object and every hot-path hook at preprocessing time.
+# =1 auto-activates only for clean USA/Japan/Europe SMK CRC32 identities
+# and writes a timestamped mass0: text dump when the pause menu opens.
+AURORA_SMK_PROFILER ?= 0
+CFLAGS   += -DAURORA_SMK_PROFILER=$(AURORA_SMK_PROFILER)
+CXXFLAGS += -DAURORA_SMK_PROFILER=$(AURORA_SMK_PROFILER)
+
+# AURORA_C4_PROFILER_V8_20261003: implementation/calls compile out at =0.
+CFLAGS   += -DAURORA_C4_PROFILER=$(AURORA_C4_PROFILER)
+CXXFLAGS += -DAURORA_C4_PROFILER=$(AURORA_C4_PROFILER)
+CFLAGS   += -DAURORA_FRONTEND_PROFILER=$(AURORA_FRONTEND_PROFILER)
+CXXFLAGS += -DAURORA_FRONTEND_PROFILER=$(AURORA_FRONTEND_PROFILER)
 
 # AURORA_SNES_DEBUG_STATE_V34_FINAL_20261002
 # Generic manual SNES laboratory snapshot.  =0 removes the UI row, writer
@@ -814,6 +838,17 @@ endif
 ifeq ($(AURORA_SNES_COST_PROFILER),1)
 SRCS += src/platform/ps2/system/aurora_snes_cost_profiler.cpp
 endif
+ifeq ($(AURORA_SMK_PROFILER),1)
+SRCS += src/platform/ps2/system/aurora_smk_profiler.cpp
+endif
+
+ifeq ($(AURORA_C4_PROFILER),1)
+SRCS += src/platform/ps2/system/aurora_c4_profiler.cpp
+endif
+
+ifeq ($(AURORA_FRONTEND_PROFILER),1)
+SRCS += src/platform/ps2/system/aurora_frontend_profiler.cpp
+endif
 
 # AURORA_SNES_DEBUG_STATE_V34_FINAL_20261002: compile the writer only in debug-state builds.
 ifeq ($(AURORA_SNES_DEBUG_STATE),1)
@@ -989,7 +1024,7 @@ FORCE_COMPILE_MODE:
 
 $(BUILD_CONFIG_FILE): FORCE_COMPILE_MODE | $(OBJ_DIR)
 	@mkdir -p "$(BUILD_META_DIR)"; \
-	mode='SNES_DIAGNOSTICS=$(SNES_DIAGNOSTICS) SNES_OBJ_CACHE=$(SNES_OBJ_CACHE) SNES_BG_CACHE=$(SNES_BG_CACHE) SNES_CHR_HFLIP_CACHE=$(SNES_CHR_HFLIP_CACHE) PROFILE=$(PROFILE) DSP4_CAPTURE=$(DSP4_CAPTURE) DSP4_STUB=$(DSP4_STUB) AURORA_SNES_COST_PROFILER=$(AURORA_SNES_COST_PROFILER) AURORA_RUNTIME_TRACE=$(AURORA_RUNTIME_TRACE) AURORA_EE_CRASH_DIAG=$(AURORA_EE_CRASH_DIAG) AURORA_EE_WATCHDOG_SELFTEST=$(AURORA_EE_WATCHDOG_SELFTEST) AURORA_SNES_DEBUG_STATE=$(AURORA_SNES_DEBUG_STATE) AURORA_SNES_TRACER=$(AURORA_SNES_TRACER)'; \
+	mode='SNES_DIAGNOSTICS=$(SNES_DIAGNOSTICS) SNES_OBJ_CACHE=$(SNES_OBJ_CACHE) SNES_BG_CACHE=$(SNES_BG_CACHE) SNES_CHR_HFLIP_CACHE=$(SNES_CHR_HFLIP_CACHE) PROFILE=$(PROFILE) DSP4_CAPTURE=$(DSP4_CAPTURE) DSP4_STUB=$(DSP4_STUB) AURORA_SNES_COST_PROFILER=$(AURORA_SNES_COST_PROFILER) AURORA_SMK_PROFILER=$(AURORA_SMK_PROFILER) AURORA_RUNTIME_TRACE=$(AURORA_RUNTIME_TRACE) AURORA_EE_CRASH_DIAG=$(AURORA_EE_CRASH_DIAG) AURORA_EE_WATCHDOG_SELFTEST=$(AURORA_EE_WATCHDOG_SELFTEST) AURORA_SNES_DEBUG_STATE=$(AURORA_SNES_DEBUG_STATE) AURORA_SNES_TRACER=$(AURORA_SNES_TRACER) AURORA_C4_PROFILER=$(AURORA_C4_PROFILER) AURORA_FRONTEND_PROFILER=$(AURORA_FRONTEND_PROFILER)'; \
 	if [ ! -f "$@" ] || [ "$$(cat "$@")" != "$$mode" ]; then \
 		printf '%s\n' "$$mode" > "$@"; \
 	fi
@@ -1894,8 +1929,10 @@ help:
 	printf "  SHOW_WARN_LOG=1              Print full warning logs\n"; \
 	printf "  VERBOSE=1                    Show full warning AND error text (no truncation)\n"; \
 	printf "  PROFILE=1                    Enable on-screen profiler (press R3 in-game)\n"; \
+printf "  AURORA_SMK_PROFILER=1        Auto-profile clean SMK; dump on menu open\n"; \
 	printf "  SNES_DIAGNOSTICS=1           Low-overhead general SNES/GS performance report\n"; \
 	printf "  SNES_DIAGNOSTICS=2           Deep OBJ/DMA/GSU capture (measurable overhead)\n"; \
+printf "  AURORA_C4_PROFILER=1         Unified cursed-four profiler; dump on menu open\n"; \
 	printf "  SNES_OBJ_CACHE=0             Disable shared CHR cache for OBJ A/B only\n"; \
 	printf "  SNES_BG_CACHE=1              Enable experimental BG CHR cache for A/B only\n"; \
 	printf "  SNES_CHR_HFLIP_CACHE=0       Disable pre-flipped 4bpp rows for Top Gear A/B\n"; \

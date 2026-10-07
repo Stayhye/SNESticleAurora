@@ -23,6 +23,10 @@
 #include "types.h"
 #include "snes.h"
 #include "sndsp1.h"
+#if AURORA_SMK_PROFILER
+#include "prof.h"
+#include "platform/ps2/system/aurora_smk_profiler.h"
+#endif
 
 #include <string.h>
 
@@ -769,6 +773,10 @@ void SNDSP1::Execute(Uint8 uCmd)
     Int16 *in  = m_InWords;
     Int16 *out = m_OutWords;
     Uint8 c    = (Uint8)(uCmd & 0x3F);
+#if AURORA_SMK_PROFILER
+    const Bool bSmkProfile = g_AuroraSmkProfilerActive;
+    const Uint32 uSmkProfileStart = bSmkProfile ? ProfCtrGetCycle() : 0u;
+#endif
 
     switch (c)
     {
@@ -1076,6 +1084,11 @@ void SNDSP1::Execute(Uint8 uCmd)
         memset(out, 0, sizeof(m_OutWords));
         break;
     }
+#if AURORA_SMK_PROFILER
+    if (bSmkProfile)
+        AuroraSmkProfilerDsp1Command(
+            c, (Uint32)(ProfCtrGetCycle() - uSmkProfileStart));
+#endif
 }
 
 //==========================================================================

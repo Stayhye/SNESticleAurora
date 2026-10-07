@@ -69,7 +69,7 @@ void CLogScreen::Draw()
 	FontColor4f(0.0, 0.8f, 0.8f, 1.0f);
 
 	vx = 10;
-	_MenuHeader(vy, "Message Log");
+	_MenuHeader(vy, "Message log");
 	vy+=FontGetHeight() * 2;
 
 	FontColor4f(1.0f, 1.0f, 1.0f, 1.0f);   // -> amber via FontColor4f remap

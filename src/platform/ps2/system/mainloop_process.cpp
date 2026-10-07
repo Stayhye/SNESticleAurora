@@ -22,6 +22,12 @@
 #include "mainloop_exec.h"
 #include "mainloop_safe_frameskip.h" /* AURORA_SAFE_FRAMESKIP_GG_ZOOM_V2_2 */
 #include "platform/ps2/system/aurora_runtime_trace.h"
+#if AURORA_FRONTEND_PROFILER
+#include "platform/ps2/system/aurora_frontend_profiler.h"
+#endif
+#if AURORA_C4_PROFILER
+#include "platform/ps2/system/aurora_c4_profiler.h"
+#endif
 #include "snppurender.h"
 #include "mainloop_iop.h"
 #include "sega/picodrive/picodrive_bridge.h"
@@ -88,14 +94,27 @@ Bool MainLoopProcess()
      * Runtime trace is controlled only by the visible settings row now.
      * No per-frame controller chord state is maintained. */
 
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerTickBegin();
+#endif
     PROF_ENTER("Frame");
+#if AURORA_C4_PROFILER
+    AuroraC4ProfilerHostTickBegin((!_bMenu && _pSystem == _pSnes && !_MainLoop_BlackScreen) ? TRUE : FALSE);
+#endif
 
     /* AURORA_RUNTIME_LEAN_V1_FRONTEND_20260824
      * NetPlayRPCProcess() is a permanent empty compatibility stub now that
      * netplay runs directly on the EE. Do not pay a cross-TU call every frame. */
 
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerInputPollBegin();
+#endif
     PROF_ENTER("InputProcess");
     InputPoll();
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerInputPollEnd();
+    AuroraFrontendProfilerInputSnapshotBegin();
+#endif
 
     PROF_LEAVE("InputProcess");
 
@@ -121,8 +140,33 @@ Bool MainLoopProcess()
 	        | uPadAnalogDpadSnapshot[0] | uPadAnalogDpadSnapshot[1]
 	        | uPadAnalogDpadSnapshot[2] | uPadAnalogDpadSnapshot[3];
 
+#if AURORA_FRONTEND_PROFILER
+        AuroraFrontendProfilerFrontendInputBegin();
+#endif
 	    _MainLoopInputProcess(buttons);
+#if AURORA_FRONTEND_PROFILER
+        AuroraFrontendProfilerFrontendInputEnd();
+#endif
 	}
+#if AURORA_FRONTEND_PROFILER
+    {
+        Uint32 fpCore = AURORA_FP_CORE_NONE;
+        if (_pSystem == _pSnes) fpCore = AURORA_FP_CORE_SNES;
+        else if (_pSystem == _pNes) fpCore = AURORA_FP_CORE_NES;
+        else if (_pSystem == _pFds) fpCore = AURORA_FP_CORE_FDS;
+        else if (_pSystem == _pSega) fpCore = AURORA_FP_CORE_SEGA;
+        else if (_pSystem == _pPce) fpCore = AURORA_FP_CORE_PCE;
+        else if (_pSystem == _pGb) fpCore = AURORA_FP_CORE_GB;
+        else if (_pSystem == _pGba) fpCore = AURORA_FP_CORE_GBA;
+        const Uint32 fpState =
+            (!_bMenu && _pSystem && !_MainLoop_BlackScreen)
+                ? AURORA_FP_GAMEPLAY
+                : ((_bMenu && _pSystem)
+                    ? AURORA_FP_MENU_WITH_CORE
+                    : AURORA_FP_IDLE_UI);
+        AuroraFrontendProfilerSetContext(fpState, fpCore);
+    }
+#endif
 
     /* AURORA_EMPTY_FRONTEND_INVARIANT_V1_20260914
      * Defensive invariant backstop: no active System means there is
@@ -401,6 +445,15 @@ Bool MainLoopProcess()
              * shared by SNES/reference emulator/QuickNES/PicoDrive/PCE. */
             const Bool bSafeSkip =
                 MainLoopSafeFrameskipTake(bSafeFrameskipAllowed);
+#if AURORA_FRONTEND_PROFILER
+            AuroraFrontendProfilerSafeFrameskip(
+                MainLoopSafeFrameskipGetEnabled(),
+                bSafeFrameskipAllowed,
+                bSafeSkip);
+#endif
+#if AURORA_C4_PROFILER
+            AuroraC4ProfilerFrameskipDecision(MainLoopSafeFrameskipGetEnabled(),bSafeFrameskipAllowed,bSafeSkip);
+#endif
             if (!bSafeSkip)
                 GPPrimDisableZBuf();
 
@@ -414,14 +467,26 @@ Bool MainLoopProcess()
             if (_pSystem == _pNes)
             {
                 QuicknesBridge_SetSkipVideo(bSafeSkip ? true : false);
+                #if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerCoreBegin();
+#endif
                 PROF_ENTER("NesExecuteFrame");
                 _pNes->ExecuteFrame(&Input, pSurface, pMixBuffer, eMode);
                 PROF_LEAVE("NesExecuteFrame");
+#if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerCoreEnd();
+#endif
                 if (!bSafeSkip && !QuicknesBridge_CanDirectGsVideo())
                 {
-                    PROF_ENTER("NesTexUpload");
+                    #if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerUploadBegin();
+#endif
+                PROF_ENTER("NesTexUpload");
                     TextureUpload(&_OutTex, pSurface->GetLinePtr(0));
                     PROF_LEAVE("NesTexUpload");
+#if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerUploadEnd();
+#endif
                 }
             }
             else if (_pSystem == _pFds)
@@ -430,9 +495,15 @@ Bool MainLoopProcess()
                 /* AURORA_FCEUMM_FDS_V12_3B_BRIDGE_HOTPATH_FIX_20260827: bridge skip is one-shot; false is already the default. */
                 if (bSafeSkip)
                     FceummFdsBridge_SetSkipVideo(true);
+                #if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerCoreBegin();
+#endif
                 PROF_ENTER("FdsExecuteFrame");
                 _pFds->ExecuteFrame(&Input, pSurface, pMixBuffer, eMode);
                 PROF_LEAVE("FdsExecuteFrame");
+#if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerCoreEnd();
+#endif
                 {
                     /* AURORA_FCEUMM_FDS_V12_3B_BRIDGE_HOTPATH_FIX_20260827: drive state changes only on load/eject/insert/restore. */
                     unsigned fdsSide = 0;
@@ -455,9 +526,15 @@ Bool MainLoopProcess()
                  * Keep the historical RGBA upload only as a fallback. */
                 if (!bSafeSkip && !FceummFdsBridge_CanDirectGsVideo())
                 {
-                    PROF_ENTER("FdsTexUpload");
+                    #if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerUploadBegin();
+#endif
+                PROF_ENTER("FdsTexUpload");
                     TextureUpload(&_OutTex, pSurface->GetLinePtr(0));
                     PROF_LEAVE("FdsTexUpload");
+#if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerUploadEnd();
+#endif
                 }
             }
             else if (_pSystem == _pSega)
@@ -579,6 +656,9 @@ Bool MainLoopProcess()
 
                 /* AURORA_ASYNC_CDDA_VIDEO_ABSOLUTE_V4_20260830
                  * No CDDA storage work is permitted on this thread. */
+                #if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerCoreBegin();
+#endif
                 PROF_ENTER("SegaExecuteFrame");
                 for (Int32 iPdFrame = 0;
                      iPdFrame < executeFrames;
@@ -604,6 +684,9 @@ Bool MainLoopProcess()
                         &Input, pSurface, pMixBuffer, eMode);
                 }
                 PROF_LEAVE("SegaExecuteFrame");
+#if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerCoreEnd();
+#endif
 
                 /* AURORA_ASYNC_CDDA_VIDEO_ABSOLUTE_V4_20260830
                  * CDDA underrun is audio loss only; it never requests a skip. */
@@ -615,35 +698,59 @@ Bool MainLoopProcess()
 
                 if (!bSafeSkip && !bDirectSega && executeFrames > 0)
                 {
-                    PROF_ENTER("SegaTexUpload");
+                    #if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerUploadBegin();
+#endif
+                PROF_ENTER("SegaTexUpload");
                     TextureUpload(&_OutTex, pSurface->GetLinePtr(0));
                     PROF_LEAVE("SegaTexUpload");
+#if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerUploadEnd();
+#endif
                 }
             }
             else if (_pSystem == _pPce)
             {
                 /* AURORA_ASYNC_CDDA_VIDEO_ABSOLUTE_V4_20260830 */
                 PceBridge_SetSkipVideo(bSafeSkip ? true : false);
+                #if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerCoreBegin();
+#endif
                 PROF_ENTER("PceExecuteFrame");
                 _pPce->ExecuteFrame(&Input, pSurface, pMixBuffer, eMode);
                 PROF_LEAVE("PceExecuteFrame");
+#if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerCoreEnd();
+#endif
                 /* AURORA_ASYNC_CDDA_VIDEO_ABSOLUTE_V4_20260830
                  * CDDA underrun cannot influence presentation timing. */
 
                 /* AURORA_PCE_V10_DIRECT_PROCESS */
                 if (!bSafeSkip && !PceBridge_CanDirectGsVideo())
                 {
-                    PROF_ENTER("PceTexUploadFallback");
+                    #if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerUploadBegin();
+#endif
+                PROF_ENTER("PceTexUploadFallback");
                     TextureUpload(&_OutTex, pSurface->GetLinePtr(0));
                     PROF_LEAVE("PceTexUploadFallback");
+#if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerUploadEnd();
+#endif
                 }
             }
             else if (_pSystem == _pGb)
             {
+                #if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerCoreBegin();
+#endif
                 PROF_ENTER("GbExecuteFrame");
                 _pGb->ExecuteFrame(&Input,
                     bSafeSkip ? NULL : pSurface, pMixBuffer, eMode);
                 PROF_LEAVE("GbExecuteFrame");
+#if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerCoreEnd();
+#endif
 
                 if (!bSafeSkip)
                 {
@@ -651,9 +758,15 @@ Bool MainLoopProcess()
                      * r5 executed Gambatte via the generic/SNES branch, but
                      * SNES presentation never uploads a generic RGBA surface.
                      * Standalone GB is software video, so upload it explicitly. */
-                    PROF_ENTER("GbTexUpload");
+                    #if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerUploadBegin();
+#endif
+                PROF_ENTER("GbTexUpload");
                     TextureUpload(&_OutTex, pSurface->GetLinePtr(0));
                     PROF_LEAVE("GbTexUpload");
+#if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerUploadEnd();
+#endif
                 }
             }
             else if (_pSystem == _pGba)
@@ -670,10 +783,16 @@ Bool MainLoopProcess()
                     _AudMix->SetFrameRateRational(uRateNum, uRateDen);
                 }
 
+                #if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerCoreBegin();
+#endif
                 PROF_ENTER("GbaExecuteFrame");
                 _pGba->ExecuteFrame(&Input,
                     bSafeSkip ? NULL : pSurface, pMixBuffer, eMode);
                 PROF_LEAVE("GbaExecuteFrame");
+#if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerCoreEnd();
+#endif
 
                 /* AURORA_GPSP_GBA_V16_DIRECT_GS_CT16_20260912
                  * Normal 240x160 gpSP frames stay 16-bit and are uploaded by
@@ -681,9 +800,15 @@ Bool MainLoopProcess()
                  * defensive/future geometry fallbacks. */
                 if (!bSafeSkip && !_pGba->CanDirectGsVideo())
                 {
-                    PROF_ENTER("GbaTexUploadFallback");
+                    #if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerUploadBegin();
+#endif
+                PROF_ENTER("GbaTexUploadFallback");
                     TextureUpload(&_OutTex, pSurface->GetLinePtr(0));
                     PROF_LEAVE("GbaTexUploadFallback");
+#if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerUploadEnd();
+#endif
                 }
             }
             else
@@ -707,8 +832,14 @@ Bool MainLoopProcess()
 						uSnesMouseButtons);
 				_SnesMouseWasActive = bSnesMouse;
 				{
+					#if AURORA_C4_PROFILER
+					AuroraC4ProfilerHostCoreBegin();
+					#endif
 					_ExecuteSnes(bSafeSkip ? NULL : pSurface,
 					             pMixBuffer, &Input, eMode);
+					#if AURORA_C4_PROFILER
+					AuroraC4ProfilerHostCoreEnd();
+					#endif
 				}
             }
 		    _iframetex^=1;
@@ -729,7 +860,13 @@ Bool MainLoopProcess()
     if (_bMenu)
         _MenuRuntimeUpdate();
 
+#if AURORA_C4_PROFILER
+	AuroraC4ProfilerHostRenderBegin();
+#endif
 	MainLoopRender();
+#if AURORA_C4_PROFILER
+	AuroraC4ProfilerHostRenderEnd();
+#endif
 
 	/* AURORA_MOUSE_EXPLICIT_V4: no SIF mouse RPC in Off/Controller,
 	   menus, NES, SMS or GG. First resumed USB frame only drains stale motion. */
@@ -752,6 +889,12 @@ Bool MainLoopProcess()
      * controller and never one tick per PicoDrive core frame. */
     MainLoopTurboAdvanceHostFrame();
 
+#if AURORA_C4_PROFILER
+    AuroraC4ProfilerHostTickEnd();
+#endif
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerTickEnd();
+#endif
     PROF_LEAVE("Frame");
 
     #if PROF_ENABLED

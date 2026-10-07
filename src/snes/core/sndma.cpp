@@ -15,6 +15,10 @@ extern "C" {
 #include "sndbglog.h"
 #include "sntiming.h"
 #include "platform/ps2/system/aurora_runtime_trace.h"
+#include "platform/ps2/system/aurora_snes_cost_profiler.h" /* AURORA_SNES_DEEP_OPT_V3_14_20261005 */
+#if AURORA_C4_PROFILER
+#include "platform/ps2/system/aurora_c4_profiler.h"
+#endif
 
 #define SNESDMA_DEBUG 0
 
@@ -642,6 +646,13 @@ void SnesDMAC::TransferData(SnesDMAChT *pChan, Uint8 *pData, Int32 nBytes)
     Uint32 uChan = (Uint32)(pChan - m_Channels);
     Uint8 uPhase = m_MDMAPhase[uChan] & 3;
     Int32 nOriginalBytes = nBytes;
+#if AURORA_C4_PROFILER
+    if (g_AuroraC4ProfilerActive && nOriginalBytes > 0 && !(pChan->dmapx & 0x80))
+        AuroraC4ProfilerPpuWriteBurst(
+            AURORA_C4_PPUWRITE_MDMA, pChan->bbadx,
+            _SNDma_MDMATransfer[pChan->dmapx & 7], uPhase,
+            (Uint32)nOriginalBytes);
+#endif
 
     /* A->B MDMA leaves the last A-bus source byte on MDR. */
     if (nBytes > 0)
@@ -809,6 +820,11 @@ void SnesDMAC::ProcessMDMAChAccurate(Uint32 uChan)
 		uPhase = (Uint8)((uPhase + 1) & 3);
 
 		uData = SnesDMAReadA(m_pCPU, uAddrA);
+#if AURORA_C4_PROFILER
+		if (g_AuroraC4ProfilerActive && uPortB < 0x40)
+			AuroraC4ProfilerPpuWrite(
+				AURORA_C4_PPUWRITE_MDMA, (Uint32)uPortB, 1u);
+#endif
 
 		/* AURORA_MDMA_ACCURATE_PPU_ORDERING_V39_20261002
 		 * MDMA entry has already synchronized the queued PPU timeline.
@@ -1235,7 +1251,32 @@ void SnesDMAC::ProcessMDMA()
                 if (m_pCPU->Cycles <= 0)
                     return;
             }
+/* AURORA_SNES_DEEP_V3144_MDMA_SPLIT */
+#if AURORA_FRONTEND_PROFILER
+            SnesDMAChT *pAuroraDmaChan = &m_Channels[uChan];
+            const Uint32 uAuroraDmaMask = 1u << uChan;
+            const Uint32 uAuroraDmaBefore = pAuroraDmaChan->dasx ? pAuroraDmaChan->dasx : 0x10000u;
+            Uint32 uAuroraDmaBucket;
+            if (pAuroraDmaChan->dmapx & 0x80)
+                uAuroraDmaBucket = AURORA_SNES_DEEP_MDMA_READ;
+            else if ((((pAuroraDmaChan->dmapx >> 3) & 3) == 2) ||
+                     SnesDMAChannelNeedsAccurateBus(pAuroraDmaChan))
+                uAuroraDmaBucket = AURORA_SNES_DEEP_MDMA_ACCURATE;
+            else if (m_pSDD1 && (pAuroraDmaChan->dmapx & 0x08) && m_pSDD1->DmaActive())
+                uAuroraDmaBucket = AURORA_SNES_DEEP_MDMA_SDD1;
+            else
+                uAuroraDmaBucket = AURORA_SNES_DEEP_MDMA_FAST;
+            const Uint32 uAuroraDmaStart = ProfCtrGetCycle();
+#endif
             ProcessMDMAChFast(uChan);
+#if AURORA_FRONTEND_PROFILER
+            const Uint32 uAuroraDmaAfter = (m_MDMAEnable & uAuroraDmaMask)
+                ? (pAuroraDmaChan->dasx ? pAuroraDmaChan->dasx : 0x10000u) : 0u;
+            const Uint32 uAuroraDmaBytes = uAuroraDmaBefore >= uAuroraDmaAfter
+                ? uAuroraDmaBefore - uAuroraDmaAfter : 0u;
+            AURORA_SNES_DEEP_RECORD(uAuroraDmaBucket,
+                ProfCtrGetCycle() - uAuroraDmaStart, uAuroraDmaBytes);
+#endif
         }
         else
         {
@@ -1256,6 +1297,12 @@ void SnesDMAC::ProcessHDMA(Uint32 uLine)
 
 	if (!uActive)
 		return;
+/* AURORA_SNES_DEEP_V3144_HDMA_START */
+#if AURORA_FRONTEND_PROFILER
+	const Uint32 uAuroraHdmaDataStart = ProfCtrGetCycle();
+	Uint32 uAuroraHdmaBytes = 0;
+	Uint32 uAuroraHdmaActiveChannels = 0;
+#endif
 
 #if SNDBG_LOG
 	Uint32 _tHDMAData = ProfCtrGetCycle();
@@ -1284,7 +1331,26 @@ void SnesDMAC::ProcessHDMA(Uint32 uLine)
 #if SNDBG_LOG
 			g_DbgHDMATransferChannels++;
 #endif
+#if AURORA_C4_PROFILER
+			const SnesDMAChT *pC4Chan = &m_Channels[uChan];
+			const Uint8 c4Dmap = pC4Chan->dmapx;
+			const Uint8 c4Bbad = pC4Chan->bbadx;
+			const Uint32 c4Bytes = _SNDma_HDMABytes[c4Dmap & 7u];
+			if (g_AuroraC4ProfilerActive && !(c4Dmap & 0x80u))
+				AuroraC4ProfilerPpuWriteBurst(
+					AURORA_C4_PPUWRITE_HDMA, c4Bbad,
+					_SNDma_MDMATransfer[c4Dmap & 7u], 0u, c4Bytes);
+#endif
+/* AURORA_SNES_DEEP_V3144_HDMA_BYTES */
+#if AURORA_FRONTEND_PROFILER
+			uAuroraHdmaBytes += _SNDma_HDMABytes[m_Channels[uChan].dmapx & 7];
+#endif
 			ProcessHDMACh(uChan, uLine);
+#if AURORA_C4_PROFILER
+			if (g_AuroraC4ProfilerActive)
+				AuroraC4ProfilerHdmaTransfer(
+					uChan, c4Dmap, c4Bbad, c4Bytes);
+#endif
 		}
 	}
 
@@ -1293,6 +1359,12 @@ void SnesDMAC::ProcessHDMA(Uint32 uLine)
 	Uint32 _tHDMATable = ProfCtrGetCycle();
 #endif
 
+/* AURORA_SNES_DEEP_V3144_HDMA_PHASE */
+#if AURORA_FRONTEND_PROFILER
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_HDMA_DATA_PHASE,
+	    ProfCtrGetCycle() - uAuroraHdmaDataStart, uAuroraHdmaBytes);
+	const Uint32 uAuroraHdmaTableStart = ProfCtrGetCycle();
+#endif
 	for (Uint32 uChan = 0; uChan < SNESDMAC_CHANNEL_NUM; uChan++)
 	{
 		Uint8 uMask = (Uint8)(1 << uChan);
@@ -1301,12 +1373,20 @@ void SnesDMAC::ProcessHDMA(Uint32 uLine)
 
 		if (!(uActive & uMask))
 			continue;
+/* AURORA_SNES_DEEP_V3144_HDMA_ACTIVE */
+#if AURORA_FRONTEND_PROFILER
+		++uAuroraHdmaActiveChannels;
+#endif
 
 #if SNDBG_LOG
 		g_DbgHDMAActiveChannels++;
 #endif
 
 		pChan = &m_Channels[uChan];
+#if AURORA_C4_PROFILER
+		if (g_AuroraC4ProfilerActive)
+			AuroraC4ProfilerHdmaActive(uChan, pChan->dmapx, pChan->bbadx);
+#endif
 		pChan->ntlrx--;
 		if (pChan->ntlrx & 0x80)
 			m_HDMADoTransfer |= uMask;
@@ -1359,6 +1439,11 @@ void SnesDMAC::ProcessHDMA(Uint32 uLine)
 	}
 #if SNDBG_LOG
 	g_TmgCycHDMATable += ProfCtrGetCycle() - _tHDMATable;
+#endif
+/* AURORA_SNES_DEEP_V3144_HDMA_END */
+#if AURORA_FRONTEND_PROFILER
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_HDMA_TABLE_PHASE,
+		ProfCtrGetCycle() - uAuroraHdmaTableStart, uAuroraHdmaActiveChannels);
 #endif
 }
 

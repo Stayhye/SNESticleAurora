@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include "types.h"
 #include "snspc.h"
+#include "snspc_c.h" /* AURORA_SPC_FRAGMENTATION_SAFE_V3_FINAL_20261005 */
 #include "snspcrom.h"
 #include "snspcdisasm.h"
 #include "console.h"
@@ -274,7 +275,36 @@ Int32 SNSPCExecute(SNSpcT *pCpu, Int32 nExecCycles)
 	pCpu->Counter[0] += nExecCycles;
 	pCpu->Counter[1] += nExecCycles;
 
-	_SNSPC_pExecuteFunc(pCpu);
+	/* AURORA_SPC_FRAGMENTATION_SAFE_V3_FINAL_20261005
+	 *
+	 * Common Aurora gameplay always selects SNSPCExecute_C.  Call that exact
+	 * executor directly so hundreds of timing-required SyncSPC() fragments do
+	 * not each pay an indirect branch.  Debug/alternate executors retain the
+	 * historical function-pointer path byte-for-byte in behavior.
+	 *
+	 * When the accumulated residual is below 2 SPC700 cycles, no valid opcode
+	 * can execute.  The C interpreter would only unpack flags, fetch an opcode,
+	 * fail its cycle guard, rewind PC, repack identical flags and return.  Skip
+	 * that zero-instruction trip while preserving Cycles and both Counter[]
+	 * updates above.  Runtime/SPC tracer builds deliberately keep the old entry
+	 * behavior so diagnostic instruction-fetch visibility is unchanged.
+	 *
+	 * IMPORTANT: this does NOT merge scheduler budgets or APUIO edges.  As soon
+	 * as residual reaches one minimum instruction, the same C executor runs
+	 * with the exact accumulated cycle budget.
+	 */
+	if (__builtin_expect(_SNSPC_pExecuteFunc == SNSPCExecute_C, 1))
+	{
+#if !AURORA_RUNTIME_TRACE && !AURORA_SNES_TRACER
+		if (__builtin_expect(pCpu->Cycles < (2 * SNSPC_CYCLE), 0))
+			return nExecCycles - pCpu->Cycles;
+#endif
+		SNSPCExecute_C(pCpu);
+	}
+	else
+	{
+		_SNSPC_pExecuteFunc(pCpu);
+	}
 
 	return nExecCycles - pCpu->Cycles;
 }

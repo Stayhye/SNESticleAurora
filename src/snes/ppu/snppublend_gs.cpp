@@ -11,6 +11,10 @@
 #include "snppublend_gs.h"
 #include "snppucolor.h"
 #include "sndbglog.h"
+#include "platform/ps2/system/aurora_snes_cost_profiler.h" /* AURORA_SNES_DEEP_OPT_V3_14_20261005 */
+#if AURORA_C4_PROFILER
+#include "platform/ps2/system/aurora_c4_profiler.h"
+#endif
 
 #include <tamtypes.h>
 extern "C" {
@@ -70,6 +74,10 @@ struct SNPPUGSDiagT
 };
 
 static SNPPUGSDiagT _SNPPUGSDiag;
+#if AURORA_C4_PROFILER
+extern "C" void AuroraC4GsDiagReset(void){memset(&_SNPPUGSDiag,0,sizeof(_SNPPUGSDiag));}
+extern "C" void AuroraC4GsDiagRead(AuroraC4GsDiagT *o){if(!o)return;o->frames=_SNPPUGSDiag.Frames;o->lines=_SNPPUGSDiag.Lines;o->syncCalls=_SNPPUGSDiag.SyncCalls;o->syncCycles=_SNPPUGSDiag.SyncCycles;o->copyCycles=_SNPPUGSDiag.CopyCycles;o->kickCycles=_SNPPUGSDiag.KickCycles;o->copyBytes=_SNPPUGSDiag.CopyBytes;o->paletteUploads=_SNPPUGSDiag.PaletteUploads;o->intensityLines=_SNPPUGSDiag.IntensityLines;o->directMainLines=_SNPPUGSDiag.DirectMainLines;}
+#endif
 
 #if SNDBG_DEEP
 static Uint32 _SNPPUGSSample(const SNPPUBlendInfoT *pInfo,
@@ -685,7 +693,7 @@ void SNPPUBlendGS::End()
 
 #if SNDBG_LOG
 	_SNPPUGSDiag.Frames++;
-	if (_SNPPUGSDiag.Frames >= SNDBG_FRAME_PERIOD)
+	if (!AURORA_C4_PROFILER && _SNPPUGSDiag.Frames >= SNDBG_FRAME_PERIOD)
 	{
 		Uint32 uLines = _SNPPUGSDiag.Lines ? _SNPPUGSDiag.Lines : 1;
 		Uint32 uSync = _SNPPUGSDiag.SyncCalls ? _SNPPUGSDiag.SyncCalls : 1;
@@ -1057,12 +1065,22 @@ void SNPPUBlendGS::Exec(SNPPUBlendInfoT *pInfo, Int32 iLine, Uint32 uFixedColor3
 
     if (pColorMask)
     {
+#if AURORA_FRONTEND_PROFILER
+        const Uint32 uAuroraBlendPlanarStart = ProfCtrGetCycle();
+#endif
         PROF_ENTER("SNPPUBlendPlanarTo3");
         _PlanarTo3(pInfo->uAttrib8, &pColorMask[0],&pColorMask[1],&pColorMask[2]);
         PROF_LEAVE("SNPPUBlendPlanarTo3");
+#if AURORA_FRONTEND_PROFILER
+        AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_BLEND_PLANAR,
+            ProfCtrGetCycle() - uAuroraBlendPlanarStart, 256u);
+#endif
     }
 
     // wait for previous dma to finish
+#if AURORA_FRONTEND_PROFILER
+    const Uint32 uAuroraBlendWaitStart = ProfCtrGetCycle();
+#endif
     PROF_ENTER("SNPPUGS");
 #if SNDBG_LOG
 	{
@@ -1078,11 +1096,18 @@ void SNPPUBlendGS::Exec(SNPPUBlendInfoT *pInfo, Int32 iLine, Uint32 uFixedColor3
     DmaSyncGIF();
 #endif
     PROF_LEAVE("SNPPUGS");
+#if AURORA_FRONTEND_PROFILER
+    AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_BLEND_GIF_WAIT,
+        ProfCtrGetCycle() - uAuroraBlendWaitStart, 1u);
+#endif
 
     if (m_pDmaBlendInfo != pInfo ||
         m_bDmaListHasIntensity != bApplyIntensity ||
 		m_bDmaListDirectMain != bDirectMain)
     {
+#if AURORA_FRONTEND_PROFILER
+        const Uint32 uAuroraBlendRebuildStart = ProfCtrGetCycle();
+#endif
 		/* The sync above makes it safe to rebuild a list when a fade crosses
 		   brightness 15.  REF tags always point at the stable staging copy,
 		   never at the scanline buffer that RenderLine8 is about to reuse. */
@@ -1107,6 +1132,10 @@ void SNPPUBlendGS::Exec(SNPPUBlendInfoT *pInfo, Int32 iLine, Uint32 uFixedColor3
         m_pDmaBlendInfo = pInfo;
         m_bDmaListHasIntensity = bApplyIntensity;
 		m_bDmaListDirectMain = bDirectMain;
+#if AURORA_FRONTEND_PROFILER
+        AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_BLEND_LIST_REBUILD,
+            ProfCtrGetCycle() - uAuroraBlendRebuildStart, 1u);
+#endif
     }
 
 	/* The previous GIF chain is done with the staging area now.  Main, sub
@@ -1114,6 +1143,9 @@ void SNPPUBlendGS::Exec(SNPPUBlendInfoT *pInfo, Int32 iLine, Uint32 uFixedColor3
 	   only when CGRAM changed (and once after Begin because scratchpad is
 	   shared between frames). */
 	bUploadPalette = m_bPaletteDirty;
+#if AURORA_FRONTEND_PROFILER
+    const Uint32 uAuroraBlendStageStart = ProfCtrGetCycle();
+#endif
 #if SNDBG_LOG
 	{
 		Uint32 uStart = ProfCtrGetCycle();
@@ -1159,8 +1191,16 @@ void SNPPUBlendGS::Exec(SNPPUBlendInfoT *pInfo, Int32 iLine, Uint32 uFixedColor3
 	(void)uPaletteCopyBytes;
 	_SNPPUBlendCopyLinePayload(pDmaInfo, pInfo, bDirectMain);
 #endif
+#if AURORA_FRONTEND_PROFILER
+    AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_BLEND_STAGE_COPY,
+        ProfCtrGetCycle() - uAuroraBlendStageStart,
+        (bDirectMain ? 256u : 768u) + (bUploadPalette ? uPaletteCopyBytes : 0u));
+#endif
 	pExecList = bUploadPalette ? &m_DmaListWithPalette : &m_DmaList;
 
+#if AURORA_FRONTEND_PROFILER
+    const Uint32 uAuroraBlendParmStart = ProfCtrGetCycle();
+#endif
     PROF_ENTER("SNPPUBlendExec");
 
     // set parameters of dma-list
@@ -1168,8 +1208,15 @@ void SNPPUBlendGS::Exec(SNPPUBlendInfoT *pInfo, Int32 iLine, Uint32 uFixedColor3
 		uIntensity, bDirectMain);
 
     PROF_LEAVE("SNPPUBlendExec");
+#if AURORA_FRONTEND_PROFILER
+    AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_BLEND_SET_PARAMS,
+        ProfCtrGetCycle() - uAuroraBlendParmStart, 1u);
+#endif
 
     // transfer render ilst
+#if AURORA_FRONTEND_PROFILER
+    const Uint32 uAuroraBlendKickStart = ProfCtrGetCycle();
+#endif
 #if SNDBG_LOG
 	{
 		Uint32 uStart = ProfCtrGetCycle();
@@ -1183,6 +1230,10 @@ void SNPPUBlendGS::Exec(SNPPUBlendInfoT *pInfo, Int32 iLine, Uint32 uFixedColor3
 	}
 #else
     DmaExecGIFChain(pExecList->Data);
+#endif
+#if AURORA_FRONTEND_PROFILER
+    AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_BLEND_KICK,
+        ProfCtrGetCycle() - uAuroraBlendKickStart, 1u);
 #endif
 
 }
