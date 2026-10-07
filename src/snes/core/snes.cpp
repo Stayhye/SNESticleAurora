@@ -15,7 +15,17 @@
 #include "sndbglog.h"
 #include "platform/ps2/system/aurora_runtime_trace.h"
 #include "platform/ps2/system/aurora_snes_cost_profiler.h"
+#include "platform/ps2/system/aurora_frontend_profiler.h"
+#if AURORA_C4_PROFILER
+#include "platform/ps2/system/aurora_c4_profiler.h"
+#endif
+#if AURORA_SMK_PROFILER
+#include "platform/ps2/system/aurora_smk_profiler.h"
+#endif
+#include "platform/ps2/system/mainloop_safe_frameskip.h"
 #include "platform/ps2/system/aurora_ee_crash_diag.h"
+
+/* AURORA_SNES_DEEP_OPT_V3_14_20261005 */
 
 /* AURORA_SNES_NATIVE_32K_V1_20260822
  *
@@ -1264,6 +1274,11 @@ static void AuroraRunSpcBudget(SNSpcT *pSpc, Int32 nCycles)
     if (nCycles <= 0)
         return;
 
+#if AURORA_FRONTEND_PROFILER
+    const Int32 auroraSpcBefore =
+        SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME);
+    AuroraFrontendProfilerSnesSpcBegin((Uint32)nCycles);
+#endif
     AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_SPC);
     PROF_ENTER("SNSpcExecute");
 #if SNDBG_LOG
@@ -1273,6 +1288,17 @@ static void AuroraRunSpcBudget(SNSpcT *pSpc, Int32 nCycles)
         AED_SPC_EXEC_ENTER, (Uint32)nCycles,
         (Uint32)SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME));
     SNSPCExecute(pSpc, nCycles);
+#if AURORA_FRONTEND_PROFILER
+    {
+        const Int32 auroraSpcAfter =
+            SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME);
+        const Uint32 auroraSpcConsumed =
+            (auroraSpcAfter > auroraSpcBefore)
+                ? (Uint32)(auroraSpcAfter - auroraSpcBefore)
+                : 0u;
+        AuroraFrontendProfilerSnesSpcEnd(auroraSpcConsumed);
+    }
+#endif
     AuroraEECrashDiagBreadcrumb(
         AED_SPC_EXEC_RETURN,
         (Uint32)SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME),
@@ -1332,11 +1358,34 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
             AuroraRunSpcBudget(&m_Spc, nCycles);
 
         /*
-         * SyncQueue() uses <= and therefore commits every byte in the same
-         * timestamp group atomically. It is also safe if an SPC-side port
-         * read already consumed this edge during the run above.
+         * AURORA_KI_APUIO_EDGE_RESIDUAL_FIX_V25_20261001
+         *
+         * Counter[FRAME] is the SCHEDULED SPC timeline. SNSPCExecute() may
+         * finish with positive residual Cycles when the budget ends between
+         * SPC700 instruction boundaries, so the actually consumed timeline is
+         * SNSPCGetCounter(FRAME) = Counter[FRAME] - Cycles.
+         *
+         * V3 used SyncQueue(uEdgeCycle) here after scheduling Counter[] to the
+         * edge. That can expose a CPU->SPC latch a few master clocks EARLY
+         * while the SPC700 is still before the edge.
+         *
+         * Publish only through the timestamp the SPC has actually consumed.
+         * Equal-timestamp groups remain atomic in SNSpcIO::SyncQueue().
+         * If instruction residual means this edge has not been reached yet,
+         * stop splitting here. The remaining normal catch-up below advances
+         * the SPC, and any $F4-$F7 read synchronizes the queue at its precise
+         * consumed timestamp via SNSpcIO::Read8Trap().
          */
-        m_SpcIO.SyncQueue(uEdgeCycle);
+        {
+            const Int32 iReachedCycle =
+                SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME);
+
+            if (!m_SpcIO.m_Queue.IsEmpty())
+                m_SpcIO.SyncQueue((Uint32)iReachedCycle);
+
+            if (iReachedCycle < iEdgeCycle)
+                break;
+        }
     }
 #endif
 
@@ -1350,10 +1399,15 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
 
 #if SNSPCIO_WRITEQUEUE
     /*
-     * All queued CPU->SPC edges at or before TargetTime were handled above.
-     * Preserve the legacy forced flush used by frame rollover / queue-full
-     * recovery, but do not lazily publish a later edge merely because this
-     * catch-up call completed.
+     * AURORA_KI_APUIO_EDGE_RESIDUAL_FIX_V25_20261001
+     *
+     * Forced frame/queue recovery keeps the historical full flush. Otherwise
+     * retire only edges that the SPC has ACTUALLY reached after the remaining
+     * aggregate catch-up. This also completes an edge deferred above solely
+     * because an instruction residual kept actual execution before it.
+     *
+     * This is not an early publish: $F4-$F7 reads inside the run already call
+     * the same SyncQueue(actual FRAME counter) at the observation point.
      */
     AuroraEECrashDiagBreadcrumb(
         AED_APUIO_QUEUE_ENTER,
@@ -1361,7 +1415,15 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
         (Uint32)SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME));
 
     if (bFlushAll)
+    {
         m_SpcIO.SyncQueueAll();
+    }
+    else if (!m_SpcIO.m_Queue.IsEmpty())
+    {
+        const Int32 iReachedCycle =
+            SNSPCGetCounter(&m_Spc, SNSPC_COUNTER_FRAME);
+        m_SpcIO.SyncQueue((Uint32)iReachedCycle);
+    }
 
     AuroraEECrashDiagBreadcrumb(
         AED_APUIO_QUEUE_RETURN,
@@ -1378,6 +1440,9 @@ void SnesSystem::SyncSPC(Int32 uExtra, Bool bFlushAll)
 inline void SnesSystem::SyncPPU()
 {
 	AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_PPU);
+#if AURORA_FRONTEND_PROFILER
+	AuroraFrontendProfilerSnesPpuSyncCall();
+#endif
 #if SNDBG_LOG
 	Uint32 _tSync = ProfCtrGetCycle();
 	g_DbgPPUSyncCalls++;
@@ -1400,13 +1465,26 @@ inline void SnesSystem::SyncPPU()
 		--uTargetLine;
 		uTargetH = SNESPPU_RASTER_H_FALLBACK;
 	}
+	AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_SYNC);
 	m_PPU.Sync(uTargetLine, uTargetH);
+	AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_SYNC);
 #if SNDBG_LOG
 	g_TmgCycPPUSync += ProfCtrGetCycle() - _tSync;
 #endif
 	AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_PPU);
 }
 
+#if AURORA_C4_PROFILER
+#define AURORA_C4_SYNCPPU(_call, _reason) do { \
+	Uint32 _c4SyncStart = g_AuroraC4ProfilerActive ? ProfCtrGetCycle() : 0u; \
+	_call; \
+	if (g_AuroraC4ProfilerActive) \
+		AuroraC4ProfilerSyncPpu((Uint32)(_reason), \
+			(Uint32)(ProfCtrGetCycle() - _c4SyncStart)); \
+} while (0)
+#else
+#define AURORA_C4_SYNCPPU(_call, _reason) do { _call; } while (0)
+#endif
 
 /* AURORA_RASTER_MMIO_CATCHUP_V1_20260907
  *
@@ -1448,6 +1526,10 @@ void SnesSystem::CatchUpRasterEventsForCpuMMIO(SNCpuT *pCpu)
 	if (nClock < SNES_HBLANK_START_CYCLE)
 		return;
 
+#if AURORA_C4_PROFILER
+	const Uint32 c4CatchupStart = g_AuroraC4ProfilerActive ? ProfCtrGetCycle() : 0u;
+	Bool c4CatchupHdma = FALSE;
+#endif
 	m_bRasterCatchupActive = TRUE;
 
 	if (!m_bRasterHBlankDone)
@@ -1470,7 +1552,16 @@ void SnesSystem::CatchUpRasterEventsForCpuMMIO(SNCpuT *pCpu)
 #if SNDBG_LOG
 			Uint32 _tHDMA = ProfCtrGetCycle();
 #endif
+#if AURORA_C4_PROFILER
+			if (g_AuroraC4ProfilerActive) c4CatchupHdma = TRUE;
+#endif
+#if AURORA_FRONTEND_PROFILER
+			AuroraFrontendProfilerSnesHdmaDataBegin();
+#endif
 			m_DMAC.ProcessHDMA(m_uLine);
+#if AURORA_FRONTEND_PROFILER
+			AuroraFrontendProfilerSnesHdmaDataEnd();
+#endif
 #if SNDBG_LOG
 			g_TmgCycHDMA += ProfCtrGetCycle() - _tHDMA;
 #endif
@@ -1478,6 +1569,11 @@ void SnesSystem::CatchUpRasterEventsForCpuMMIO(SNCpuT *pCpu)
 	}
 
 	m_bRasterCatchupActive = FALSE;
+#if AURORA_C4_PROFILER
+	if (g_AuroraC4ProfilerActive)
+		AuroraC4ProfilerRasterCatchup(
+			(Uint32)(ProfCtrGetCycle() - c4CatchupStart), c4CatchupHdma);
+#endif
 }
 
 #if SNES_DEBUG
@@ -1611,7 +1707,7 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 	case 0x2138: // OAMDATAREAD (PPU1 MDR)
 		{
 			#if SNPPU_WRITEQUEUE
-			pSnes->SyncPPU();
+			AURORA_C4_SYNCPPU(pSnes->SyncPPU(), AURORA_C4_SYNC_PPU_READ);
 			#endif
 			pSnes->m_PPU.SetMemoryAccessFlags(
 				pSnes->m_PPU.BuildMemoryAccessFlags(
@@ -1669,7 +1765,7 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 	case 0x2136: // MPYH
 		{
 			#if SNPPU_WRITEQUEUE
-			pSnes->SyncPPU();
+			AURORA_C4_SYNCPPU(pSnes->SyncPPU(), AURORA_C4_SYNC_PPU_READ);
 			#endif
 			Uint8 uData = (uAddr == 0x2134) ? pPPURegs->mpyl :
 			              (uAddr == 0x2135) ? pPPURegs->mpym : pPPURegs->mpyh;
@@ -1680,7 +1776,7 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 	case 0x2139: // VMDATALREAD (PPU1 MDR)
 		{
 			#if SNPPU_WRITEQUEUE
-			pSnes->SyncPPU();
+			AURORA_C4_SYNCPPU(pSnes->SyncPPU(), AURORA_C4_SYNC_PPU_READ);
 			#endif
 			pSnes->m_PPU.SetMemoryAccessFlags(
 				pSnes->m_PPU.BuildMemoryAccessFlags(
@@ -1695,7 +1791,7 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 	case 0x213a: // VMDATAHREAD (PPU1 MDR)
 		{
 			#if SNPPU_WRITEQUEUE
-			pSnes->SyncPPU();
+			AURORA_C4_SYNCPPU(pSnes->SyncPPU(), AURORA_C4_SYNC_PPU_READ);
 			#endif
 			pSnes->m_PPU.SetMemoryAccessFlags(
 				pSnes->m_PPU.BuildMemoryAccessFlags(
@@ -1710,7 +1806,7 @@ Uint8 SNCPU_TRAPFUNC SnesSystem::Read2000(SNCpuT *pCpu, Uint32 uAddr)
 	case 0x213b: // CGDATAREAD (PPU2 MDR)
 		{
 			#if SNPPU_WRITEQUEUE
-			pSnes->SyncPPU();
+			AURORA_C4_SYNCPPU(pSnes->SyncPPU(), AURORA_C4_SYNC_PPU_READ);
 			#endif
 			pSnes->m_PPU.SetMemoryAccessFlags(
 				pSnes->m_PPU.BuildMemoryAccessFlags(
@@ -1913,6 +2009,11 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 
 	if (uAddr < 0x2140)
 	{
+#if AURORA_C4_PROFILER
+		if (g_AuroraC4ProfilerActive)
+			AuroraC4ProfilerPpuWrite(
+				AURORA_C4_PPUWRITE_CPU, uAddr & 0x3Fu, 1u);
+#endif
 		// enqueue write to ppu, if it fails (full) then force a sync 
 		#if SNPPU_WRITEQUEUE
 		/* AURORA_PPU_MEMORY_V3_SNES_20260915
@@ -1936,11 +2037,11 @@ void SNCPU_TRAPFUNC SnesSystem::Write2000(SNCpuT *pCpu, Uint32 uAddr, Uint8 uDat
 			uPPUHClock))
 		{
 			// sync ppu
-			pSnes->SyncPPU();
+			AURORA_C4_SYNCPPU(pSnes->SyncPPU(), AURORA_C4_SYNC_PPU_WRITE_QUEUE_FULL);
 		}
 		#else
 		// sync ppu before writing to it
-		pSnes->SyncPPU();
+		AURORA_C4_SYNCPPU(pSnes->SyncPPU(), AURORA_C4_SYNC_PPU_WRITE_DIRECT);
 		Uint8 uMemoryAccessFlags = 0;
 		const Uint32 uPPUReg = uAddr & 0x3Fu;
 		if (uPPUReg == 0x04u || uPPUReg == 0x18u ||
@@ -2958,6 +3059,29 @@ Bool SnesSystem::EnsureBSXMemoryPack()
 void SnesSystem::SetRom(class Emu::Rom *pRom)
 {
 	SetSnesRom((SnesRom *)pRom);
+
+    /* ROM identity is the normalized/headerless CRC captured by SnesRom at
+     * load time. No ZIP/container bytes and no second ROM scan are involved. */
+    MainLoopSafeFrameskipSetRomIdentityCRC32(
+        (const void *)this,
+        pRom ? ((SnesRom *)pRom)->GetRuntimeCRC32() : 0u);
+
+#if AURORA_SNES_TRACER
+    SNSPCTracerConfigureGame(
+        pRom ? ((SnesRom *)pRom)->GetRuntimeCRC32() : 0u,
+        pRom ? ((SnesRom *)pRom)->GetRomTitle() : NULL);
+#endif
+#if AURORA_SMK_PROFILER
+    AuroraSmkProfilerConfigureGame(
+        pRom ? ((SnesRom *)pRom)->GetRuntimeCRC32() : 0u,
+        pRom ? ((SnesRom *)pRom)->GetRomTitle() : NULL);
+#endif
+#if AURORA_C4_PROFILER
+    AuroraC4ProfilerConfigureGame(
+        pRom ? ((SnesRom *)pRom)->GetRuntimeCRC32() : 0u,
+        pRom ? ((SnesRom *)pRom)->GetRomTitle() : NULL);
+#endif
+
 }
 
 void SnesSystem::SetSnesRom(SnesRom *pRom)
@@ -3286,6 +3410,14 @@ void SnesSystem::MarkSA1BWRAMDirty(void)
 void SnesSystem::ExecuteCPU(Int32 nCycles)
 {
     AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_CPU);
+#if AURORA_FRONTEND_PROFILER
+    AuroraFrontendProfilerSnesCpuBudget(nCycles > 0 ? (Uint32)nCycles : 0u);
+    Uint32 uAuroraCpuExecCycles = 0;
+    Uint32 uAuroraCpuExecCalls = 0;
+    Uint32 uAuroraCpuSa1Cycles = 0;
+    Uint32 uAuroraCpuSa1Calls = 0;
+    Uint32 uAuroraCpuWaiCycles = 0;
+#endif
     // increment cycle counter
     SNCPUAddCycles( &m_Cpu, nCycles );
     Int32 nSA1Synced = 0; /* AURORA_SA1_INTERLEAVED_CHUNK_SCHEDULER_V7_2_20260903 */
@@ -3313,7 +3445,7 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
             if (m_Cpu.uSignal & SNCPU_SIGNAL_DMA)
             {
                 // sync up PPU before DMA (only necessary for read dmas?)
-                SyncPPU();
+                AURORA_C4_SYNCPPU(SyncPPU(), AURORA_C4_SYNC_MDMA_PRE);
 
                 /* profiler: MDMA is bus/raster work */
                 AURORA_SNES_COST_SCOPE_BEGIN(AURORA_SNES_COST_RASTER);
@@ -3325,7 +3457,13 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
                 // this function automatically subtracts from the CPU cycle count as it transfers each byte
                 m_DMAC.SetRasterLine(m_uLine);
 #if 1
+#if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerSnesMdmaBegin();
+#endif
                 m_DMAC.ProcessMDMA();
+#if AURORA_FRONTEND_PROFILER
+                AuroraFrontendProfilerSnesMdmaEnd();
+#endif
 #else
                 {
                     int n = m_Cpu.Cycles;
@@ -3380,7 +3518,13 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
 							(nStartCycles - m_Cpu.Cycles) < m_Cpu.uNmiDmaDelay &&
 							!(m_Cpu.uSignal & SNCPU_SIGNAL_DMA))
 						{
+#if AURORA_FRONTEND_PROFILER
+							{ const Uint32 uAuroraStart = ProfCtrGetCycle();
+#endif
 							SNCPUExecuteOne(&m_Cpu);
+#if AURORA_FRONTEND_PROFILER
+							uAuroraCpuExecCycles += ProfCtrGetCycle() - uAuroraStart; ++uAuroraCpuExecCalls; }
+#endif
 						}
 					}
 
@@ -3400,7 +3544,13 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
 					   the vector after the instruction then in progress. */
 					if (!(m_Cpu.uSignal & SNCPU_SIGNAL_WAI))
 					{
+#if AURORA_FRONTEND_PROFILER
+						{ const Uint32 uAuroraStart = ProfCtrGetCycle();
+#endif
 						SNCPUExecuteOne(&m_Cpu);
+#if AURORA_FRONTEND_PROFILER
+						uAuroraCpuExecCycles += ProfCtrGetCycle() - uAuroraStart; ++uAuroraCpuExecCalls; }
+#endif
 						if (m_Cpu.uSignal & SNCPU_SIGNAL_DMA)
 						{
 							m_Cpu.uNmiDmaDelay = 24;
@@ -3448,10 +3598,19 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
             if (nWait > 0)
             {
                 SNCPUConsumeCycles(&m_Cpu, nWait);
+#if AURORA_FRONTEND_PROFILER
+                uAuroraCpuWaiCycles += (Uint32)nWait;
+#endif
 
                 if (bSA1Active)
                 {
+#if AURORA_FRONTEND_PROFILER
+                    { const Uint32 uAuroraStart = ProfCtrGetCycle();
+#endif
                     m_SA1.Run(nWait);
+#if AURORA_FRONTEND_PROFILER
+                    uAuroraCpuSa1Cycles += ProfCtrGetCycle() - uAuroraStart; ++uAuroraCpuSa1Calls; }
+#endif
                     nSA1Synced += nWait;
                 }
             }
@@ -3466,7 +3625,13 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
             Int32 before = m_Cpu.Cycles;
             Int32 nSpent;
 
+#if AURORA_FRONTEND_PROFILER
+            { const Uint32 uAuroraStart = ProfCtrGetCycle();
+#endif
             (void)SNCPUExecuteBounded(&m_Cpu, SNSA1::MAIN_INTERLEAVE_QUANTUM);
+#if AURORA_FRONTEND_PROFILER
+            uAuroraCpuExecCycles += ProfCtrGetCycle() - uAuroraStart; ++uAuroraCpuExecCalls; }
+#endif
 
             if (m_Cpu.Cycles >= before)
             {
@@ -3483,13 +3648,25 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
 
             if (nSpent > 0)
             {
+#if AURORA_FRONTEND_PROFILER
+                { const Uint32 uAuroraStart = ProfCtrGetCycle();
+#endif
                 m_SA1.Run(nSpent);
+#if AURORA_FRONTEND_PROFILER
+                uAuroraCpuSa1Cycles += ProfCtrGetCycle() - uAuroraStart; ++uAuroraCpuSa1Calls; }
+#endif
                 nSA1Synced += nSpent;
             }
         }
         else
         {
+#if AURORA_FRONTEND_PROFILER
+            { const Uint32 uAuroraStart = ProfCtrGetCycle();
+#endif
             SNCPUExecute(&m_Cpu);
+#if AURORA_FRONTEND_PROFILER
+            uAuroraCpuExecCycles += ProfCtrGetCycle() - uAuroraStart; ++uAuroraCpuExecCalls; }
+#endif
         }
 #if SNES_HVIRQ_RESCHEDULE
         if (m_bLineIRQActive && m_bLineIRQReschedule)
@@ -3508,9 +3685,25 @@ void SnesSystem::ExecuteCPU(Int32 nCycles)
          * Opcode/WAI chunks already handed nSA1Synced master clocks to SA-1. */
         nElapsed -= nSA1Synced;
         if (nElapsed > 0)
+#if AURORA_FRONTEND_PROFILER
+            { const Uint32 uAuroraStart = ProfCtrGetCycle();
+#endif
             m_SA1.Run(nElapsed);
+#if AURORA_FRONTEND_PROFILER
+            uAuroraCpuSa1Cycles += ProfCtrGetCycle() - uAuroraStart; ++uAuroraCpuSa1Calls; }
+#endif
     }
 
+#if AURORA_FRONTEND_PROFILER
+    if (uAuroraCpuExecCalls)
+        AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_CPU_EXEC,
+            uAuroraCpuExecCycles, uAuroraCpuExecCalls);
+    if (uAuroraCpuSa1Calls)
+        AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_CPU_SA1,
+            uAuroraCpuSa1Cycles, uAuroraCpuSa1Calls);
+    if (uAuroraCpuWaiCycles)
+        AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_CPU_WAI, 0u, uAuroraCpuWaiCycles);
+#endif
     AURORA_SNES_COST_SCOPE_END(AURORA_SNES_COST_CPU);
 
 
@@ -3830,6 +4023,9 @@ void SnesSystem::ExecuteLine()
 		if (ln < g_TmgIrqLineMin) g_TmgIrqLineMin = ln;
 		if (ln > g_TmgIrqLineMax) g_TmgIrqLineMax = ln;
 		g_TmgIrqCount++;
+#if AURORA_C4_PROFILER
+		AuroraC4ProfilerHirq(ln);
+#endif
 	}
 #endif
 
@@ -3871,7 +4067,13 @@ void SnesSystem::ExecuteLine()
 
 		AURORA_V7_RUN_TO(nHDMASetupCycle);
 		nBefore = m_Cpu.Cycles;
+#if AURORA_FRONTEND_PROFILER
+		AuroraFrontendProfilerSnesHdmaSetupBegin();
+#endif
 		m_DMAC.BeginHDMA();
+#if AURORA_FRONTEND_PROFILER
+		AuroraFrontendProfilerSnesHdmaSetupEnd();
+#endif
 		nStolen = nBefore - m_Cpu.Cycles;
 		AURORA_V7_ACCOUNT_STEAL(nStolen);
 	}
@@ -3924,7 +4126,13 @@ void SnesSystem::ExecuteLine()
 #if SNDBG_LOG
 			Uint32 _tHDMA = ProfCtrGetCycle();
 #endif
+#if AURORA_FRONTEND_PROFILER
+			AuroraFrontendProfilerSnesHdmaDataBegin();
+#endif
 			m_DMAC.ProcessHDMA(m_uLine);
+#if AURORA_FRONTEND_PROFILER
+			AuroraFrontendProfilerSnesHdmaDataEnd();
+#endif
 #if SNDBG_LOG
 			g_TmgCycHDMA += ProfCtrGetCycle() - _tHDMA;
 #endif
@@ -3983,6 +4191,12 @@ void SnesSystem::ExecuteFrame(Emu::SysInputT  *pInput, CRenderSurface *pTarget, 
 Bool bPAL = FALSE;
 
 	AuroraSnesCostProfilerFrameBegin();
+#if AURORA_C4_PROFILER
+	AuroraC4ProfilerCoreFrameBegin(m_uFrame, pTarget ? TRUE : FALSE);
+#endif
+#if AURORA_SMK_PROFILER
+	if (g_AuroraSmkProfilerActive) AuroraSmkProfilerFrameBegin();
+#endif
 
 /* AURORA_SNES_BINARY_TRACE_V7_R9_DKC_PHASEPROBE_20260918_FRAME */
 /* AURORA_SNES_BINARY_TRACE_V7_R10_RETURN_BOUNDARY_20260918 */
@@ -4100,13 +4314,13 @@ m_PPU.SetRegionPAL(bPAL);
 		{
 			AuroraTracePhase(ATR_PHASE_MID_SYNC_BEGIN, m_uLine,
 			    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
-			SyncPPU();
+			AURORA_C4_SYNCPPU(SyncPPU(), AURORA_C4_SYNC_MIDFRAME);
 			m_PPU.LatchTimingInterlace();
 			AuroraTracePhase(ATR_PHASE_MID_SYNC_END, m_uLine,
 			    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 		}
 		#if SNES_SYNCPPUEVERYLINE
-		SyncPPU();
+		AURORA_C4_SYNCPPU(SyncPPU(), AURORA_C4_SYNC_EVERYLINE);
 		#endif
 
 		ExecuteLine();
@@ -4118,10 +4332,10 @@ m_PPU.SetRegionPAL(bPAL);
 	 * Auto-joy derives that edge directly from PPU geometry in ExecuteLine(). */
 	const Uint32 uFrameLines = SnesRasterFieldLineCount(m_PPU, bPAL);
 
-	// sync ppu at end of frame (this ensures all rendering has been completed)
+	// sync ppu at end of visible rendering (this ensures all rendering has been completed)
 	AuroraTracePhase(ATR_PHASE_RENDER_SYNC_BEGIN, m_uLine,
 	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
-	SyncPPU();
+	AURORA_C4_SYNCPPU(SyncPPU(), AURORA_C4_SYNC_VISIBLE_END);
 	AuroraTracePhase(ATR_PHASE_RENDER_SYNC_END, m_uLine,
 	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 
@@ -4178,7 +4392,7 @@ m_PPU.SetRegionPAL(bPAL);
 
 	AuroraTracePhase(ATR_PHASE_FINAL_PPU_BEGIN, m_uLine,
 	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
-	SyncPPU();
+	AURORA_C4_SYNCPPU(SyncPPU(), AURORA_C4_SYNC_FRAME_FINAL);
 	AuroraTracePhase(ATR_PHASE_FINAL_PPU_END, m_uLine,
 	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));
 	/* Field changes at V-counter wrap, not when VBlank begins. */
@@ -4211,6 +4425,9 @@ m_PPU.SetRegionPAL(bPAL);
 #if SNDBG_LOG
 	Uint32 _tMix = ProfCtrGetCycle();
 #endif
+#if AURORA_FRONTEND_PROFILER
+	AuroraFrontendProfilerSnesDspBegin();
+#endif
 	if (m_SGB.IsActive() && pSound)
 	{
 		SGBMixBufferProxy SgbAudio(&m_SGB, pSound);
@@ -4220,6 +4437,9 @@ m_PPU.SetRegionPAL(bPAL);
 	{
 		m_SpcDspMixer.Mix(pSound);
 	}
+#if AURORA_FRONTEND_PROFILER
+	AuroraFrontendProfilerSnesDspEnd();
+#endif
 #if SNDBG_LOG
 	g_TmgCycMix += ProfCtrGetCycle() - _tMix;
 #endif
@@ -4260,7 +4480,7 @@ m_PPU.SetRegionPAL(bPAL);
 			break;
 	}
 
-#if SNDBG_LOG
+#if SNDBG_LOG && !AURORA_C4_PROFILER
 	// --- timing: fecha o frame e resume a janela ---
 	{
 		Uint32 cyc = ProfCtrGetCycle() - g_TmgFrameStart;  // ciclos de emulacao deste frame
@@ -4617,7 +4837,13 @@ m_PPU.SetRegionPAL(bPAL);
 	}
 #endif
 
+#if AURORA_SMK_PROFILER
+	if (g_AuroraSmkProfilerActive) AuroraSmkProfilerFrameEnd();
+#endif
 	AuroraSnesCostProfilerFrameEnd();
+#if AURORA_C4_PROFILER
+	AuroraC4ProfilerCoreFrameEnd(m_uFrame);
+#endif
 
 	AuroraTracePhase(ATR_PHASE_FRAME_EXIT, m_uLine,
 	    (Uint32)SNCPUGetCounter(&m_Cpu, SNCPU_COUNTER_FRAME));

@@ -12,6 +12,11 @@
         .set    noreorder
         .set    noat
 
+/* AURORA_C4_BG_COMPOSITOR_R5900_V7_1_FINAL_20261004
+ * C4 final: keep only measured-winning BG compositor scheduling.
+ * Memory-phase inlining and CHR2/CHR4 output scheduling are reverted.
+ * No emulated timing/state/audio/frameskip behavior is changed. */
+
 /*
  * struct AuroraPPUChrDirectAsmCtx {
  *   const Uint64 *planeNormal;   // +0
@@ -43,84 +48,111 @@
  */
         .globl  AuroraPPUFetchCHR2Direct64PS2
         .ent    AuroraPPUFetchCHR2Direct64PS2
+/* AURORA_SNES_CHR24_R5900_V3_14_20261005
+ * Exact CHR2 hot path. v3.10 scheduling/transparent exit preserved; adds a
+ * zero-flip specialization so the dominant non-flipped row skips both the
+ * V-flip and H-flip decision chains. */
 AuroraPPUFetchCHR2Direct64PS2:
-        lw      $12,0($11)               /* plane normal */
-        lw      $13,4($11)               /* plane H-flip */
-        lw      $14,8($11)               /* reverse-mask table */
-        blez    $7,.Lchr2_v25_done
-        lw      $15,12($11)              /* palette LUT; safe delay-slot load */
+        lw      $12,0($11)
+        lw      $13,4($11)
+        lw      $14,8($11)
+        blez    $7,.Lchr2_v314_done
+        lw      $15,12($11)
 
-.Lchr2_v25_loop:
+.Lchr2_v314_loop:
         lhu     $2,0($6)
         lbu     $3,3($6)
         lbu     $11,4($6)
+        beq     $3,$0,.Lchr2_v314_noflip
         sll     $2,$2,3
+
+        /* General flip path: byte-identical v3.10 algebra. */
         addu    $2,$2,$5
-        andi    $2,$2,0x7fff
         addu    $11,$11,$8
         andi    $24,$3,2
-        beq     $24,$0,.Lchr2_v25_no_vflip
-        nop
+        bnel    $24,$0,.Lchr2_v314_no_vflip
         xori    $11,$11,7
-.Lchr2_v25_no_vflip:
+.Lchr2_v314_no_vflip:
         addu    $2,$2,$11
         andi    $2,$2,0x7fff
         sll     $2,$2,1
         addu    $2,$4,$2
         lhu     $25,0($2)
-        andi    $2,$25,0x00ff            /* p0 */
-        srl     $11,$25,8                /* p1 */
-        or      $24,$2,$11               /* source opacity */
-
+        andi    $2,$25,0x00ff
+        srl     $11,$25,8
+        or      $24,$2,$11
         andi    $25,$3,1
-        beq     $25,$0,.Lchr2_v25_normal
-        move    $25,$13                  /* H-flip lookup in delay slot */
-        b       .Lchr2_v25_mask_ready
-        nop
-.Lchr2_v25_normal:
-        move    $25,$12
-        addu    $24,$14,$24
-        lbu     $24,0($24)
-.Lchr2_v25_mask_ready:
-        sb      $24,0($10)               /* exact opacity result */
-        beq     $24,$0,.Lchr2_v25_transparent
-        sll     $2,$2,3                  /* first lookup address work */
+        beq     $24,$0,.Lchr2_v314_transparent
+        addiu   $7,$7,-1
 
+        beql    $25,$0,.Lchr2_v314_normal
+        move    $25,$12
+        move    $25,$13
+        sb      $24,0($10)
+        b       .Lchr2_v314_mask_ready
+        sll     $2,$2,3
+.Lchr2_v314_normal:
+        addu    $3,$14,$24
+        lbu     $24,0($3)
+        sll     $2,$2,3
+        sb      $24,0($10)
+        b       .Lchr2_v314_mask_ready
+        nop
+
+.Lchr2_v314_noflip:
+        /* flip==0 => no vertical XOR, normal plane lookup, reversed mask. */
+        addu    $2,$2,$5
+        addu    $11,$11,$8
+        addu    $2,$2,$11
+        andi    $2,$2,0x7fff
+        sll     $2,$2,1
+        addu    $2,$4,$2
+        lhu     $25,0($2)
+        andi    $2,$25,0x00ff
+        srl     $11,$25,8
+        or      $24,$2,$11
+        beq     $24,$0,.Lchr2_v314_transparent
+        addiu   $7,$7,-1
+        addu    $3,$14,$24
+        lbu     $24,0($3)
+        move    $25,$12
+        sll     $2,$2,3
+        sb      $24,0($10)
+
+.Lchr2_v314_mask_ready:
         addu    $2,$25,$2
         ld      $3,0($2)
         sll     $11,$11,3
         addu    $11,$25,$11
-        ld      $2,0($11)
-        dsll    $2,$2,1
-        or      $3,$3,$2
-
-        lbu     $11,2($6)                /* palette */
-        sll     $2,$11,3
-        addu    $2,$15,$2
-        ld      $2,0($2)
-        or      $3,$3,$2
-
-        /* priorityMask = (palette bit3) ? opacity : 0, branch-free */
-        sll     $11,$11,28
+        ld      $1,0($11)
+        addiu   $6,$6,6
+        lbu     $2,-4($6)
+        dsll    $1,$1,1
+        or      $3,$3,$1
+        sll     $11,$2,28
+        sll     $1,$2,3
         sra     $11,$11,31
-        and     $2,$24,$11
-        b       .Lchr2_v25_output
+        addu    $1,$15,$1
+        and     $11,$24,$11
+        sb      $11,48($10)
+        ld      $1,0($1)
+        addiu   $9,$9,8
+        or      $3,$3,$1
+        sd      $3,-8($9)
+        bgtz    $7,.Lchr2_v314_loop
+        addiu   $10,$10,1
+        jr      $31
         nop
 
-.Lchr2_v25_transparent:
-        move    $3,$0
-        move    $2,$0
-
-.Lchr2_v25_output:
-        sd      $3,0($9)
-        sb      $2,48($10)
+.Lchr2_v314_transparent:
+        sb      $0,0($10)
+        sb      $0,48($10)
+        sd      $0,0($9)
         addiu   $6,$6,6
-        addiu   $9,$9,8
-        addiu   $7,$7,-1
-        bgtz    $7,.Lchr2_v25_loop
         addiu   $10,$10,1
-
-.Lchr2_v25_done:
+        bgtz    $7,.Lchr2_v314_loop
+        addiu   $9,$9,8
+.Lchr2_v314_done:
         jr      $31
         nop
         .end    AuroraPPUFetchCHR2Direct64PS2
@@ -135,115 +167,356 @@ AuroraPPUFetchCHR2Direct64PS2:
  */
         .globl  AuroraPPUFetchCHR4Direct64PS2
         .ent    AuroraPPUFetchCHR4Direct64PS2
+/* AURORA_SNES_CHR24_R5900_V3_14_20261005
+ * Exact CHR4 opaque-path follow-up. v3.10 transparent exit and latency-aware
+ * decode are retained. A dedicated flip==0 path removes the V/H flip decision
+ * chains from the common non-flipped opaque row while keeping the same VRAM
+ * modulo, opacity reversal, LUTs, palette and priority output. */
 AuroraPPUFetchCHR4Direct64PS2:
-        lw      $12,0($11)               /* plane normal */
-        lw      $13,4($11)               /* plane H-flip */
-        lw      $14,8($11)               /* reverse-mask table */
-        blez    $7,.Lchr4_v25_done
-        lw      $15,12($11)              /* palette LUT; safe delay-slot load */
+        lw      $12,0($11)
+        lw      $13,4($11)
+        lw      $14,8($11)
+        blez    $7,.Lchr4_v314_done
+        lw      $15,12($11)
 
-.Lchr4_v25_loop:
+.Lchr4_v314_loop:
         lhu     $2,0($6)
         lbu     $3,3($6)
         lbu     $11,4($6)
+        beq     $3,$0,.Lchr4_v314_noflip
         sll     $2,$2,4
+
+        /* General flip path: v3.10 address/opacity semantics unchanged. */
         addu    $2,$2,$5
-        andi    $2,$2,0x7fff
         addu    $11,$11,$8
         andi    $24,$3,2
-        beq     $24,$0,.Lchr4_v25_no_vflip
-        nop
+        bnel    $24,$0,.Lchr4_v314_no_vflip
         xori    $11,$11,7
-.Lchr4_v25_no_vflip:
+.Lchr4_v314_no_vflip:
         addu    $2,$2,$11
-
-        andi    $24,$2,0x7fff
-        sll     $24,$24,1
-        addu    $24,$4,$24
-        lhu     $24,0($24)               /* pair01 */
-
-        addiu   $25,$2,8
-        andi    $25,$25,0x7fff
-        sll     $25,$25,1
-        addu    $25,$4,$25
-        lhu     $25,0($25)               /* pair23 */
-
-        srl     $11,$24,8
-        or      $11,$11,$24
-        srl     $2,$25,8
-        or      $2,$2,$25
+        andi    $2,$2,0x7fff
+        sll     $2,$2,1
+        addu    $2,$4,$2
+        lhu     $24,0($2)
+        lhu     $25,16($2)
+        andi    $3,$3,1
+        or      $11,$24,$25
+        srl     $2,$11,8
         or      $11,$11,$2
-        andi    $11,$11,0x00ff           /* source opacity */
+        andi    $11,$11,0x00ff
+        beq     $11,$0,.Lchr4_v314_transparent
+        addiu   $7,$7,-1
 
-        andi    $2,$3,1
-        beq     $2,$0,.Lchr4_v25_normal
-        move    $2,$13                   /* H-flip lookup in delay slot */
-        b       .Lchr4_v25_mask_ready
-        nop
-.Lchr4_v25_normal:
+        beql    $3,$0,.Lchr4_v314_normal
         move    $2,$12
+        move    $2,$13
+        sb      $11,0($10)
+        b       .Lchr4_v314_mask_ready
+        andi    $3,$24,0x00ff
+.Lchr4_v314_normal:
         addu    $3,$14,$11
         lbu     $11,0($3)
-.Lchr4_v25_mask_ready:
+        andi    $3,$24,0x00ff
         sb      $11,0($10)
-        beq     $11,$0,.Lchr4_v25_transparent
-        andi    $3,$24,0x00ff            /* first plane extraction */
+        b       .Lchr4_v314_mask_ready
+        nop
 
-        sll     $3,$3,3
-        addu    $3,$2,$3
-        ld      $3,0($3)                 /* result p0 */
+.Lchr4_v314_noflip:
+        /* flip==0: no vertical XOR and no H-flip selector branch. */
+        addu    $2,$2,$5
+        addu    $11,$11,$8
+        addu    $2,$2,$11
+        andi    $2,$2,0x7fff
+        sll     $2,$2,1
+        addu    $2,$4,$2
+        lhu     $24,0($2)
+        lhu     $25,16($2)
+        or      $11,$24,$25
+        srl     $2,$11,8
+        or      $11,$11,$2
+        andi    $11,$11,0x00ff
+        beq     $11,$0,.Lchr4_v314_transparent
+        addiu   $7,$7,-1
+        addu    $3,$14,$11
+        lbu     $11,0($3)
+        move    $2,$12
+        andi    $3,$24,0x00ff
+        sb      $11,0($10)
 
+.Lchr4_v314_mask_ready:
         srl     $24,$24,8
+        sll     $3,$3,3
         sll     $24,$24,3
+        addu    $3,$2,$3
+        ld      $3,0($3)
+        andi    $1,$25,0x00ff
         addu    $24,$2,$24
-        ld      $24,0($24)
-        dsll    $24,$24,1
-        or      $3,$3,$24
-
-        andi    $24,$25,0x00ff
-        sll     $24,$24,3
-        addu    $24,$2,$24
-        ld      $24,0($24)
-        dsll    $24,$24,2
-        or      $3,$3,$24
-
         srl     $25,$25,8
+        ld      $24,0($24)
+        sll     $1,$1,3
         sll     $25,$25,3
+        addu    $1,$2,$1
+        ld      $1,0($1)
         addu    $25,$2,$25
+        dsll    $24,$24,1
         ld      $25,0($25)
+        or      $3,$3,$24
+        lbu     $2,2($6)
+        dsll    $1,$1,2
+        addiu   $6,$6,6
+        or      $3,$3,$1
+        sll     $24,$2,28
         dsll    $25,$25,3
+        sll     $1,$2,3
         or      $3,$3,$25
+        sra     $24,$24,31
+        addu    $1,$15,$1
+        and     $24,$11,$24
+        sb      $24,48($10)
+        ld      $1,0($1)
+        addiu   $9,$9,8
+        or      $3,$3,$1
+        sd      $3,-8($9)
+        bgtz    $7,.Lchr4_v314_loop
+        addiu   $10,$10,1
+        jr      $31
+        nop
 
-        lbu     $24,2($6)                /* palette */
-        sll     $2,$24,3
+.Lchr4_v314_transparent:
+        sb      $0,0($10)
+        sb      $0,48($10)
+        sd      $0,0($9)
+        addiu   $6,$6,6
+        addiu   $10,$10,1
+        bgtz    $7,.Lchr4_v314_loop
+        addiu   $9,$9,8
+.Lchr4_v314_done:
+        jr      $31
+        nop
+        .end    AuroraPPUFetchCHR4Direct64PS2
+
+
+/* AURORA_C4_BG_CHR_NOOFFSET_R5900_V8_4_FINAL_20261004
+ * Fast path for ordinary non-OPT BG rows only. FetchBG()/ordinary map kernels
+ * publish uOffsetY=0 for these rows, so (uScrollY + uOffsetY) collapses to the
+ * invariant uScrollY. Generic CHR2/CHR4 kernels above stay untouched and are
+ * still used by OPT/offset paths. Mode 5/6 keep their dedicated C++ decoders.
+ * No emulated state, timing, audio, frameskip, VRAM addressing or priority
+ * rule changes. The ordinary path hoists the two possible row bases once per
+ * 33-tile call, then uses R5900 MOVZ for the per-tile V-flip selection. */
+        .globl  AuroraPPUFetchCHR2NoOffset64PS2
+        .ent    AuroraPPUFetchCHR2NoOffset64PS2
+AuroraPPUFetchCHR2NoOffset64PS2:
+        lw      $12,0($11)               /* plane normal */
+        lw      $13,4($11)               /* plane H-flip */
+        lw      $14,8($11)               /* reverse-mask table */
+        blez    $7,.Lchr2_nooff_done
+        lw      $15,12($11)              /* palette LUT */
+
+        /* Hoist both invariant row bases. Reuse $5/$8 after argument setup. */
+        xori    $2,$8,7
+        addu    $2,$5,$2                 /* flipped base + (Y^7) */
+        addu    $5,$5,$8                 /* normal base + Y */
+        move    $8,$2                    /* $8 = flipped row base */
+
+.Lchr2_nooff_loop:
+        lhu     $2,0($6)
+        lbu     $3,3($6)
+        sll     $2,$2,3
+
+        /* Ordinary FetchBG rows have uOffsetY==0. MOVZ chooses normal base
+         * when V-flip is clear; flipped base stays selected otherwise. */
+        andi    $24,$3,2
+        move    $11,$8
+        movz    $11,$5,$24
+        addu    $2,$2,$11
+        andi    $2,$2,0x7fff
+        sll     $2,$2,1
+        addu    $2,$4,$2
+        lhu     $25,0($2)
+        andi    $2,$25,0x00ff            /* p0 */
+        srl     $11,$25,8                /* p1 */
+        or      $24,$2,$11               /* source opacity */
+
+        andi    $25,$3,1
+        beq     $25,$0,.Lchr2_nooff_normal
+        move    $25,$13
+        b       .Lchr2_nooff_mask_ready
+        sb      $24,0($10)
+.Lchr2_nooff_normal:
+        move    $25,$12
+        addu    $24,$14,$24
+        lbu     $24,0($24)
+        sb      $24,0($10)
+.Lchr2_nooff_mask_ready:
+        beq     $24,$0,.Lchr2_nooff_transparent
+        sll     $2,$2,3
+
+        addu    $2,$25,$2
+        ld      $3,0($2)
+        sll     $11,$11,3
+        addu    $11,$25,$11
+        ld      $2,0($11)
+        dsll    $2,$2,1
+        or      $3,$3,$2
+
+        lbu     $11,2($6)
+        sll     $2,$11,3
         addu    $2,$15,$2
         ld      $2,0($2)
         or      $3,$3,$2
 
-        /* priorityMask = (palette bit3) ? opacity : 0, branch-free */
-        sll     $24,$24,28
-        sra     $24,$24,31
-        and     $2,$11,$24
-        b       .Lchr4_v25_output
+        sll     $11,$11,28
+        sra     $11,$11,31
+        and     $2,$24,$11
+        b       .Lchr2_nooff_output
         nop
 
-.Lchr4_v25_transparent:
+.Lchr2_nooff_transparent:
         move    $3,$0
         move    $2,$0
 
-.Lchr4_v25_output:
+.Lchr2_nooff_output:
         sd      $3,0($9)
         sb      $2,48($10)
         addiu   $6,$6,6
         addiu   $9,$9,8
         addiu   $7,$7,-1
-        bgtz    $7,.Lchr4_v25_loop
+        bgtz    $7,.Lchr2_nooff_loop
         addiu   $10,$10,1
 
-.Lchr4_v25_done:
+.Lchr2_nooff_done:
         jr      $31
         nop
-        .end    AuroraPPUFetchCHR4Direct64PS2
+        .end    AuroraPPUFetchCHR2NoOffset64PS2
+        .globl  AuroraPPUFetchCHR4NoOffset64PS2
+        .ent    AuroraPPUFetchCHR4NoOffset64PS2
+AuroraPPUFetchCHR4NoOffset64PS2:
+        lw      $12,0($11)               /* plane normal */
+        lw      $13,4($11)               /* plane H-flip */
+        lw      $14,8($11)               /* reverse-mask table */
+        blez    $7,.Lchr4_nooff_done_v10_4
+        lw      $15,12($11)              /* palette LUT */
+
+        /* AURORA_C4_CHR4_OPAQUE_R5900_V10_4_FINAL_20261004
+         * Preserve v8.4 word addressing and row-base hoist. The only changes
+         * below are: zero-mask fast reject, independent opaque LUT-load
+         * scheduling, and hot opaque fall-through output. */
+        xori    $2,$8,7
+        addu    $2,$5,$2                 /* flipped base + (Y^7) */
+        addu    $5,$5,$8                 /* normal base + Y */
+        move    $8,$2                    /* $8 = flipped row base */
+
+.Lchr4_nooff_loop_v10_4:
+        lhu     $2,0($6)
+        lbu     $3,3($6)
+        sll     $2,$2,4
+
+        andi    $24,$3,2
+        move    $11,$8
+        movz    $11,$5,$24
+        addu    $2,$2,$11
+
+        andi    $2,$2,0x7fff
+        sll     $2,$2,1
+        addu    $2,$4,$2
+        lhu     $24,0($2)
+        lhu     $25,16($2)
+
+        /* Raw opacity is OR(p0,p1,p2,p3). Bit reversal preserves zero,
+         * so transparent rows can bypass H/normal mask selection entirely. */
+        or      $11,$24,$25
+        srl     $2,$11,8
+        or      $11,$11,$2
+        andi    $11,$11,0x00ff
+
+        beq     $11,$0,.Lchr4_nooff_transparent_v10_4
+        andi    $3,$3,1                  /* H-flip flag; useful delay slot */
+
+        /* $at is used only as a caller-saved leaf temporary. No stack or
+         * callee-saved GPR is touched. */
+        beq     $3,$0,.Lchr4_nooff_normal_v10_4
+        move    $2,$13
+        b       .Lchr4_nooff_opaque_v10_4
+        sb      $11,0($10)               /* H-flip mask is already oriented */
+
+.Lchr4_nooff_normal_v10_4:
+        move    $2,$12
+        addu    $1,$14,$11
+        lbu     $11,0($1)                /* reverse normal opacity mask */
+        sb      $11,0($10)
+
+.Lchr4_nooff_opaque_v10_4:
+        /* v10.2: form all four independent lookup addresses first. */
+        andi    $3,$24,0x00ff
+        srl     $24,$24,8
+        andi    $1,$25,0x00ff
+        srl     $25,$25,8
+
+        sll     $3,$3,3
+        sll     $24,$24,3
+        sll     $1,$1,3
+        sll     $25,$25,3
+
+        addu    $3,$2,$3
+        addu    $24,$2,$24
+        addu    $1,$2,$1
+        addu    $25,$2,$25
+
+        /* Issue the four scratchpad loads as one independent group. */
+        ld      $3,0($3)
+        ld      $24,0($24)
+        ld      $1,0($1)
+        ld      $25,0($25)
+
+        /* Consume the oldest loads first; use the gap to launch palette. */
+        dsll    $24,$24,1
+        or      $3,$3,$24
+
+        lbu     $24,2($6)
+        sll     $2,$24,3
+        addu    $2,$15,$2
+        ld      $2,0($2)
+
+        dsll    $1,$1,2
+        dsll    $25,$25,3
+        or      $1,$1,$25
+        or      $3,$3,$1
+
+        /* Palette load gets several independent ops before first use. */
+        sll     $24,$24,28
+        sra     $24,$24,31
+        and     $24,$11,$24              /* priority mask */
+        or      $3,$3,$2
+
+        /* v10.3: opaque is the hot path. Fall directly into its output tail;
+         * no unconditional branch+nop on every opaque tile. */
+        sd      $3,0($9)
+        sb      $24,48($10)
+        addiu   $6,$6,6
+        addiu   $9,$9,8
+        addiu   $7,$7,-1
+        bgtz    $7,.Lchr4_nooff_loop_v10_4
+        addiu   $10,$10,1
+
+.Lchr4_nooff_done_v10_4:
+        jr      $31
+        nop
+
+        /* Cold transparent tail is duplicated so neither path needs a
+         * per-tile join branch. Zero mask is orientation-invariant. */
+.Lchr4_nooff_transparent_v10_4:
+        sd      $0,0($9)
+        sb      $0,0($10)
+        sb      $0,48($10)
+        addiu   $6,$6,6
+        addiu   $9,$9,8
+        addiu   $7,$7,-1
+        bgtz    $7,.Lchr4_nooff_loop_v10_4
+        addiu   $10,$10,1
+        b       .Lchr4_nooff_done_v10_4
+        nop
+        .end    AuroraPPUFetchCHR4NoOffset64PS2
 /* AURORA_DKC_BGDATA_DELAY_SLOT_R5900_V26_20260928
  * Scheduling-only change: pointer increments occupy already-existing branch
  * delay slots.  Data, masks, qfsrv semantics and tile count are unchanged.
@@ -268,16 +541,16 @@ AuroraPPURenderBGDataOPS2:
 
 .Lrender_o_loop:
         lhu     $2,0($6)
-        sq      $0,0x00($4)
-        beq     $2,$0,.Lrender_o_advance
         addiu   $6,$6,2
+        beql    $2,$0,.Lrender_o_advance
+        sq      $0,0x00($4)              /* zero only when the mask is empty */
 
         lq      $10,0x00($5)
         lq      $11,0x10($5)
         qfsrv   $10,$11,$10
         ori     $3,$0,0xffff
-        beq     $2,$3,.Lrender_o_store
-        nop
+        beql    $2,$3,.Lrender_o_advance
+        sq      $10,0x00($4)             /* full mask: store in taken delay slot */
 
         andi    $3,$2,0x00ff
         sll     $3,$3,3
@@ -323,8 +596,8 @@ AuroraPPURenderBGDataPS2:
         lq      $11,0x10($5)
         qfsrv   $10,$11,$10
         ori     $3,$0,0xffff
-        beq     $2,$3,.Lrender_store
-        nop
+        beql    $2,$3,.Lrender_advance
+        sq      $10,0x00($4)             /* full mask: store in taken delay slot */
 
         andi    $3,$2,0x00ff
         sll     $3,$3,3
@@ -550,10 +823,10 @@ AuroraPPUFetchBG8x8MapPS2:
         /* AURORA_DKC_BGMAP_DELAY_SCHEDULE_R5900_V29_20260928
          * V17 semantics exactly; only safe delay slots are occupied.
          */
+        /* v20: callers provide the exact 12-bit abstract map address. */
         blez    $6,.Lbg8_v29_done
         srl     $8,$4,10
 
-        andi    $8,$8,3
         sll     $8,$8,2
         addu    $8,$7,$8
         lw      $8,0($8)
@@ -571,7 +844,6 @@ AuroraPPUFetchBG8x8MapPS2:
         addiu   $4,$4,-32
         xori    $4,$4,0x0400
         srl     $8,$4,10
-        andi    $8,$8,3
         sll     $8,$8,2
         addu    $8,$7,$8
         lw      $8,0($8)
@@ -581,8 +853,8 @@ AuroraPPUFetchBG8x8MapPS2:
         srl     $9,$10,10
         andi    $9,$9,0x000f
         sb      $9,2($5)
+        /* lhu makes word>>14 intrinsically 0..3. */
         srl     $9,$10,14
-        andi    $9,$9,3
         sb      $9,3($5)
         sb      $0,4($5)
 
@@ -601,10 +873,10 @@ AuroraPPUFetchBG16x16MapPS2:
          * Same V17 map wrap, 16x16 quadrant, flip/palette metadata and
          * nTiles accounting. Only branch delay slots carry invariant work.
          */
+        /* v20: callers provide the exact 12-bit abstract map address. */
         blez    $6,.Lbg16_v29_done
         srl     $9,$4,10
 
-        andi    $9,$9,3
         sll     $9,$9,2
         addu    $9,$7,$9
         lw      $9,0($9)
@@ -622,14 +894,13 @@ AuroraPPUFetchBG16x16MapPS2:
         addiu   $4,$4,-32
         xori    $4,$4,0x0400
         srl     $9,$4,10
-        andi    $9,$9,3
         sll     $9,$9,2
         addu    $9,$7,$9
         lw      $9,0($9)
 
 .Lbg16_v29_no_wrap:
+        /* lhu makes word>>14 intrinsically 0..3. */
         srl     $12,$10,14
-        andi    $12,$12,3
         srl     $13,$10,10
         andi    $13,$13,0x000f
 

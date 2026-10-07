@@ -11,6 +11,16 @@ extern "C" {
 };
 #include "snspcdsp.h"
 #include "platform/ps2/system/aurora_runtime_trace.h"
+
+/* AURORA_SNES_GENERIC_TRACER_V36_20261002: API comes from snspc.h. */
+#if AURORA_SNES_TRACER
+#define AURORA_SNES_TRC_PORT(...) do { \
+    if (SNSPC_TRACER_FAST_ACTIVE()) SNSPCTracerPortEvent(__VA_ARGS__); \
+} while (0)
+#else
+#define AURORA_SNES_TRC_PORT(...) ((void)0)
+#endif
+
 /* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918 */
 
 /* AURORA_CPU_SPC_HOST_WORK_REDUCTION_V2_20260920_IO */
@@ -63,6 +73,9 @@ static void _SpcDebugWrite(SNSpcT *pSpc, Uint32 uAddr, Uint32 uData)
 Bool SNSpcIO::EnqueueWrite(
 	Uint32 uCycle, Uint32 uTotalCycle, Uint32 uAddr, Uint8 uData)
 {
+	AURORA_SNES_TRC_PORT(
+		'Q', (Uint8)(0xF4u + (uAddr & 3u)), uData, m_Regs.apu_w[uAddr & 3u],
+		uCycle, uTotalCycle, 0xFFFFu);
 	/* V2 common path: almost every APUIO write has no live $F1 reset stamp. */
 	if (m_uPortResetValid)
 	{
@@ -76,6 +89,9 @@ Bool SNSpcIO::EnqueueWrite(
 			if (uDelta == 0u)
 			{
 				/* Exactly coincident: the $F1 reset wins. TRUE = handled. */
+				AURORA_SNES_TRC_PORT(
+					'X', (Uint8)(0xF4u + (uAddr & 3u)), uData,
+					m_Regs.apu_w[uAddr & 3u], uCycle, uTotalCycle, 0xFFFFu);
 				return TRUE;
 			}
 
@@ -95,6 +111,9 @@ void SNSpcIO::SyncQueueAll()
 	while ( (pElement=m_Queue.Dequeue()) != NULL)
 	{
 		// perform write
+		AURORA_SNES_TRC_PORT(
+			'A', (Uint8)(0xF4u + (pElement->uAddr & 3u)), pElement->uData,
+			m_Regs.apu_w[pElement->uAddr], pElement->uCycle, 0u, 0xFFFFu);
 		m_Regs.apu_w[pElement->uAddr] = pElement->uData;
 	}
 
@@ -121,10 +140,29 @@ void SNSpcIO::SyncQueue(Uint32 uCycle)
 	while ( (pElement=m_Queue.DequeueAtOrBefore(uCycle)) != NULL)
 	{
 		// perform write
+		AURORA_SNES_TRC_PORT(
+			'C', (Uint8)(0xF4u + (pElement->uAddr & 3u)), pElement->uData,
+			m_Regs.apu_w[pElement->uAddr], pElement->uCycle, 0u, 0xFFFFu);
 		m_Regs.apu_w[pElement->uAddr] = pElement->uData;
 	}
 }
 
+
+
+#if AURORA_SNES_TRACER
+extern "C" void SNSPCTracerPeekPorts(
+    SNSpcT *pSpc, Uint8 *cpuToSpc, Uint8 *spcToCpu)
+{
+    SNSpcIO *pIO = (SNSpcIO *)pSpc->pUserData;
+    Uint32 i;
+    if (!pIO) return;
+    for (i = 0; i < 4u; ++i)
+    {
+        if (cpuToSpc) cpuToSpc[i] = pIO->m_Regs.apu_w[i];
+        if (spcToCpu) spcToCpu[i] = pIO->m_Regs.apu_r[i];
+    }
+}
+#endif
 
 void SNSpcIO::Reset()
 {
@@ -177,10 +215,10 @@ Uint8 SNSpcIO::Read8Trap(SNSpcT *pSpc, Uint32 uAddr)
 		return pSpc->Mem[uAddr];
 
 	case 0xF3:
-		/* AURORA_HW_ACCURACY_DSPDATA_ORDER_V1_20260916
-		 * Do not make future S-DSP writes visible to an $F3 read. */
-		pIO->m_pSpcDsp->Sync(
-			SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME));
+		/* AURORA_SDSP_DUAL_TIMELINE_V36_20261002
+		 * SPC-side DSP readback is maintained by EnqueueWrite() in a live
+		 * register shadow. Never consume the mixer replay queue here: doing
+		 * so made future writes visible when Mix() later replayed from cycle 0. */
 		return pIO->m_pSpcDsp->Read8(pSpc->Mem[0xF2]);
 	case 0xF4: // port 0-4
 	case 0xF5:
@@ -256,6 +294,12 @@ void SNSpcIO::Write8Trap(SNSpcT *pSpc, Uint32 uAddr, Uint8 uData)
 				pIO->SyncQueue(SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME));
 			#endif
 
+			if (bResetPorts)
+				AURORA_SNES_TRC_PORT(
+					'R', 0xF1u, uData, 0u,
+					(Uint32)SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME),
+					(Uint32)iCycle, (Uint16)pSpc->Regs.rPC);
+
 			if (uData & 0x10u)
 			{
 				pIO->m_Regs.apu_w[0] = 0;
@@ -317,6 +361,11 @@ void SNSpcIO::Write8Trap(SNSpcT *pSpc, Uint32 uAddr, Uint8 uData)
 	case 0xF5:
 	case 0xF6:
 	case 0xF7:
+		AURORA_SNES_TRC_PORT(
+			'S', (Uint8)uAddr, uData, pIO->m_Regs.apu_r[uAddr & 3u],
+			(Uint32)SNSPCGetCounter(pSpc, SNSPC_COUNTER_FRAME),
+			(Uint32)SNSPCGetCounter(pSpc, SNSPC_COUNTER_TOTAL),
+			(Uint16)pSpc->Regs.rPC);
 		pIO->m_Regs.apu_r[uAddr & 3] = uData;
 		#if SNES_DEBUGSPCIO
 		_SpcDebugWrite(pSpc, uAddr, uData);

@@ -11,6 +11,8 @@
 #include "snspcdefs.h"
 #include "sndbglog.h"
 #include "platform/ps2/system/aurora_runtime_trace.h"
+#include "platform/ps2/system/aurora_frontend_profiler.h"
+#include "snspctracer.h" /* AURORA_SNES_GENERIC_TRACER_V36_20261002 */
 /* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918 */
 extern "C" {
 #include "snspcbrr.h"
@@ -697,6 +699,9 @@ void SNSpcDspMixFull::FetchBlock(Int32 iChannel)
 	// decode next block
 	if (pChannel->uBlockAddr!=0)
 	{
+#if AURORA_FRONTEND_PROFILER
+		AuroraFrontendProfilerSnesDspBrrDecodeBegin();
+#endif
 		PROF_ENTER("SNSpcBRRDecode");
 		Uint16 uBrrAddr = (Uint16)pChannel->uBlockAddr;
 		/* AURORA_SNES_BINARY_TRACE_V6_20260918_BRR_PRE
@@ -734,6 +739,9 @@ void SNSpcDspMixFull::FetchBlock(Int32 iChannel)
 				pChannel->BlockData[0][15], pChannel->BlockData[0][14]);
 		}
 		PROF_LEAVE("SNSpcBRRDecode");
+#if AURORA_FRONTEND_PROFILER
+		AuroraFrontendProfilerSnesDspBrrDecodeEnd();
+#endif
 		/* AURORA_SNES_BINARY_TRACE_V6_20260918_BRR_POST
 		 * AURORA_TRACE_OFF_PERF_V6_20260919: BRR trace host gate. */
 #if AURORA_RUNTIME_TRACE
@@ -1458,16 +1466,70 @@ static Uint32 _FilterEchoStereoARAM(SNSpcEchoSampleT *L,SNSpcEchoSampleT *R,Int3
 	f[0].iPos=fp; f[1].iPos=fp;
 	return pos;
 }
+#if AURORA_SNES_TRACER
+void SNSpcDspMixFull::FilterEcho(Int16 *L,Int16 *R,Int32 n,Int32 rate,Bool wr,Uint32 uMixCycle)
+#else
 void SNSpcDspMixFull::FilterEcho(Int16 *L,Int16 *R,Int32 n,Int32 rate,Bool wr)
+#endif
 {
-	Uint32 pos=m_Echo.uEchoAddr;
-	Uint32 size=(m_pDsp->GetReg(SNSPCDSP_REG_EDL)&15)<<11;
-	Uint32 base=((Uint32)m_pDsp->GetReg(SNSPCDSP_REG_ESA))<<8;
-	Int16 c[8];
-	if(rate!=SNSPCDSP_SAMPLERATE && size)size=size*rate/SNSPCDSP_SAMPLERATE;
-	if(!size)size=4;
-	c[0]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR0);c[1]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR1);c[2]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR2);c[3]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR3);c[4]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR4);c[5]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR5);c[6]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR6);c[7]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR7);
-	m_Echo.uEchoAddr=(Uint16)_FilterEchoStereoARAM(L,R,n,(Int8)m_pDsp->GetReg(SNSPCDSP_REG_EFB),m_pDsp,base,pos,size,c,m_Echo.Filter,wr);
+    Uint32 pos=m_Echo.uEchoAddr;
+    const Uint8 regESA=m_pDsp->GetReg(SNSPCDSP_REG_ESA);
+    const Uint8 regEDL=(Uint8)(m_pDsp->GetReg(SNSPCDSP_REG_EDL)&15u);
+    const Uint8 regFLG=m_pDsp->GetReg(SNSPCDSP_REG_FLG);
+    const Uint32 base=((Uint32)regESA)<<8;
+    Int16 c[8];
+    Int32 done=0;
+
+    if(!m_Echo.bEchoLatchValid)
+    {
+        m_Echo.uEchoEDL=regEDL;
+        m_Echo.bEchoLatchValid=1;
+    }
+
+    c[0]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR0);c[1]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR1);c[2]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR2);c[3]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR3);c[4]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR4);c[5]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR5);c[6]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR6);c[7]=(Int8)m_pDsp->GetReg(SNSPCDSP_REG_ECHOFIR7);
+
+    while(done<n)
+    {
+        Uint32 size;
+        Uint32 run=(Uint32)(n-done);
+        Uint32 before;
+
+        /* S-DSP EDL is sampled only when the echo offset is zero. This keeps
+         * a mid-ring EDL write from instantly resizing the active buffer. */
+        if(pos==0)
+            m_Echo.uEchoEDL=regEDL;
+
+        size=((Uint32)m_Echo.uEchoEDL)<<11;
+        if(rate!=SNSPCDSP_SAMPLERATE && size)
+            size=size*(Uint32)rate/SNSPCDSP_SAMPLERATE;
+        if(!size) size=4;
+        if(pos>=size) pos%=size;
+        before=pos;
+
+        /* Only split at the next wrap when a different EDL is actually
+         * pending. The ordinary case (including stable EDL=0) stays one
+         * helper call per mixer chunk. */
+        if(regEDL!=m_Echo.uEchoEDL)
+        {
+            Uint32 toWrap=(size-pos+3u)>>2;
+            if(!toWrap) toWrap=1u;
+            if(run>toWrap) run=toWrap;
+        }
+
+        pos=_FilterEchoStereoARAM(
+            L+done,R+done,(Int32)run,(Int8)m_pDsp->GetReg(SNSPCDSP_REG_EFB),
+            m_pDsp,base,pos,size,c,m_Echo.Filter,wr);
+
+#if AURORA_SNES_TRACER
+        if (SNSPC_TRACER_FAST_ACTIVE())
+            SNSPCTracerEchoRun(
+            uMixCycle + (Uint32)done * (32u*SNSPC_CYCLE), (Uint32)rate,
+            base,size,before,pos,run,regFLG,regESA,regEDL,
+            m_Echo.uEchoEDL,wr?1u:0u);
+#endif
+        done+=(Int32)run;
+    }
+    m_Echo.uEchoAddr=(Uint16)pos;
 }
 
 
@@ -1583,7 +1645,48 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 		Int16 *pPitchModNext = pData->PitchModB;
 
 		// dequeue write queue up to current cycle time
+#if AURORA_FRONTEND_PROFILER
+		AuroraFrontendProfilerSnesDspSyncBegin();
+#endif
 		m_pDsp->Sync(uCycle);
+#if AURORA_FRONTEND_PROFILER
+		AuroraFrontendProfilerSnesDspSyncEnd();
+#endif
+
+		// dont update more than samples-per-update at a time
+		nSamples = nTotalSamples;
+		if (nSamples > nSamplesPerUpdate) nSamples = nSamplesPerUpdate;
+
+		/* AURORA_SDSP_DUAL_TIMELINE_V36_20261002
+		 * AURORA_SDSP_RESAMPLE_CHUNK_ALIGNMENT_V36_2_20261002
+		 * The old block mixer could delay a DSP write for an entire ~68-sample
+		 * chunk. KI exposed this as EDL=$02 becoming visible while ESA=$FF
+		 * remained stale long enough for echo to wrap through page zero.
+		 *
+		 * v36 originally split at arbitrary one-sample boundaries. The shared
+		 * SNES 32->48 kHz converter consumes input in 2:3 pairs and the frontend
+		 * intentionally schedules SNES production in 4-sample quanta. An odd
+		 * internal chunk can therefore strand/drop one input sample at the call
+		 * boundary. Keep every mixer/output chunk divisible by four: replay sees
+		 * a write at the first 4-sample boundary after its timestamp (<=125 us),
+		 * while normal 68-sample chunks remain completely unchanged. */
+		{
+			const Uint32 uNextWrite = m_pDsp->GetNextWriteCycle();
+			if (uNextWrite != 0xFFFFFFFFu && uNextWrite > uCycle)
+			{
+				const Uint32 uDelta = uNextWrite - uCycle;
+				Uint32 uToWrite = (uDelta + uCyclesPerSample - 1u) / uCyclesPerSample;
+				if (!uToWrite) uToWrite = 1u;
+				/* Preserve the frontend's native 4-sample scheduling quantum.
+				 * nSamples and nTotalSamples are already multiples of four here. */
+				uToWrite = (uToWrite + 3u) & ~3u;
+				if ((Uint32)nSamples > uToWrite) nSamples = (Int32)uToWrite;
+			}
+		}
+
+#if AURORA_FRONTEND_PROFILER
+		AuroraFrontendProfilerSnesDspChunk((Uint32)nSamples);
+#endif
 
 		// EON remains active even while FLG protects echo writes.
 		uEchoEnable = m_pDsp->GetReg(SNSPCDSP_REG_EON);
@@ -1591,12 +1694,8 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 		/* Voice 0 cannot be pitch-modulated on real hardware. */
 		uPitchMod = m_pDsp->GetReg(SNSPCDSP_REG_PMON) & 0xFE;
 		uNoiseEnable = m_pDsp->GetReg(SNSPCDSP_REG_NOV);
-		/* AURORA_SNES_SAFE_PERF_V2_20260919: no DSP Sync/write occurs again until the next chunk. */
+		/* Registers are stable until this event-bounded chunk ends. */
 		uFlags = m_pDsp->GetReg(SNSPCDSP_REG_FLG);
-
-		// dont update more than samples-per-update at a time
-		nSamples = nTotalSamples;
-		if (nSamples > nSamplesPerUpdate) nSamples = nSamplesPerUpdate;
 
 		// clear main and echo buffers
 		/* AURORA_SNES_SAFE_PERF_V7_20260919: identical L/R byte spans; calculate each 64-bit count once. */
@@ -1611,6 +1710,9 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 
 		// Noise/rate counter free-runs independent of NON selection.
 		{
+#if AURORA_FRONTEND_PROFILER
+			AuroraFrontendProfilerSnesDspNoiseBegin();
+#endif
 			PROF_ENTER("SNSpcDspOutputNoise");
 			/* AURORA_TOPGEAR_ACCURACY_PERF_RECOVERY_V2_DSP2_20260917: only materialize the transient noise buffers if a voice
 			 * actually consumes them; otherwise advance exact internal state. */
@@ -1619,11 +1721,17 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 			else
 				OutputNoise(NULL, NULL, nSamples, nSampleRate);
 			PROF_LEAVE("SNSpcDspOutputNoise");
+#if AURORA_FRONTEND_PROFILER
+			AuroraFrontendProfilerSnesDspNoiseEnd();
+#endif
 		}
 
 		/* MUTE gates DAC output, not internal DSP state. */
 		if (TRUE)
 		{
+#if AURORA_FRONTEND_PROFILER
+			AuroraFrontendProfilerSnesDspVoicesBegin();
+#endif
 			for (iChannel=0; iChannel < SNSPCDSP_CHANNEL_NUM; iChannel++)
 			{
 				/* AURORA_SNES_SAFE_PERF_V1_20260919
@@ -1635,12 +1743,58 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 					(uPitchMod & uNextChannelMask) != 0;
 				Bool bPitchModWritten = FALSE;
 
+#if CODE_PLATFORM == CODE_PS2 && !CODE_DEBUG && !SNSPCDSP_MIXSILENCE
+				/* AURORA_SNES_DSP_SILENT_VOICE_FASTPATH_V3_4_20261005
+				 *
+				 * OutputEnvelope() begins by clearing ENVX/OUTX and, for an
+				 * already-ended BRR stream, returns before any envelope work.
+				 * Do that exact observable state transition here so an ended
+				 * voice does not pay a function call/setup once per DSP chunk.
+				 *
+				 * If this voice feeds PMON for the next channel, preserve the
+				 * existing zero-input semantics byte-for-byte: clear the
+				 * current pitch-mod buffer and perform the same ping-pong swap
+				 * that the old post-OutputEnvelope path performed.
+				 *
+				 * Active voices are untouched. Debug/MIXSILENCE builds keep
+				 * the historical path to preserve diagnostic behavior. */
+				SNSpcChannelT *pInactiveVoice = GetChannel(iChannel);
+				if (pInactiveVoice->uBlockAddr == 0)
+				{
+#if AURORA_FRONTEND_PROFILER
+					AuroraFrontendProfilerSnesDspSilentFastpath();
+#endif
+					pInactiveVoice->envx = 0;
+					pInactiveVoice->outx = 0;
+
+					if (bFeedsPitchMod)
+					{
+						memset(pPitchModNext, 0,
+						       (size_t)nSamples * sizeof(*pPitchModNext));
+
+						Int16 *pSwap = pPitchModPrev;
+						pPitchModPrev = pPitchModNext;
+						pPitchModNext = pSwap;
+					}
+					continue;
+				}
+#endif
+
 				#if CODE_DEBUG
 				if (_ChMask & uChannelMask)
 				#endif
 				
 				// calculate envelope values for channel
-				if (OutputEnvelope(iChannel, pData->EnvData, nSamples))
+#if AURORA_FRONTEND_PROFILER
+				AuroraFrontendProfilerSnesDspEnvelopeBegin();
+#endif
+				const Int32 bAuroraEnvelopeActive =
+					OutputEnvelope(iChannel, pData->EnvData, nSamples);
+#if AURORA_FRONTEND_PROFILER
+				AuroraFrontendProfilerSnesDspEnvelopeEnd(
+					bAuroraEnvelopeActive ? TRUE : FALSE);
+#endif
+				if (bAuroraEnvelopeActive)
 				{
 					Bool bMix;
 					Int16 *pSampleData;
@@ -1652,22 +1806,51 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 					/* AURORA_SNES_SAFE_PERF_V1_20260919: bit 0 was cleared by PMON & 0xFE. */
 					if (uPitchMod & uChannelMask)
 					{
+#if AURORA_FRONTEND_PROFILER
+						AuroraFrontendProfilerSnesDspSamplePmonBegin();
+#endif
 						bMix = OutputSampleModulated(
 							iChannel, pSampleData, pFracData,
 							pPitchModPrev, nSamples, nSampleRate);
+#if AURORA_FRONTEND_PROFILER
+						AuroraFrontendProfilerSnesDspSamplePmonEnd(
+							bMix ? TRUE : FALSE, (Uint32)nSamples);
+#endif
 						#if CODE_DEBUG
 						//ConDebug("PitchModulation %d\n", iChannel);
 						#endif
 					} else
 					{
+#if AURORA_FRONTEND_PROFILER
+						AuroraFrontendProfilerSnesDspSampleNormalBegin();
+#endif
 						bMix = OutputSample(
 							iChannel, pSampleData, pFracData,
 							nSamples, nSampleRate);
+#if AURORA_FRONTEND_PROFILER
+						AuroraFrontendProfilerSnesDspSampleNormalEnd(
+							bMix ? TRUE : FALSE, (Uint32)nSamples);
+#endif
 					}
 
 					if (bMix)
 					{
 						const SNSpcVoiceRegsT *pRegs = m_pDsp->GetVoiceRegs(iChannel);
+
+#if AURORA_FRONTEND_PROFILER
+						/* Endpoint-max envelope proxy: two reads only, no per-sample
+						 * diagnostic loop in this hot path.  Gain thresholds are
+						 * diagnostic candidates, not emulation decisions. */
+						const Uint32 uEnvFirst = (Uint32)pData->EnvData[0];
+						const Uint32 uEnvLast = (Uint32)pData->EnvData[nSamples - 1];
+						const Uint32 uEnvProxy =
+							uEnvFirst > uEnvLast ? uEnvFirst : uEnvLast;
+						AuroraFrontendProfilerSnesDspVoiceGain(
+							uEnvProxy, (Int32)pRegs->vol_l, (Int32)pRegs->vol_r,
+							(uPitchMod & uChannelMask) ? TRUE : FALSE,
+							(uEchoEnable & uChannelMask) ? TRUE : FALSE,
+							bFeedsPitchMod);
+#endif
 
 						// is noise enabled for this channel?
 						if (uNoiseEnable & uChannelMask)
@@ -1679,9 +1862,15 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 
 						if (bFeedsPitchMod)
 						{
+#if AURORA_FRONTEND_PROFILER
+							AuroraFrontendProfilerSnesDspPitchmodFeederBegin();
+#endif
 							_SNSpcBuildPitchModOutput(
 								pPitchModNext, pSampleData,
 								pData->EnvData, pFracData, nSamples);
+#if AURORA_FRONTEND_PROFILER
+							AuroraFrontendProfilerSnesDspPitchmodFeederEnd();
+#endif
 							/* AURORA_SNES_SAFE_PERF_V1_20260919: helper overwrote all nSamples entries. */
 							bPitchModWritten = TRUE;
 						}
@@ -1690,6 +1879,12 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 						// mix channel into main and echo buffers
 						//
 
+#if AURORA_FRONTEND_PROFILER
+						AuroraFrontendProfilerSnesDspMixStereoBegin(
+							(uNoiseEnable & uChannelMask) ? TRUE : FALSE,
+							(uEchoEnable & uChannelMask) ? TRUE : FALSE,
+							(Uint32)nSamples);
+#endif
 						PROF_ENTER("SNSpcDspMixStereo");
 						if ( uEchoEnable & uChannelMask )
 						{
@@ -1713,6 +1908,10 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 						}
 
 						PROF_LEAVE("SNSpcDspMixStereo");
+#if AURORA_FRONTEND_PROFILER
+						AuroraFrontendProfilerSnesDspMixStereoEnd(
+							(uEchoEnable & uChannelMask) ? TRUE : FALSE);
+#endif
 					}
 				}
 
@@ -1728,13 +1927,27 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 					pPitchModNext = pSwap;
 				}
 			}
+#if AURORA_FRONTEND_PROFILER
+			AuroraFrontendProfilerSnesDspVoicesEnd();
+			AuroraFrontendProfilerSnesDspEchoBegin();
+#endif
 
 			/* FLG.5 protects echo writes only; read/FIR/address continue. */
 			/* AURORA_SNES_SAFE_PERF_V2_20260919: use the same post-Sync FLG snapshot for this chunk. */
+#if AURORA_SNES_TRACER
+			FilterEcho(pData->Echo[0], pData->Echo[1], nSamples, nSampleRate, (uFlags&0x20)==0, uCycle);
+#else
 			FilterEcho(pData->Echo[0], pData->Echo[1], nSamples, nSampleRate, (uFlags&0x20)==0);
+#endif
+#if AURORA_FRONTEND_PROFILER
+			AuroraFrontendProfilerSnesDspEchoEnd();
+#endif
 		}
 
 		// mix main + echo to output buffer
+#if AURORA_FRONTEND_PROFILER
+		AuroraFrontendProfilerSnesDspFinalBegin();
+#endif
 		PROF_ENTER("SNSpcDspMixEcho");
 		if (uFlags&0x40) /* AURORA_SNES_SAFE_PERF_V6_20260919: DAC mute: skip work whose result was overwritten */
 		{
@@ -1752,6 +1965,10 @@ void SNSpcDspMixFull::Mix(CMixBuffer *pMixBuf)
 				(Int8)m_pDsp->GetReg(SNSPCDSP_REG_MVOLR), (Int8)m_pDsp->GetReg(SNSPCDSP_REG_EVOLR));
 			PROF_LEAVE("SNSpcDspMixEcho");
 		}
+
+#if AURORA_FRONTEND_PROFILER
+		AuroraFrontendProfilerSnesDspFinalEnd();
+#endif
 
 		// output buffer to sound hardware
 		if (nSampleChannels == 2)

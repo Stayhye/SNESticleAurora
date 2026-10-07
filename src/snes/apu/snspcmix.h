@@ -76,7 +76,11 @@ class    SNSpcDspMixFull : public SNSpcDspMix
 	Int32	OutputSampleModulated(Int32 iChannel, Int16 *pOut, Uint16 *pFrac,
 			const Int16 *pPitchMod, Int32 nSamples, Int32 nSampleRate);
 	Int32   OutputNoise(Int16 *pOut, Uint16 *pFrac, Int32 nSamples, Int32 nSampleRate);
+#if AURORA_SNES_TRACER
+	void	FilterEcho(Int16 *pLeftEcho, Int16 *pRightEcho, Int32 nSamples, Int32 nSampleRate, Bool bEchoWrite, Uint32 uMixCycle);
+#else
 	void	FilterEcho(Int16 *pLeftEcho, Int16 *pRightEcho, Int32 nSamples, Int32 nSampleRate, Bool bEchoWrite);
+#endif
 public:
 	void	Reset();
 	void	Mix(class CMixBuffer *pOutBuffer);

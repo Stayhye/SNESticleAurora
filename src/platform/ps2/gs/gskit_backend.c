@@ -68,6 +68,10 @@ static int _gsk_gb_square_pixels = 0;
  * Transient render-transform latch. Keep frontend/UI geometry independent of
  * the persistent handheld presentation/PCRTC policy above. */
 static int _gsk_gb_square_draw = 0;
+/* AURORA_GBA_480I_MATCH_240P_ASPECT_V3_2_20261005
+ * GBA interlaced presentation is intentionally separate from Gambatte.
+ * 240p's tested PCRTC profile is 11 -> 9 VCK/source-pixel. */
+static int _gsk_gba_match_240p_draw = 0;
 static int _gsk_240p_fb_width = 256;
 /* AURORA_PCE_FIXED512_DBX0_CUMULATIVE_V8_20260830
  * Optional horizontal scanout window inside the 240p framebuffer.
@@ -350,7 +354,23 @@ static void _GskApplyRenderTransform(void)
      * each side. No GB source pixel is dropped, duplicated unevenly or filtered.
      * 240p is handled below at PCRTC level because its framebuffer is already
      * 1:1 logical storage. */
-    if (_gsk_gb_square_draw &&
+    /* AURORA_GBA_480I_MATCH_240P_ASPECT_V3_2_20261005
+     * Match GBA's already-good 240p physical width in the 640x480 source
+     * modes. 240p starts from the 4:3 logical PAR (5/4) and its integer PCRTC
+     * correction is 11 -> 9, therefore X/Y = (5/4)*(9/11) = 45/44.
+     *
+     * Do this only for GBA. Gambatte keeps its established exact-2x path.
+     * The transform remains presentation-only: UVs and the 240x160 core image
+     * are untouched and sampling remains NEAREST. */
+    if (_gsk_gba_match_240p_draw &&
+        _gsk_active_mode != GSK_VIDMODE_240P &&
+        _gsk_fb_width == 640 && _gsk_fb_height == 480)
+    {
+        sx = sy * (45.0f / 44.0f);
+        ox = ((float)_gsk_fb_width -
+              (float)GSK_LOGICAL_W * sx) * 0.5f;
+    }
+    else if (_gsk_gb_square_draw &&
         _gsk_active_mode != GSK_VIDMODE_240P &&
         _gsk_fb_width == 640 && _gsk_fb_height == 480)
     {
@@ -750,6 +770,18 @@ void GSK_SetGbSquarePixelDraw(int on)
         return;
 
     _gsk_gb_square_draw = on;
+    _GskApplyRenderTransform();
+}
+
+/* AURORA_GBA_480I_MATCH_240P_ASPECT_V3_2_20261005 */
+void GSK_SetGba240pMatchedDraw(int on)
+{
+    on = on ? 1 : 0;
+
+    if (_gsk_gba_match_240p_draw == on)
+        return;
+
+    _gsk_gba_match_240p_draw = on;
     _GskApplyRenderTransform();
 }
 

@@ -13,13 +13,24 @@
 #include "snmask.h"
 #include "prof.h"
 #include "sndbglog.h"
+#if AURORA_C4_PROFILER
+#include "platform/ps2/system/aurora_c4_profiler.h"
+#endif
 #include "platform/ps2/system/aurora_snes_cost_profiler.h" /* AURORA_SNES_PPU_BREAKDOWN_V2_20260920 */
+#include "platform/ps2/system/aurora_c4_profiler.h" /* AURORA_C4_CHR_SPLIT_PROFILER_V8_3_20261004 */
+/* AURORA_C4_CHR_SPLIT_PROFILER_V8_3_4_REPAIR_20261004: wrapper-local reconstruction; diagnostic-only. */
+#if AURORA_SMK_PROFILER
+#include "platform/ps2/system/aurora_smk_profiler.h"
+#endif
 #if CODE_PLATFORM == CODE_PS2
 #include "ps2mem.h" /* AURORA_DKC_SPR_LUT_MIRROR_V23_20260928_INCLUDE */
 #endif
 
 #define SNPPU_BGPLANE_SIZE 48
 #define SNPPURENDER_CHR64 (TRUE)
+
+/* AURORA_SNES_DEEP_OPT_V3_14_20261005 */
+/* AURORA_SNES_DEEP_BG_SCOPE_FIX_V3_14_5_20261006 */
 
 static void _FetchMode7(Uint8 *pLine, SnesPPU *pPPU, Int32 iLine, SNMaskT *pPriority, SNMaskT *pOpaque);
 static void _BuildMode7ExtBG(Uint8 *pLineBG2, SNMaskT *pPriority,
@@ -283,6 +294,18 @@ extern "C" void AuroraPPUFetchCHR2Direct64PS2(
 	Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask,
 	const AuroraPPUChrDirectAsmCtx *pCtx);
 extern "C" void AuroraPPUFetchCHR4Direct64PS2(
+	const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles,
+	Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask,
+	const AuroraPPUChrDirectAsmCtx *pCtx);
+/* AURORA_C4_BG_CHR_NOOFFSET_R5900_V8_4_FINAL_20261004
+ * Ordinary non-OPT BG rows have uOffsetY == 0 by construction in FetchBG().
+ * Use leaf R5900 specializations that consume the scanline row directly.
+ * The generic kernels remain intact for offset-per-tile and all other cases. */
+extern "C" void AuroraPPUFetchCHR2NoOffset64PS2(
+	const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles,
+	Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask,
+	const AuroraPPUChrDirectAsmCtx *pCtx);
+extern "C" void AuroraPPUFetchCHR4NoOffset64PS2(
 	const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles,
 	Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask,
 	const AuroraPPUChrDirectAsmCtx *pCtx);
@@ -633,9 +656,56 @@ static void _FetchCHR2_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRende
 		(const Uint64 *)pPalLookup
 	};
 	PROF_ENTER("_FetchCHR2_64");
+#if AURORA_C4_PROFILER
+	Uint32 c4ChrStart = 0;
+	if (g_AuroraC4ProfilerActive)
+		c4ChrStart = ProfCtrGetCycle();
+#endif
 	AuroraPPUFetchCHR2Direct64PS2(
 		pVram, uBaseAddr, pTiles, nTiles, uScrollY, pDest, pMask, &ctx);
+#if AURORA_C4_PROFILER
+	if (g_AuroraC4ProfilerActive)
+	{
+		const Uint32 c4ChrCycles =
+			(Uint32)(ProfCtrGetCycle() - c4ChrStart);
+		AuroraC4ProfilerChrKernel(
+			AURORA_C4_CHR2_GENERIC_OFFSET, c4ChrCycles,
+			nTiles > 0 ? (Uint32)nTiles : 0u);
+	}
+#endif
 	PROF_LEAVE("_FetchCHR2_64");
+}
+
+static void _FetchCHR2NoOffset_64(const Uint16 *pVram, Uint32 uBaseAddr,
+	const SnesRenderTileT *pTiles, Int32 nTiles, Uint32 uScrollY,
+	Uint8 *pDest, Uint8 *pMask, Uint64 *pPalLookup)
+{
+	AuroraPPUChrDirectAsmCtx ctx =
+	{
+		AURORA_DKC_SPR_PLANE0,
+		AURORA_DKC_SPR_PLANE1,
+		AURORA_DKC_SPR_MASKREV,
+		(const Uint64 *)pPalLookup
+	};
+	PROF_ENTER("_FetchCHR2NoOffset_64");
+#if AURORA_C4_PROFILER
+	Uint32 c4ChrStart = 0;
+	if (g_AuroraC4ProfilerActive)
+		c4ChrStart = ProfCtrGetCycle();
+#endif
+	AuroraPPUFetchCHR2NoOffset64PS2(
+		pVram, uBaseAddr, pTiles, nTiles, uScrollY, pDest, pMask, &ctx);
+#if AURORA_C4_PROFILER
+	if (g_AuroraC4ProfilerActive)
+	{
+		const Uint32 c4ChrCycles =
+			(Uint32)(ProfCtrGetCycle() - c4ChrStart);
+		AuroraC4ProfilerChrKernel(
+			AURORA_C4_CHR2_NOOFFSET, c4ChrCycles,
+			nTiles > 0 ? (Uint32)nTiles : 0u);
+	}
+#endif
+	PROF_LEAVE("_FetchCHR2NoOffset_64");
 }
 #else
 static void _FetchCHR2_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles, Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask, Uint64 *pPalLookup)
@@ -764,10 +834,70 @@ static void _FetchCHR2_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRende
 static void _FetchCHR4_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles, Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask)
 {
 	PROF_ENTER("_FetchCHR4_64");
+#if AURORA_C4_PROFILER
+	Uint32 c4ChrStart = 0;
+	if (g_AuroraC4ProfilerActive)
+		c4ChrStart = ProfCtrGetCycle();
+#endif
 	AuroraPPUFetchCHR4Direct64PS2(
 		pVram, uBaseAddr, pTiles, nTiles, uScrollY, pDest, pMask,
 		&_AuroraPPUChr4DirectAsmCtx);
+#if AURORA_C4_PROFILER
+	if (g_AuroraC4ProfilerActive)
+	{
+		const Uint32 c4ChrCycles =
+			(Uint32)(ProfCtrGetCycle() - c4ChrStart);
+		AuroraC4ProfilerChrKernel(
+			AURORA_C4_CHR4_GENERIC_OFFSET, c4ChrCycles,
+			nTiles > 0 ? (Uint32)nTiles : 0u);
+	}
+#endif
 	PROF_LEAVE("_FetchCHR4_64");
+}
+
+static void _FetchCHR4NoOffset_64(const Uint16 *pVram, Uint32 uBaseAddr,
+	const SnesRenderTileT *pTiles, Int32 nTiles, Uint32 uScrollY,
+	Uint8 *pDest, Uint8 *pMask)
+{
+	PROF_ENTER("_FetchCHR4NoOffset_64");
+#if AURORA_C4_PROFILER
+	Uint32 c4ChrStart = 0;
+	if (g_AuroraC4ProfilerActive)
+		c4ChrStart = ProfCtrGetCycle();
+#endif
+	AuroraPPUFetchCHR4NoOffset64PS2(
+		pVram, uBaseAddr, pTiles, nTiles, uScrollY, pDest, pMask,
+		&_AuroraPPUChr4DirectAsmCtx);
+#if AURORA_C4_PROFILER
+	if (g_AuroraC4ProfilerActive)
+	{
+		const Uint32 c4ChrCycles =
+			(Uint32)(ProfCtrGetCycle() - c4ChrStart);
+		AuroraC4ProfilerChrKernel(
+			AURORA_C4_CHR4_NOOFFSET, c4ChrCycles,
+			nTiles > 0 ? (Uint32)nTiles : 0u);
+	}
+#endif
+#if AURORA_C4_PROFILER
+	/* AURORA_C4_CHR4_DATA_MIX_DIAG_V8_3_MIX1_20261004: intentionally AFTER the raw ASM timer/recorder. */
+	if (g_AuroraC4ProfilerActive && nTiles > 0)
+	{
+		Uint32 c4Flip[4]={0,0,0,0};
+		Uint32 c4Transparent[4]={0,0,0,0};
+		for (Int32 c4i=0;c4i<nTiles;c4i++)
+		{
+			const Uint32 c4f=(Uint32)(pTiles[c4i].uFlip & 3u);
+			++c4Flip[c4f];
+			if (pMask[c4i] == 0)
+				++c4Transparent[c4f];
+		}
+		AuroraC4ProfilerChr4Mix(
+			c4Flip[0],c4Flip[1],c4Flip[2],c4Flip[3],
+			c4Transparent[0],c4Transparent[1],
+			c4Transparent[2],c4Transparent[3]);
+	}
+#endif
+	PROF_LEAVE("_FetchCHR4NoOffset_64");
 }
 #else
 static void _FetchCHR4_64(const Uint16 *pVram, Uint32 uBaseAddr, const SnesRenderTileT *pTiles, Int32 nTiles, Uint32 uScrollY, Uint8 *pDest, Uint8 *pMask)
@@ -1403,6 +1533,17 @@ static void _FetchCHR_64(Uint8 *pLine, SnesPPU *pPPU, SnesBGInfoT *pBGInfo, stru
 				(pRegs->mosaic & 0x02) != 0,
 				bHiresSubscreen
 			);
+		else if (!bOffset)
+			_FetchCHR2NoOffset_64(
+				pVram,
+				pBGInfo->uChrAddr,
+				pTiles,
+				nTiles,
+				uScrollY & 7,
+				pLine,
+				pMask,
+				AURORA_DKC_SPR_PAL2 + ((Uint32)pBGInfo->uPalBase * 16u)
+			);
 		else
 			_FetchCHR2_64(
 				pVram,
@@ -1429,6 +1570,16 @@ static void _FetchCHR_64(Uint8 *pLine, SnesPPU *pPPU, SnesBGInfoT *pBGInfo, stru
 				pMask,
 				(pRegs->mosaic & 0x01) != 0,
 				bHiresSubscreen
+			);
+		else if (!bOffset)
+			_FetchCHR4NoOffset_64(
+				pVram,
+				pBGInfo->uChrAddr,
+				pTiles,
+				nTiles,
+				uScrollY & 7,
+				pLine,
+				pMask
 			);
 		else
 			_FetchCHR4_64(
@@ -2012,6 +2163,40 @@ static _INLINE void _DecodeOBJRow4(SnesChrLookupT *pLookup, Uint8 *pHFlip,
 }
 
 
+#if CODE_PLATFORM == CODE_PS2 && AURORA_PPU_R5900_ASM
+/* AURORA_DKC_OBJ_HOTPATH_V20_20260930
+ * Default OBJ cache stores canonical rows, so cache misses do not need eight
+ * 32-bit planar-LUT loads.  BeginRender() already mirrors the exact canonical
+ * 256x64-bit plane LUT and normal opacity reverse table into scratchpad for
+ * the BG kernels.  Reuse those immutable host-derived copies here: four 64-bit
+ * LUT loads produce the same eight indexed pixels, then the existing cache
+ * owns canonical/H-flipped representation exactly as before. */
+static _INLINE void _DecodeOBJRow4ScratchPS2(
+	Uint16 uPair01, Uint16 uPair23, Uint64 *pRowData, Uint32 *pOpaque)
+{
+	const Uint32 uSource =
+		(Uint32)(((uPair01 | uPair23) |
+		          ((uPair01 | uPair23) >> 8)) & 0x00ffu);
+
+	if (!uSource)
+	{
+		*pRowData = 0;
+		*pOpaque = 0;
+		return;
+	}
+
+	const Uint64 *pLookup = AURORA_DKC_SPR_PLANE0;
+	Uint64 uRow = pLookup[uPair01 & 0x00ffu];
+	uRow |= pLookup[uPair01 >> 8] << 1;
+	uRow |= pLookup[uPair23 & 0x00ffu] << 2;
+	uRow |= pLookup[uPair23 >> 8] << 3;
+
+	*pRowData = uRow;
+	*pOpaque = AURORA_DKC_SPR_MASKREV[uSource];
+}
+#endif
+
+
 /* AURORA_OBJ_STAT77_V2_RENDER8_20260915 */
 static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList,
 	SnesRenderObj8T *pObjLine, Int32 MaxObj8Line, Int32 iLine,
@@ -2019,6 +2204,15 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 	Bool bObjInterlace, Bool bField)
 {
 	Int32 nObjLine = 0;
+#if AURORA_FRONTEND_PROFILER
+	/* AURORA_SNES_TARGET_TRAITS_V3_21_1_20261006 */
+	Uint32 uAuroraObjCacheHits = 0;
+	Uint32 uAuroraObjCacheMisses = 0;
+	Uint32 uAuroraObjMissTransparent = 0;
+	Uint32 uAuroraObjMissOpaque = 0;
+	Uint32 uAuroraObjHFlipTiles = 0;
+	Uint32 uAuroraObjSecondTableTiles = 0;
+#endif
 #if SNDBG_LOG && SNPPU_OBJ_CACHE
 	Uint32 uCacheHits = 0;
 	Uint32 uCacheMisses = 0;
@@ -2109,7 +2303,16 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 		Int32 iCol;
 		Int32 iColStep;
 		/* AURORA_OBJ_PALETTE_HOIST_V1 */
-		Uint32 uPalette = _SnesPPU_Obj4PalLookup[pObj->uPal];
+		/* AURORA_OBJ_INVARIANT_HOIST_V3_22_20261006
+		 * Immutable for every fetched sliver of this OBJ.  Keeping these in
+		 * explicit locals avoids repeated structure loads in the hot tile loop.
+		 * uObjRowBase is the exact pre-mask VRAM word base for this tile row. */
+		const Uint8 uObjPri = pObj->uPri;
+		const Uint8 uObjPal = pObj->uPal;
+		const Bool bObjHFlip = pObj->bHFlip;
+		const Uint32 uPalette = _SnesPPU_Obj4PalLookup[uObjPal];
+		const Uint32 uObjRowBase =
+			uBaseAddr + (bSecondTable ? uNameSelect : 0u) + (uRow << 8);
 
 #if SNDBG_DEEP
 		if (bTrace)
@@ -2159,7 +2362,7 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 			&iTileX, &nTileCount);
 		ObjX += iTileX << 3;
 		uSize = (Uint32)nTileCount << 3;
-		if (pObj->bHFlip)
+		if (bObjHFlip)
 		{
 			iCol = (pObj->uWidth >> 3) - 1 - iTileX;
 			iColStep = -1;
@@ -2173,42 +2376,67 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 		while (uSize > 0)
 		{
 			{
-				uTile = (uRow << 4) | ((uCol0 + iCol) & 0x0F);
-				uTileAddr = uBaseAddr + uTile * 16;
-				if (bSecondTable)
-					uTileAddr += uNameSelect;
+				/* AURORA_OBJ_INVARIANT_HOIST_V3_22_20261006:
+				 * row/name-table terms are already in uObjRowBase. */
+				uTile = (uCol0 + iCol) & 0x0F;
+				uTileAddr = uObjRowBase + (uTile << 4);
 				Uint32 uRowAddr = (uTileAddr & 0x7FFF) + uYoff;
+#if AURORA_FRONTEND_PROFILER
+				if (bObjHFlip)
+					++uAuroraObjHFlipTiles;
+				if (bSecondTable)
+					++uAuroraObjSecondTableTiles;
+#endif
 
 #if SNPPU_OBJ_CACHE
 				{
 					Uint64 uRowData;
 
 					if (SnesPPUChrCacheLookup4(&_SnesPPU_ChrCache,
-						uRowAddr, pObj->bHFlip, &uRowData, &uOpaque))
+						uRowAddr, bObjHFlip, &uRowData, &uOpaque))
 					{
+#if AURORA_FRONTEND_PROFILER
+						++uAuroraObjCacheHits;
+#endif
 #if SNDBG_LOG
 						uCacheHits++;
 #endif
 					}
 					else
 					{
+#if AURORA_FRONTEND_PROFILER
+						++uAuroraObjCacheMisses;
+#endif
+#if SNDBG_LOG
+						uCacheMisses++;
+#endif
+#if CODE_PLATFORM == CODE_PS2 && AURORA_PPU_R5900_ASM
+						const Uint16 uPair01 = pVram[uRowAddr];
+						const Uint16 uPair23 = pVram[uRowAddr + 8];
+						_DecodeOBJRow4ScratchPS2(
+							uPair01, uPair23, &uRowData, &uOpaque);
+#else
 						const SnesPPUTile4T *pTile4 =
 							(const SnesPPUTile4T *)(pVram + uRowAddr);
 						Uint32 uPlane0 = pTile4->uPlane01[0][0];
 						Uint32 uPlane1 = pTile4->uPlane01[0][1];
 						Uint32 uPlane2 = pTile4->uPlane23[0][0];
 						Uint32 uPlane3 = pTile4->uPlane23[0][1];
-#if SNDBG_LOG
-						uCacheMisses++;
-#endif
 						_DecodeOBJRow4(&_SnesPPU_PlaneLookup[0],
 							_SnesPPU_HFlipLookup[1], uPlane0, uPlane1,
 							uPlane2, uPlane3, &uTile0, &uTile1, &uOpaque);
 						uRowData = (Uint64)uTile0 | ((Uint64)uTile1 << 32);
+#endif
+#if AURORA_FRONTEND_PROFILER
+						if (uOpaque)
+							++uAuroraObjMissOpaque;
+						else
+							++uAuroraObjMissTransparent;
+#endif
 						SnesPPUChrCacheStore4(&_SnesPPU_ChrCache,
 							uRowAddr, uRowData, uOpaque);
 						/* AURORA_HFLIP_MISS_REUSE_V1 */
-						if (pObj->bHFlip)
+						if (bObjHFlip)
 						{
 #if SNPPU_CHR_CACHE_HFLIP
 							SnesPPUChrCacheLoad4HFlip(
@@ -2232,6 +2460,13 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 					Uint32 uPlane3 = pTile4->uPlane23[0][1];
 					_DecodeOBJRow4(pLookup, pHFlip, uPlane0, uPlane1,
 						uPlane2, uPlane3, &uTile0, &uTile1, &uOpaque);
+#if AURORA_FRONTEND_PROFILER
+					++uAuroraObjCacheMisses;
+					if (uOpaque)
+						++uAuroraObjMissOpaque;
+					else
+						++uAuroraObjMissTransparent;
+#endif
 				}
 #endif
 				uTile0 |= uPalette;
@@ -2243,8 +2478,8 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 				pObjLine->uData[SNPPU_BGPLANE_OPAQUE] = (Uint8)uOpaque;
 
 				// store objline
-				pObjLine->uPri  = pObj->uPri;
-				pObjLine->uPal  = pObj->uPal;
+				pObjLine->uPri  = uObjPri;
+				pObjLine->uPal  = uObjPal;
 				pObjLine->iPosX = ObjX;
 				pObjLine++;
 				nObjLine++;
@@ -2266,6 +2501,20 @@ static Int32 _FetchOBJ(SnesRenderObjT *pObjBase, Uint8 *pObjList, Int32 nObjList
 	}
 
 FetchOBJDone:
+#if AURORA_FRONTEND_PROFILER
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_OBJ_CACHE_HITS,
+		0u, uAuroraObjCacheHits);
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_OBJ_CACHE_MISSES,
+		0u, uAuroraObjCacheMisses);
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_OBJ_MISS_TRANSPARENT,
+		0u, uAuroraObjMissTransparent);
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_OBJ_MISS_OPAQUE,
+		0u, uAuroraObjMissOpaque);
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_OBJ_HFLIP_TILES,
+		0u, uAuroraObjHFlipTiles);
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_OBJ_SECOND_TABLE_TILES,
+		0u, uAuroraObjSecondTableTiles);
+#endif
 #if SNDBG_LOG && SNPPU_OBJ_CACHE
 	g_DbgObjCacheHits += uCacheHits;
 	g_DbgObjCacheMisses += uCacheMisses;
@@ -2331,7 +2580,7 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 	Uint8 cgwsel = pRegs->cgwsel;
 	Uint8 uFetchLayers;
 	/* AURORA_SNES_PPU_FOCUS_V3_20260920: diagnostic work counters only. */
-#if AURORA_SNES_COST_PROFILER
+#if AURORA_SNES_COST_PROFILER || AURORA_FRONTEND_PROFILER
 	Uint32 uAuroraBgMapFetches = 0;
 	Uint32 uAuroraBgChrDecodes = 0;
 #endif
@@ -2392,6 +2641,14 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 	if (!bHiresSubscreenVisible && (!(cgwsel & 0x02) || cgadsub == 0))
 		ts = 0;
 	uFetchLayers = tm | ts;
+#if AURORA_C4_PROFILER
+	AuroraC4ProfilerPpuLine(uBGMode,
+		((pRegs->mosaic & 0x0Fu) != 0) ? TRUE : FALSE,
+		((tmw | tsw) != 0 || (cgwsel & 0xF0u) != 0) ? TRUE : FALSE,
+		(cgadsub != 0) ? TRUE : FALSE,
+		(uBGMode == 5 || uBGMode == 6) ? TRUE : FALSE,
+		((pRegs->setini & SNESPPU_SETINI_PSEUDOHIR) != 0) ? TRUE : FALSE);
+#endif
 
 #if SNDBG_LOG
 	g_DbgBGActiveLayers +=
@@ -2429,7 +2686,7 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 
 	// fetch obj chr for visible objs
 	/* PPU detail: OBJ fetch */
-	AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ);
+	AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ_FETCH);
 	PROF_ENTER("FetchOBJ");
 #if SNDBG_LOG
 	Uint32 _tObjA = ProfCtrGetCycle();
@@ -2445,16 +2702,34 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		if (budget<SNPPU_MAXOBJCHR && count>1 &&
 		    m_nObjTilePotential[iLine]>(Uint16)budget)
 		{
+#if AURORA_FRONTEND_PROFILER
+			const Uint32 uAuroraObjRotateStart = ProfCtrGetCycle();
+#endif
 			Int32 shift=(Int32)(g_SnesObjLimitFramePhase%(Uint32)count);
 			for (Int32 i=0;i<count;i++) rotated[i]=list[(i+shift)%count];
 			list=rotated;
+#if AURORA_FRONTEND_PROFILER
+			AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_OBJ_ROTATE,
+				ProfCtrGetCycle() - uAuroraObjRotateStart, (Uint32)count);
+#endif
 		}
+#if AURORA_FRONTEND_PROFILER
+		const Uint32 uAuroraObjFetchStart = ProfCtrGetCycle();
+#endif
 		nObjLine=_FetchOBJ(m_Objs,list,count,ObjLine,budget,iLine,(uOBSEL&7)<<13,
 			_SnesPPUOBJNameSelect(uOBSEL),m_pPPU->GetVramPtr(0),
 			m_pPPU->IsObjInterlace(), m_pPPU->GetField());
+#if AURORA_FRONTEND_PROFILER
+		AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_OBJ_FETCH_DECODE,
+			ProfCtrGetCycle() - uAuroraObjFetchStart, (Uint32)nObjLine);
+#endif
 	}
 	else
 		nObjLine = 0;
+#if AURORA_C4_PROFILER
+	AuroraC4ProfilerObjLine((Uint32)m_nObjLine[iLine],
+		(Uint32)m_nObjTilePotential[iLine], (Uint32)nObjLine);
+#endif
 #if SNDBG_LOG
 	{
 		Uint32 _dObjFetch = ProfCtrGetCycle() - _tObjA;
@@ -2486,7 +2761,16 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 	}
 #endif
 	PROF_LEAVE("FetchOBJ");
-	AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_OBJ);
+	AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_OBJ_FETCH);
+
+	AURORA_SNES_PPU_LINE(
+		(Uint32)uBGMode, (Uint32)m_nObjLine[iLine], (Uint32)nObjLine,
+		((tm | ts) & SNESPPU_MASK_OBJ) ? TRUE : FALSE,
+		m_ObjRangeOver[iLine] ? TRUE : FALSE,
+		m_ObjTimeOver[iLine] ? TRUE : FALSE,
+		(tmw | tsw) ? TRUE : FALSE, cgadsub ? TRUE : FALSE,
+		ts ? TRUE : FALSE, bHiresSubscreenVisible ? TRUE : FALSE,
+		bBG1Direct ? TRUE : FALSE);
 
 	if (uBGMode!=7)
 	{
@@ -2526,7 +2810,7 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 				uBGFlags[iBG] = 0;
 				continue;
 			}
-#if AURORA_SNES_COST_PROFILER
+#if AURORA_SNES_COST_PROFILER || AURORA_FRONTEND_PROFILER
 			++uAuroraBgMapFetches;
 #endif
 
@@ -2563,12 +2847,17 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		{
 			if (uBGFlags[iBG] & SNPPU_BGFLAGS_FETCHCHR)
 			{
-#if AURORA_SNES_COST_PROFILER
+#if AURORA_SNES_COST_PROFILER || AURORA_FRONTEND_PROFILER
 				++uAuroraBgChrDecodes;
 #endif
 				Uint8 TempMask[2][SNPPU_BGPLANE_SIZE];
 #if SNDBG_LOG
 				g_DbgBGChrRows += 33;
+#endif
+				const Uint32 uFineX = BGInfo[iBG].uScrollX & 7;
+				const Uint32 uMosaic = BGInfo[iBG].uMosaic;
+#if AURORA_FRONTEND_PROFILER
+				const Uint32 uAuroraBgChrStart = ProfCtrGetCycle();
 #endif
 
 				// fetch bg tile data
@@ -2577,20 +2866,43 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 				#else
 				_FetchCHR((Uint8 *)pRenderInfo->BGPlanes[iBG], m_pPPU, &BGInfo[iBG], pRenderInfo->Tiles[iBG], 33, iLine, TempMask[0], (uBGFlags[iBG]&SNPPU_BGFLAGS_OFFSET));
 				#endif
+#if AURORA_FRONTEND_PROFILER
+				const Uint32 uAuroraBgChrDecodeEnd = ProfCtrGetCycle();
+#endif
 
 				// shift mask based on h-scroll of BG
 				/* AURORA_SNES_SAFE_PERF_V9_BG_20260919: identical source value for both mask planes. */
-				const Uint32 uFineX = BGInfo[iBG].uScrollX & 7;
 				SNMaskSHL(&pRenderInfo->BGPlanes[iBG][SNPPU_BGPLANE_OPAQUE], TempMask[0], uFineX);
 				SNMaskSHL(&pRenderInfo->BGPlanes[iBG][SNPPU_BGPLANE_PRI], TempMask[1], uFineX);
 
-				const Uint32 uMosaic = BGInfo[iBG].uMosaic;
 				if (uMosaic > 0)
 				{
 					const Uint32 uMosaicSize = uMosaic + 1;
 					_MosaicBGPlanar((Uint8 *)&pRenderInfo->BGPlanes[iBG][SNPPU_BGPLANE_OPAQUE], 256, uMosaicSize);
 					_MosaicBGPlanar((Uint8 *)&pRenderInfo->BGPlanes[iBG][SNPPU_BGPLANE_PRI], 256, uMosaicSize);
 				}
+#if AURORA_FRONTEND_PROFILER
+				AURORA_SNES_BGCHR_RECORD(
+					(Uint32)iBG, (Uint32)BGInfo[iBG].uBitDepth, 33u,
+					(uBGFlags[iBG] & SNPPU_BGFLAGS_OFFSET) ? TRUE : FALSE,
+					uMosaic > 0 ? TRUE : FALSE, uFineX != 0 ? TRUE : FALSE, FALSE,
+					uAuroraBgChrStart, uAuroraBgChrDecodeEnd, ProfCtrGetCycle());
+				if (BGInfo[iBG].uBitDepth == 2 || BGInfo[iBG].uBitDepth == 4)
+				{
+					Uint32 uAuroraOpaqueRows = 0;
+					Uint32 uAuroraFlip0OpaqueRows = 0;
+					for (Uint32 uAuroraTile = 0; uAuroraTile < 33u; ++uAuroraTile)
+					{
+						if (TempMask[0][uAuroraTile] == 0) continue;
+						++uAuroraOpaqueRows;
+						if (pRenderInfo->Tiles[iBG][uAuroraTile].uFlip == 0)
+							++uAuroraFlip0OpaqueRows;
+					}
+					AURORA_SNES_CHR_TRAITS_RECORD((Uint32)BGInfo[iBG].uBitDepth,
+						uAuroraOpaqueRows, 33u - uAuroraOpaqueRows,
+						uAuroraFlip0OpaqueRows, uAuroraOpaqueRows - uAuroraFlip0OpaqueRows);
+				}
+#endif
 			}
 		}
 
@@ -2609,12 +2921,17 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 			{
 				if (!(ts & (1 << iBG)) || !BGInfo[iBG].uBitDepth)
 					continue;
-#if AURORA_SNES_COST_PROFILER
+#if AURORA_SNES_COST_PROFILER || AURORA_FRONTEND_PROFILER
 				++uAuroraBgChrDecodes;
 #endif
 
 				const Int32 iSubPlane = iBG + 2;
 				Uint8 SubPhaseMask[2][SNPPU_BGPLANE_SIZE];
+				const Uint32 uAuroraHiresFineX = BGInfo[iBG].uScrollX & 7;
+				const Uint32 uAuroraHiresMosaic = BGInfo[iBG].uMosaic;
+#if AURORA_FRONTEND_PROFILER
+				const Uint32 uAuroraHiresBgChrStart = ProfCtrGetCycle();
+#endif
 
 				_FetchCHR_64(
 					(Uint8 *)pRenderInfo->BGPlanes[iSubPlane],
@@ -2627,31 +2944,50 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 					(uBGFlags[iBG] & SNPPU_BGFLAGS_OFFSET),
 					TRUE
 				);
+#if AURORA_FRONTEND_PROFILER
+				const Uint32 uAuroraHiresBgChrDecodeEnd = ProfCtrGetCycle();
+#endif
 
 				SNMaskSHL(
 					&pRenderInfo->BGPlanes[iSubPlane][SNPPU_BGPLANE_OPAQUE],
-					SubPhaseMask[0],
-					(BGInfo[iBG].uScrollX & 7)
-				);
+					SubPhaseMask[0], uAuroraHiresFineX);
 				SNMaskSHL(
 					&pRenderInfo->BGPlanes[iSubPlane][SNPPU_BGPLANE_PRI],
-					SubPhaseMask[1],
-					(BGInfo[iBG].uScrollX & 7)
-				);
+					SubPhaseMask[1], uAuroraHiresFineX);
 
-				if (BGInfo[iBG].uMosaic > 0)
+				if (uAuroraHiresMosaic > 0)
 				{
 					_MosaicBGPlanar(
 						(Uint8 *)&pRenderInfo->BGPlanes[iSubPlane][SNPPU_BGPLANE_OPAQUE],
-						256,
-						BGInfo[iBG].uMosaic + 1
-					);
+						256, uAuroraHiresMosaic + 1);
 					_MosaicBGPlanar(
 						(Uint8 *)&pRenderInfo->BGPlanes[iSubPlane][SNPPU_BGPLANE_PRI],
-						256,
-						BGInfo[iBG].uMosaic + 1
-					);
+						256, uAuroraHiresMosaic + 1);
 				}
+#if AURORA_FRONTEND_PROFILER
+				AURORA_SNES_BGCHR_RECORD(
+					(Uint32)iBG, (Uint32)BGInfo[iBG].uBitDepth, 33u,
+					(uBGFlags[iBG] & SNPPU_BGFLAGS_OFFSET) ? TRUE : FALSE,
+					uAuroraHiresMosaic > 0 ? TRUE : FALSE,
+					uAuroraHiresFineX != 0 ? TRUE : FALSE, TRUE,
+					uAuroraHiresBgChrStart, uAuroraHiresBgChrDecodeEnd,
+					ProfCtrGetCycle());
+				if (BGInfo[iBG].uBitDepth == 2 || BGInfo[iBG].uBitDepth == 4)
+				{
+					Uint32 uAuroraOpaqueRows = 0;
+					Uint32 uAuroraFlip0OpaqueRows = 0;
+					for (Uint32 uAuroraTile = 0; uAuroraTile < 33u; ++uAuroraTile)
+					{
+						if (SubPhaseMask[0][uAuroraTile] == 0) continue;
+						++uAuroraOpaqueRows;
+						if (pRenderInfo->Tiles[iBG][uAuroraTile].uFlip == 0)
+							++uAuroraFlip0OpaqueRows;
+					}
+					AURORA_SNES_CHR_TRAITS_RECORD((Uint32)BGInfo[iBG].uBitDepth,
+						uAuroraOpaqueRows, 33u - uAuroraOpaqueRows,
+						uAuroraFlip0OpaqueRows, uAuroraOpaqueRows - uAuroraFlip0OpaqueRows);
+				}
+#endif
 			}
 		}
 #endif
@@ -2691,15 +3027,29 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 				{
 					if (pRegs->mosaic & 0x01)
 					{
+#if AURORA_FRONTEND_PROFILER
+						const Uint32 uAuroraM7MosaicStart = ProfCtrGetCycle();
+#endif
 						_MosaicBG8((Uint8 *)pRenderInfo->BGPlanes[0], 256, uM7MosaicSize);
 						_MosaicBGPlanar((Uint8 *)&pRenderInfo->BGPlanes[0][SNPPU_BGPLANE_OPAQUE], 256, uM7MosaicSize);
+#if AURORA_FRONTEND_PROFILER
+						AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_MOSAIC_BG1,
+							ProfCtrGetCycle() - uAuroraM7MosaicStart, 256u);
+#endif
 					}
 					if (bMode7ExtBG && (uFetchLayers & SNESPPU_MASK_BG2) &&
 					    (pRegs->mosaic & 0x02))
 					{
+#if AURORA_FRONTEND_PROFILER
+						const Uint32 uAuroraM7MosaicStart = ProfCtrGetCycle();
+#endif
 						_MosaicBG8((Uint8 *)pRenderInfo->BGPlanes[1], 256, uM7MosaicSize);
 						_MosaicBGPlanar((Uint8 *)&pRenderInfo->BGPlanes[1][SNPPU_BGPLANE_PRI], 256, uM7MosaicSize);
 						_MosaicBGPlanar((Uint8 *)&pRenderInfo->BGPlanes[1][SNPPU_BGPLANE_OPAQUE], 256, uM7MosaicSize);
+#if AURORA_FRONTEND_PROFILER
+						AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_MOSAIC_BG2,
+							ProfCtrGetCycle() - uAuroraM7MosaicStart, 256u);
+#endif
 					}
 				}
 			}
@@ -2711,10 +3061,8 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_MODE7);
 	}
 
-#if AURORA_SNES_COST_PROFILER
-	AuroraSnesCostProfilerPpuWork((Uint32)tm, (Uint32)ts,
+	AURORA_SNES_PPU_WORK((Uint32)tm, (Uint32)ts,
 		uAuroraBgMapFetches, uAuroraBgChrDecodes);
-#endif
 
 	/* PPU detail: BG compositor (OBJ draw is nested out below). */
 	AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_BG_OTHER);
@@ -2742,20 +3090,72 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 
 	// render bg layers to main screen
 	if (tm & SNESPPU_MASK_BG4)
-		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[3], (tmw&SNESPPU_MASK_BG4) ? &pBGWindow[3] : NULL, BGInfo[3].uBitDepth,  pMainAddSubWriteMask, cgadsub & SNESPPU_MASK_BG4, NULL, NULL, BGInfo[3].Priority, bRendered, BGInfo[3].uScrollX );
+		{
+#if AURORA_FRONTEND_PROFILER
+			const Uint32 uAuroraDeepStart_BG_MAIN_BG4 = ProfCtrGetCycle();
+#endif
+			_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[3], (tmw&SNESPPU_MASK_BG4) ? &pBGWindow[3] : NULL, BGInfo[3].uBitDepth,  pMainAddSubWriteMask, cgadsub & SNESPPU_MASK_BG4, NULL, NULL, BGInfo[3].Priority, bRendered, BGInfo[3].uScrollX );
+#if AURORA_FRONTEND_PROFILER
+			AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_BG_MAIN_BG4,
+				ProfCtrGetCycle() - uAuroraDeepStart_BG_MAIN_BG4, 256u);
+#endif
+		}
 	if (tm & SNESPPU_MASK_BG3)
-		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[2], (tmw&SNESPPU_MASK_BG3) ? &pBGWindow[2] : NULL, BGInfo[2].uBitDepth,  pMainAddSubWriteMask, cgadsub & SNESPPU_MASK_BG3, &BG3Pri, NULL, BGInfo[2].Priority, bRendered, BGInfo[2].uScrollX);
+		{
+#if AURORA_FRONTEND_PROFILER
+			const Uint32 uAuroraDeepStart_BG_MAIN_BG3 = ProfCtrGetCycle();
+#endif
+			_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[2], (tmw&SNESPPU_MASK_BG3) ? &pBGWindow[2] : NULL, BGInfo[2].uBitDepth,  pMainAddSubWriteMask, cgadsub & SNESPPU_MASK_BG3, &BG3Pri, NULL, BGInfo[2].Priority, bRendered, BGInfo[2].uScrollX);
+#if AURORA_FRONTEND_PROFILER
+			AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_BG_MAIN_BG3,
+				ProfCtrGetCycle() - uAuroraDeepStart_BG_MAIN_BG3, 256u);
+#endif
+		}
 	if (tm & SNESPPU_MASK_BG2)
-		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[1], (tmw&SNESPPU_MASK_BG2) ? &pBGWindow[1] : NULL, BGInfo[1].uBitDepth,  pMainAddSubWriteMask, cgadsub & SNESPPU_MASK_BG2, bMode7ExtBG ? &M7BG2MainPri : NULL, bBG3Pri ? &BG3Pri : NULL, BGInfo[1].Priority, bRendered, BGInfo[1].uScrollX);
+		{
+#if AURORA_FRONTEND_PROFILER
+			const Uint32 uAuroraDeepStart_BG_MAIN_BG2 = ProfCtrGetCycle();
+#endif
+			_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[1], (tmw&SNESPPU_MASK_BG2) ? &pBGWindow[1] : NULL, BGInfo[1].uBitDepth,  pMainAddSubWriteMask, cgadsub & SNESPPU_MASK_BG2, bMode7ExtBG ? &M7BG2MainPri : NULL, bBG3Pri ? &BG3Pri : NULL, BGInfo[1].Priority, bRendered, BGInfo[1].uScrollX);
+#if AURORA_FRONTEND_PROFILER
+			AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_BG_MAIN_BG2,
+				ProfCtrGetCycle() - uAuroraDeepStart_BG_MAIN_BG2, 256u);
+#endif
+		}
 	if (tm & SNESPPU_MASK_BG1)
 	{
 		SNMaskT DirectBG1Mask;
-		_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[0], (tmw&SNESPPU_MASK_BG1) ? &pBGWindow[0] : NULL, BGInfo[0].uBitDepth,  pMainAddSubWriteMask, cgadsub & SNESPPU_MASK_BG1, NULL, (bMode7ExtBG && (tm & SNESPPU_MASK_BG2)) ? &M7BG2MainPri : (bBG3Pri ? &BG3Pri : NULL), BGInfo[0].Priority, bRendered, BGInfo[0].uScrollX, bBG1Direct ? &DirectBG1Mask : NULL);
+#if AURORA_SMK_PROFILER
+		const Bool bSmkMode7Compose = g_AuroraSmkProfilerActive && (uBGMode == 7);
+		const Uint32 uSmkMode7ComposeStart = bSmkMode7Compose ? ProfCtrGetCycle() : 0u;
+#endif
+		{
+#if AURORA_FRONTEND_PROFILER
+			const Uint32 uAuroraDeepStart_BG_MAIN_BG1 = ProfCtrGetCycle();
+#endif
+			_RenderBG8(pMain8, pMain, pRenderInfo->BGPlanes[0], (tmw&SNESPPU_MASK_BG1) ? &pBGWindow[0] : NULL, BGInfo[0].uBitDepth,  pMainAddSubWriteMask, cgadsub & SNESPPU_MASK_BG1, NULL, (bMode7ExtBG && (tm & SNESPPU_MASK_BG2)) ? &M7BG2MainPri : (bBG3Pri ? &BG3Pri : NULL), BGInfo[0].Priority, bRendered, BGInfo[0].uScrollX, bBG1Direct ? &DirectBG1Mask : NULL);
+#if AURORA_FRONTEND_PROFILER
+			AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_BG_MAIN_BG1,
+				ProfCtrGetCycle() - uAuroraDeepStart_BG_MAIN_BG1, 256u);
+#endif
+		}
+#if AURORA_SMK_PROFILER
+		if (bSmkMode7Compose)
+			AuroraSmkProfilerMode7Compose(0, (Uint32)(ProfCtrGetCycle() - uSmkMode7ComposeStart));
+#endif
+#if AURORA_FRONTEND_PROFILER
+		const Uint32 uAuroraDirectStart = ProfCtrGetCycle();
+#endif
 		if (bMode34Direct)
 			_SnesPPUTrackMode34DirectColor(pDirectAttrib, 0, &DirectBG1Mask,
 				pRenderInfo->Tiles[0], BGInfo[0].uScrollX, BGInfo[0].uMosaic);
 		else if (bMode7Direct)
 			_SnesPPUTrackMode7DirectColor(pDirectAttrib, 0, &DirectBG1Mask);
+#if AURORA_FRONTEND_PROFILER
+		if (bMode34Direct || bMode7Direct)
+			AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_BG_MAIN_DIRECT,
+				ProfCtrGetCycle() - uAuroraDirectStart, 256u);
+#endif
 	}
 	if (!bRendered)
 		_ClearLinePlanar((SNMaskT *)pMain8, 8);
@@ -2768,10 +3168,10 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		Uint32 _tObjB = ProfCtrGetCycle();
 #endif
 		/* PPU detail: main OBJ draw */
-		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ);
+		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ_MAIN);
 		_SnesPPURenderOBJ8(pMain8, pMain, ObjLine, nObjLine,  (tmw&SNESPPU_MASK_OBJ) ? &pBGWindow[4] : NULL, bBG3Pri ? &BG3Pri : NULL,
 			pMainAddSubWriteMask, (cgadsub & 0x10) ? 1 : 0, pDirectAttrib, 0);
-		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_OBJ);
+		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_OBJ_MAIN);
 #if SNDBG_LOG
 		{
 			Uint32 _dObjDraw = ProfCtrGetCycle() - _tObjB;
@@ -2827,20 +3227,72 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 
 	// render bg layers to sub screen
 	if (ts & SNESPPU_MASK_BG4)
-		_RenderBG8(pSub8, pSub, pRenderInfo->BGPlanes[3], (tsw&SNESPPU_MASK_BG4) ? &pBGWindow[3] : NULL, BGInfo[3].uBitDepth, pSubAddSubMask, 1, NULL, NULL, BGInfo[3].Priority, bRendered, BGInfo[3].uScrollX);
+		{
+#if AURORA_FRONTEND_PROFILER
+			const Uint32 uAuroraDeepStart_BG_SUB_BG4 = ProfCtrGetCycle();
+#endif
+			_RenderBG8(pSub8, pSub, pRenderInfo->BGPlanes[3], (tsw&SNESPPU_MASK_BG4) ? &pBGWindow[3] : NULL, BGInfo[3].uBitDepth, pSubAddSubMask, 1, NULL, NULL, BGInfo[3].Priority, bRendered, BGInfo[3].uScrollX);
+#if AURORA_FRONTEND_PROFILER
+			AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_BG_SUB_BG4,
+				ProfCtrGetCycle() - uAuroraDeepStart_BG_SUB_BG4, 256u);
+#endif
+		}
 	if (ts & SNESPPU_MASK_BG3)
-		_RenderBG8(pSub8, pSub, pRenderInfo->BGPlanes[2], (tsw&SNESPPU_MASK_BG3) ? &pBGWindow[2] : NULL, BGInfo[2].uBitDepth, pSubAddSubMask, 1, &BG3Pri, NULL, BGInfo[2].Priority, bRendered, BGInfo[2].uScrollX);
+		{
+#if AURORA_FRONTEND_PROFILER
+			const Uint32 uAuroraDeepStart_BG_SUB_BG3 = ProfCtrGetCycle();
+#endif
+			_RenderBG8(pSub8, pSub, pRenderInfo->BGPlanes[2], (tsw&SNESPPU_MASK_BG3) ? &pBGWindow[2] : NULL, BGInfo[2].uBitDepth, pSubAddSubMask, 1, &BG3Pri, NULL, BGInfo[2].Priority, bRendered, BGInfo[2].uScrollX);
+#if AURORA_FRONTEND_PROFILER
+			AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_BG_SUB_BG3,
+				ProfCtrGetCycle() - uAuroraDeepStart_BG_SUB_BG3, 256u);
+#endif
+		}
 	if (ts & SNESPPU_MASK_BG2)
-		_RenderBG8(pSub8, pSub, pSubBG2Plane, (tsw&SNESPPU_MASK_BG2) ? &pBGWindow[1] : NULL, BGInfo[1].uBitDepth, pSubAddSubMask, 1, bMode7ExtBG ? &M7BG2SubPri : NULL, bBG3Pri ? &BG3Pri : NULL, BGInfo[1].Priority, bRendered, BGInfo[1].uScrollX);
+		{
+#if AURORA_FRONTEND_PROFILER
+			const Uint32 uAuroraDeepStart_BG_SUB_BG2 = ProfCtrGetCycle();
+#endif
+			_RenderBG8(pSub8, pSub, pSubBG2Plane, (tsw&SNESPPU_MASK_BG2) ? &pBGWindow[1] : NULL, BGInfo[1].uBitDepth, pSubAddSubMask, 1, bMode7ExtBG ? &M7BG2SubPri : NULL, bBG3Pri ? &BG3Pri : NULL, BGInfo[1].Priority, bRendered, BGInfo[1].uScrollX);
+#if AURORA_FRONTEND_PROFILER
+			AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_BG_SUB_BG2,
+				ProfCtrGetCycle() - uAuroraDeepStart_BG_SUB_BG2, 256u);
+#endif
+		}
 	if (ts & SNESPPU_MASK_BG1)
 	{
 		SNMaskT DirectBG1Mask;
-		_RenderBG8(pSub8, pSub, pSubBG1Plane, (tsw&SNESPPU_MASK_BG1) ? &pBGWindow[0] : NULL, BGInfo[0].uBitDepth, pSubAddSubMask, 1, NULL, (bMode7ExtBG && (ts & SNESPPU_MASK_BG2)) ? &M7BG2SubPri : (bBG3Pri ? &BG3Pri : NULL), BGInfo[0].Priority, bRendered, BGInfo[0].uScrollX, bBG1Direct ? &DirectBG1Mask : NULL);
+#if AURORA_SMK_PROFILER
+		const Bool bSmkMode7Compose = g_AuroraSmkProfilerActive && (uBGMode == 7);
+		const Uint32 uSmkMode7ComposeStart = bSmkMode7Compose ? ProfCtrGetCycle() : 0u;
+#endif
+		{
+#if AURORA_FRONTEND_PROFILER
+			const Uint32 uAuroraDeepStart_BG_SUB_BG1 = ProfCtrGetCycle();
+#endif
+			_RenderBG8(pSub8, pSub, pSubBG1Plane, (tsw&SNESPPU_MASK_BG1) ? &pBGWindow[0] : NULL, BGInfo[0].uBitDepth, pSubAddSubMask, 1, NULL, (bMode7ExtBG && (ts & SNESPPU_MASK_BG2)) ? &M7BG2SubPri : (bBG3Pri ? &BG3Pri : NULL), BGInfo[0].Priority, bRendered, BGInfo[0].uScrollX, bBG1Direct ? &DirectBG1Mask : NULL);
+#if AURORA_FRONTEND_PROFILER
+			AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_BG_SUB_BG1,
+				ProfCtrGetCycle() - uAuroraDeepStart_BG_SUB_BG1, 256u);
+#endif
+		}
+#if AURORA_SMK_PROFILER
+		if (bSmkMode7Compose)
+			AuroraSmkProfilerMode7Compose(1, (Uint32)(ProfCtrGetCycle() - uSmkMode7ComposeStart));
+#endif
+#if AURORA_FRONTEND_PROFILER
+		const Uint32 uAuroraDirectStart = ProfCtrGetCycle();
+#endif
 		if (bMode34Direct)
 			_SnesPPUTrackMode34DirectColor(pDirectAttrib, 4, &DirectBG1Mask,
 				pRenderInfo->Tiles[0], BGInfo[0].uScrollX, BGInfo[0].uMosaic);
 		else if (bMode7Direct)
 			_SnesPPUTrackMode7DirectColor(pDirectAttrib, 4, &DirectBG1Mask);
+#if AURORA_FRONTEND_PROFILER
+		if (bMode34Direct || bMode7Direct)
+			AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_BG_SUB_DIRECT,
+				ProfCtrGetCycle() - uAuroraDirectStart, 256u);
+#endif
 	}
 	if (!bRendered)
 		_ClearLinePlanar((SNMaskT *)pSub8, 8);
@@ -2853,10 +3305,10 @@ void SnesPPURender::RenderLine8(Int32 iLine, SnesRender8pInfoT *pRenderInfo)
 		Uint32 _tObjC = ProfCtrGetCycle();
 #endif
 		/* PPU detail: sub OBJ draw */
-		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ);
+		AURORA_SNES_PPU_DETAIL_BEGIN(AURORA_SNES_PPU_DETAIL_OBJ_SUB);
 		_SnesPPURenderOBJ8(pSub8, pSub, ObjLine, nObjLine,  (tsw&SNESPPU_MASK_OBJ) ? &pBGWindow[4] : NULL, bBG3Pri ? &BG3Pri : NULL,
 			pSubAddSubMask, 4|1, pDirectAttrib, 4);
-		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_OBJ);
+		AURORA_SNES_PPU_DETAIL_END(AURORA_SNES_PPU_DETAIL_OBJ_SUB);
 #if SNDBG_LOG
 		{
 			Uint32 _dObjDraw = ProfCtrGetCycle() - _tObjC;
@@ -3057,8 +3509,236 @@ static void _FetchMode7_Repeat(Uint8 *pLine, Int32 nPixels, Uint8 *pVram, Int32 
 	}
 }
 
+/* AURORA_MODE7_CLAMP_DY0_V2_20261003
+ * Exact repeat-mode-3 specialization for DY=0.
+ *
+ * Y is invariant for the complete scanline, so hoist the signed source Y,
+ * character-row offset and tile-map row out of the per-pixel loop.  The
+ * out-of-map rule remains identical to _FetchMode7_Clamp(): outside the
+ * 1024x1024 tile map, character 0 is sampled with the original X/Y low bits.
+ *
+ * DX=0 is also exact: every source coordinate is unchanged for the complete
+ * line, so one original-equivalent fetch can fill the destination line.
+ */
+static _INLINE void _FetchMode7_ClampDY0(
+	Uint8 *pLine, Int32 nPixels, Uint8 *pVram,
+	Int32 x, Int32 y, Int32 dx)
+{
+	const Int32 y2 = y >> 8;
+	const Uint32 uChrRow = ((Uint32)y2 & 7u) << 3;
+	Uint32 uLastTileX = 0xFFFFFFFFu;
+	Uint32 uCachedChrBase = 0;
+
+	if (nPixels <= 0)
+		return;
+
+	/* With both deltas zero, the old loop reads the exact same byte for
+	 * every output pixel.  VRAM is ordinary host memory during RenderLine. */
+	if (dx == 0)
+	{
+		const Int32 x2 = x >> 8;
+		Uint32 uChrBase = 0;
+
+		if (!((x2 | y2) >> 10))
+		{
+			const Uint32 uTileAddr =
+				(((Uint32)y2 >> 3) << 7) | ((Uint32)x2 >> 3);
+			uChrBase = (Uint32)pVram[uTileAddr * 2] << 6;
+		}
+
+		const Uint32 uChrAddr =
+			uChrBase + ((Uint32)x2 & 7u) + uChrRow;
+		memset(pLine, pVram[uChrAddr * 2 + 1], (size_t)nPixels);
+		return;
+	}
+
+	/* If Y alone is outside the 1024-line map, Clamp's map test is true
+	 * for every pixel regardless of X.  Character 0 is therefore invariant. */
+	if (y2 >> 10)
+	{
+		while (nPixels > 0)
+		{
+			const Int32 x2 = x >> 8;
+			const Uint32 uChrAddr =
+				((Uint32)x2 & 7u) + uChrRow;
+
+			x += dx;
+			*pLine++ = pVram[uChrAddr * 2 + 1];
+			nPixels--;
+		}
+		return;
+	}
+
+	/* Y is in range here.  Only X can make a pixel out of map, and the
+	 * tile-map row is constant.  Cache the tile column instead of rebuilding
+	 * the complete tile address on every in-range pixel. */
+	const Uint32 uTileRow = ((Uint32)y2 >> 3) << 7;
+
+	while (nPixels > 0)
+	{
+		const Int32 x2 = x >> 8;
+		Uint32 uChrBase = 0;
+
+		x += dx;
+
+		/* Since y2 is known to be 0..1023, this is exactly equivalent to
+		 * the original ((x2 | y2) >> 10) test. */
+		if (!(x2 >> 10))
+		{
+			const Uint32 uTileX = (Uint32)x2 >> 3;
+
+			if (uTileX != uLastTileX)
+			{
+				uCachedChrBase =
+					(Uint32)pVram[(uTileRow | uTileX) * 2] << 6;
+				uLastTileX = uTileX;
+			}
+			uChrBase = uCachedChrBase;
+		}
+
+		const Uint32 uChrAddr =
+			uChrBase + ((Uint32)x2 & 7u) + uChrRow;
+		*pLine++ = pVram[uChrAddr * 2 + 1];
+		nPixels--;
+	}
+}
+
+
+
+/* AURORA_MODE7_CLAMP_ALLINSIDE_V3_23_20261006
+ * Exact generic-CLAMP specialization for a complete affine span that never
+ * leaves the 1024x1024 Mode7 tile map.  The existing DY==0 specialization is
+ * dispatched first and is not changed by this path.
+ *
+ * x/y are fixed-point source coordinates here: x>>8/y>>8 must stay in
+ * [0,1023].  For a linear sequence, both endpoints inside the closed
+ * fixed-point interval [0, 0x3FFFF] prove every intermediate sample inside.
+ * 64-bit temporaries are used only once per call for proof; pixel work remains
+ * the original 32-bit C++ operations.
+ */
+static _INLINE Bool _SnesPPUMode7ClampAllInside(
+	Int32 nPixels, Int32 x, Int32 y, Int32 dx, Int32 dy)
+{
+	if (nPixels <= 0)
+		return FALSE;
+
+	const long long nLast = (long long)nPixels - 1;
+	const long long x0 = (long long)x;
+	const long long y0 = (long long)y;
+	const long long xN = x0 + (long long)dx * nLast;
+	const long long yN = y0 + (long long)dy * nLast;
+	const long long kMax = 0x3FFFFLL;
+
+	return x0 >= 0 && x0 <= kMax &&
+	       xN >= 0 && xN <= kMax &&
+	       y0 >= 0 && y0 <= kMax &&
+	       yN >= 0 && yN <= kMax;
+}
+
+static _INLINE void _FetchMode7_ClampAllInside(
+	Uint8 *pLine, Int32 nPixels, Uint8 *pVram,
+	Int32 x, Int32 y, Int32 dx, Int32 dy)
+{
+	Int32 x2, y2;
+	Uint32 uTileAddr;
+	Uint32 uLastTileAddr = 0xFFFFFFFFu;
+	Uint32 uCachedChrBase = 0;
+	Uint32 uChrAddr;
+	Uint8 uChrData;
+
+#if AURORA_FRONTEND_PROFILER
+	const Uint32 uAuroraInsidePixels = (Uint32)nPixels;
+	Uint32 uAuroraTileReuse = 0;
+	Uint32 uAuroraTileLoads = 0;
+#endif
+
+	while (nPixels > 0)
+	{
+		x2 = x >> 8;
+		y2 = y >> 8;
+
+		x += dx;
+		y += dy;
+
+		uTileAddr = ((y2 >> 3) << 7) | (x2 >> 3);
+		if (uTileAddr != uLastTileAddr)
+		{
+#if AURORA_FRONTEND_PROFILER
+			++uAuroraTileLoads;
+#endif
+			uCachedChrBase = (Uint32)pVram[uTileAddr * 2] << 6;
+			uLastTileAddr = uTileAddr;
+		}
+#if AURORA_FRONTEND_PROFILER
+		else
+		{
+			++uAuroraTileReuse;
+		}
+#endif
+
+		uChrAddr = uCachedChrBase + (x2 & 7) + ((y2 & 7) << 3);
+		uChrData = pVram[uChrAddr * 2 + 1];
+
+		*pLine++ = uChrData;
+		nPixels--;
+	}
+
+#if AURORA_FRONTEND_PROFILER
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_INSIDE_PIXELS,
+		0u, uAuroraInsidePixels);
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_OUTSIDE_PIXELS,
+		0u, 0u);
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_TILE_REUSE,
+		0u, uAuroraTileReuse);
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_TILE_LOADS,
+		0u, uAuroraTileLoads);
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_BOUNDARY_TRANSITIONS,
+		0u, 0u);
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_ALL_INSIDE_CALLS,
+		0u, 1u);
+#endif
+}
+
 static void _FetchMode7_Clamp(Uint8 *pLine, Int32 nPixels, Uint8 *pVram, Int32 x, Int32 y, Int32 dx, Int32 dy)
 {
+#if AURORA_FRONTEND_PROFILER
+	/* AURORA_SNES_TARGET_TRAITS_V3_21_1_20261006
+	 * Call-shape counters live before the retained DY0 fast path so DY0 calls
+	 * are visible even though that specialization returns before the generic loop. */
+	if (dx == 0)
+		AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_DX0_CALLS, 0u, 1u);
+	if (dy == 0)
+		AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_DY0_CALLS, 0u, 1u);
+	if (dx == 256 || dx == -256)
+		AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_UNITX_CALLS, 0u, 1u);
+	if (dy == 256 || dy == -256)
+		AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_UNITY_CALLS, 0u, 1u);
+#endif
+
+	if (dy == 0)
+	{
+		_FetchMode7_ClampDY0(pLine, nPixels, pVram, x, y, dx);
+		return;
+	}
+
+	/* AURORA_MODE7_CLAMP_ALLINSIDE_V3_23_20261006
+	 * Keep mixed/outside geometry on the canonical generic path. */
+	if (_SnesPPUMode7ClampAllInside(nPixels, x, y, dx, dy))
+	{
+		_FetchMode7_ClampAllInside(pLine, nPixels, pVram, x, y, dx, dy);
+		return;
+	}
+
+#if AURORA_FRONTEND_PROFILER
+	Uint32 uAuroraGenericInside = 0;
+	Uint32 uAuroraGenericOutside = 0;
+	Uint32 uAuroraGenericTileReuse = 0;
+	Uint32 uAuroraGenericTileLoads = 0;
+	Uint32 uAuroraGenericBoundaryTransitions = 0;
+	Bool bAuroraGenericHaveBoundsState = FALSE;
+	Bool bAuroraGenericLastInside = FALSE;
+#endif
+
 	Int32 x2, y2;
 	Uint32 uTileAddr;
 	Uint32 uLastTileAddr = 0xFFFFFFFFu;
@@ -3075,6 +3755,19 @@ static void _FetchMode7_Clamp(Uint8 *pLine, Int32 nPixels, Uint8 *pVram, Int32 x
 		x += dx;
 		y += dy;
 
+#if AURORA_FRONTEND_PROFILER
+		const Bool bAuroraGenericInside = (((x2 | y2) >> 10) == 0);
+		if (bAuroraGenericInside)
+			++uAuroraGenericInside;
+		else
+			++uAuroraGenericOutside;
+		if (bAuroraGenericHaveBoundsState &&
+		    bAuroraGenericInside != bAuroraGenericLastInside)
+			++uAuroraGenericBoundaryTransitions;
+		bAuroraGenericLastInside = bAuroraGenericInside;
+		bAuroraGenericHaveBoundsState = TRUE;
+#endif
+
 		if ((x2 | y2) >> 10)
 		{
 			uChrBase = 0;
@@ -3082,6 +3775,12 @@ static void _FetchMode7_Clamp(Uint8 *pLine, Int32 nPixels, Uint8 *pVram, Int32 x
 		else
 		{
 			uTileAddr = ((y2 >> 3) << 7) | (x2 >> 3);
+#if AURORA_FRONTEND_PROFILER
+			if (uTileAddr == uLastTileAddr)
+				++uAuroraGenericTileReuse;
+			else
+				++uAuroraGenericTileLoads;
+#endif
 			if (uTileAddr != uLastTileAddr)
 			{
 				uCachedChrBase = (Uint32)pVram[uTileAddr * 2] << 6;
@@ -3096,6 +3795,28 @@ static void _FetchMode7_Clamp(Uint8 *pLine, Int32 nPixels, Uint8 *pVram, Int32 x
 		*pLine++ = uChrData;
 		nPixels--;
 	}
+
+#if AURORA_FRONTEND_PROFILER
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_INSIDE_PIXELS,
+		0u, uAuroraGenericInside);
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_OUTSIDE_PIXELS,
+		0u, uAuroraGenericOutside);
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_TILE_REUSE,
+		0u, uAuroraGenericTileReuse);
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_TILE_LOADS,
+		0u, uAuroraGenericTileLoads);
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_BOUNDARY_TRANSITIONS,
+		0u, uAuroraGenericBoundaryTransitions);
+	if (uAuroraGenericInside && !uAuroraGenericOutside)
+		AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_ALL_INSIDE_CALLS,
+			0u, 1u);
+	else if (uAuroraGenericInside && uAuroraGenericOutside)
+		AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_MIXED_CALLS,
+			0u, 1u);
+	else if (uAuroraGenericOutside)
+		AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_CLAMP_ALL_OUTSIDE_CALLS,
+			0u, 1u);
+#endif
 }
 
 static void _FetchMode7_Black(Uint8 *pLine, Int32 nPixels, Uint8 *pVram, Int32 x, Int32 y, Int32 dx, Int32 dy)
@@ -3300,6 +4021,10 @@ static void _FetchMode7Opaque(Uint8 *pMask, Uint8 *pLine, Int32 nPixels)
 #endif
 static void _FetchMode7(Uint8 *pLine, SnesPPU *pPPU, Int32 iLine, SNMaskT *pPriority, SNMaskT *pOpaque)
 {
+#if AURORA_SMK_PROFILER
+	const Bool bSmkProfile = g_AuroraSmkProfilerActive;
+	const Uint32 uSmkMode7Start = bSmkProfile ? ProfCtrGetCycle() : 0u;
+#endif
 	const SnesPPURegsT *pRegs = pPPU->GetRegs();
 	Uint8 *pVram = (Uint8 *)pPPU->GetVramPtr(0);
 	Int32 m7a = (Int16)pRegs->m7a.w;
@@ -3310,6 +4035,9 @@ static void _FetchMode7(Uint8 *pLine, SnesPPU *pPPU, Int32 iLine, SNMaskT *pPrio
 	Int32 screenY, screenX;
 	Int32 originX, originY;
 	Int32 x, y, dx, dy;
+#if AURORA_FRONTEND_PROFILER
+	const Uint32 uAuroraM7SetupStart = ProfCtrGetCycle();
+#endif
 
 	/* AURORA_ACCURACY_MODE7_CORE_V1
 	 * The Mode 7 adder clips the translated H/V differences to its internal
@@ -3376,23 +4104,68 @@ static void _FetchMode7(Uint8 *pLine, SnesPPU *pPPU, Int32 iLine, SNMaskT *pPrio
 
 	/* M7SEL repeat values 0 and 1 both wrap. Value 2 is transparent/backdrop
 	 * outside the 1024x1024 map, value 3 repeats character 0. */
+#if AURORA_SMK_PROFILER
+	const Uint32 uSmkMode7FetchStart = bSmkProfile ? ProfCtrGetCycle() : 0u;
+#endif
+#if AURORA_FRONTEND_PROFILER
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_SETUP,
+		ProfCtrGetCycle() - uAuroraM7SetupStart, 1u);
+#endif
 	switch ((m7sel >> 6) & 3)
 	{
 	case 0:
 	case 1:
-		_FetchMode7_Repeat(pLine, nMode7Pixels, pVram, x, y, dx, dy);
+		{
+#if AURORA_FRONTEND_PROFILER
+			const Uint32 uAuroraM7FetchStart = ProfCtrGetCycle();
+			const Uint32 uAuroraM7FetchBucket =
+				(dy == 0) ? AURORA_SNES_DEEP_M7_FETCH_REPEAT_DY0 :
+				((dx == 0 || dx == 256 || dx == -256) ?
+				 AURORA_SNES_DEEP_M7_FETCH_REPEAT_UNITX :
+				 AURORA_SNES_DEEP_M7_FETCH_REPEAT_GENERIC);
+#endif
+			_FetchMode7_Repeat(pLine, nMode7Pixels, pVram, x, y, dx, dy);
+#if AURORA_FRONTEND_PROFILER
+			AURORA_SNES_DEEP_RECORD(uAuroraM7FetchBucket,
+				ProfCtrGetCycle() - uAuroraM7FetchStart, (Uint32)nMode7Pixels);
+#endif
+		}
 		break;
 	case 3:
-		_FetchMode7_Clamp(pLine, nMode7Pixels, pVram, x, y, dx, dy);
+		{
+#if AURORA_FRONTEND_PROFILER
+			const Uint32 uAuroraM7FetchStart = ProfCtrGetCycle();
+#endif
+			_FetchMode7_Clamp(pLine, nMode7Pixels, pVram, x, y, dx, dy);
+#if AURORA_FRONTEND_PROFILER
+			AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_FETCH_CLAMP,
+				ProfCtrGetCycle() - uAuroraM7FetchStart, (Uint32)nMode7Pixels);
+#endif
+		}
 		break;
 	case 2:
 	default:
-		_FetchMode7_Black(pLine, nMode7Pixels, pVram, x, y, dx, dy);
+		{
+#if AURORA_FRONTEND_PROFILER
+			const Uint32 uAuroraM7FetchStart = ProfCtrGetCycle();
+#endif
+			_FetchMode7_Black(pLine, nMode7Pixels, pVram, x, y, dx, dy);
+#if AURORA_FRONTEND_PROFILER
+			AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_FETCH_BLACK,
+				ProfCtrGetCycle() - uAuroraM7FetchStart, (Uint32)nMode7Pixels);
+#endif
+		}
 		break;
 	}
+#if AURORA_SMK_PROFILER
+	const Uint32 uSmkMode7FetchEnd = bSmkProfile ? ProfCtrGetCycle() : 0u;
+#endif
 
 	if (nMode7Pixels == 128)
 	{
+#if AURORA_FRONTEND_PROFILER
+		const Uint32 uAuroraM7HalfStart = ProfCtrGetCycle();
+#endif
 		Int32 i;
 		for (i = 127; i >= 0; i--)
 		{
@@ -3400,6 +4173,10 @@ static void _FetchMode7(Uint8 *pLine, SnesPPU *pPPU, Int32 iLine, SNMaskT *pPrio
 			pLine[i * 2 + 0] = uPixel;
 			pLine[i * 2 + 1] = uPixel;
 		}
+#if AURORA_FRONTEND_PROFILER
+		AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_HALF_EXPAND,
+			ProfCtrGetCycle() - uAuroraM7HalfStart, 128u);
+#endif
 	}
 
 	/* AURORA_MODE7_EXTBG_COMPOSITOR_V1_20260903
@@ -3407,7 +4184,27 @@ static void _FetchMode7(Uint8 *pLine, SnesPPU *pPPU, Int32 iLine, SNMaskT *pPrio
 	if (pPriority)
 		SNMaskSet(pPriority);
 
+#if AURORA_FRONTEND_PROFILER
+	const Uint32 uAuroraM7OpaqueStart = ProfCtrGetCycle();
+#endif
 	_FetchMode7Opaque(pOpaque->uMask8, pLine, 256);
+#if AURORA_FRONTEND_PROFILER
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_OPAQUE,
+		ProfCtrGetCycle() - uAuroraM7OpaqueStart, 256u);
+#endif
+#if AURORA_SMK_PROFILER
+	if (bSmkProfile)
+	{
+		const Uint32 uSmkMode7End = ProfCtrGetCycle();
+		AuroraSmkProfilerMode7Line(
+			m7sel, pRegs->mosaic, (Uint8)SNPPURenderGetSoftwareHackFlags(),
+			x, y, dx, dy, m7b, m7c, nMode7Pixels,
+			(Uint32)(uSmkMode7FetchStart - uSmkMode7Start),
+			(Uint32)(uSmkMode7FetchEnd - uSmkMode7FetchStart),
+			(Uint32)(uSmkMode7End - uSmkMode7FetchEnd),
+			(Uint32)(uSmkMode7End - uSmkMode7Start));
+	}
+#endif
 
 	#undef AURORA_M7_CLIP
 	#undef AURORA_M7_SIGN13
@@ -3417,7 +4214,24 @@ static void _BuildMode7ExtBG(Uint8 *pLineBG2, SNMaskT *pPriority,
 	SNMaskT *pOpaque, const Uint8 *pLineBG1)
 {
 	/* AURORA_MODE7_EXTBG_COMPOSITOR_V1_20260903 */
+#if AURORA_FRONTEND_PROFILER
+	Uint32 uAuroraStart = ProfCtrGetCycle();
+#endif
 	memcpy(pLineBG2, pLineBG1, 256);
+#if AURORA_FRONTEND_PROFILER
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_EXTBG_COPY,
+		ProfCtrGetCycle() - uAuroraStart, 256u);
+	uAuroraStart = ProfCtrGetCycle();
+#endif
 	_FetchMode7Priority(pPriority->uMask8, pLineBG2, 256);
+#if AURORA_FRONTEND_PROFILER
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_EXTBG_PRIORITY,
+		ProfCtrGetCycle() - uAuroraStart, 256u);
+	uAuroraStart = ProfCtrGetCycle();
+#endif
 	_FetchMode7Opaque(pOpaque->uMask8, pLineBG2, 256);
+#if AURORA_FRONTEND_PROFILER
+	AURORA_SNES_DEEP_RECORD(AURORA_SNES_DEEP_M7_EXTBG_OPAQUE,
+		ProfCtrGetCycle() - uAuroraStart, 256u);
+#endif
 }

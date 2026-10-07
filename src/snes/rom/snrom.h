@@ -76,6 +76,12 @@ enum SNRomMappingE
  * The BS-X interface/base cartridge has the physical BS Memory slot PLUS
  * MCC/PSRAM/receiver hardware. Keep it distinct from ordinary BSC carts. */
 #define SNROM_FLAG_BSXBASE 0x10000
+/* AURORA_REVIVE_AUDIT_SRAM128K_V10_20260930
+ * Rare LoROM boards used by Thoroughbred Breeder 3 and RPG Tsukuru 2 have
+ * 128 KiB physical SRAM but a bank-wide sliding decoder in $70-$73. Keep the
+ * board identity separate from ordinary SRAM size; RPG Tsukuru 2 also keeps
+ * Aurora's existing BSC/Memory-Pack integration. */
+#define SNROM_FLAG_SRAM128K_SPECIAL 0x20000
 /* AURORA_SA1_V1_REFERENCE_LOGIC_20260902: second native SNCpuT + SA-1 MMIO/MMC/DMA. */
 
 extern Uint32 g_FakeSRAMSize;
@@ -134,6 +140,7 @@ private:
 	 * Pristine file identity captured during the authoritative ROM read. */
 	Uint32	m_uRawFileCRC32;
 	Uint32	m_uRawFileBytes;
+	Uint32	m_uRuntimeCRC32;	/* normalized/headerless ROM identity */
 	Uint8	*m_pRomMem;
 	Uint8	*m_pRomData;	// pointer to rom data
 	SNRomInfoT *m_pCartInfo;
@@ -159,6 +166,7 @@ public:
 	Uint32	GetBytes() {return m_uRomBytes;}
 	Uint32	GetRawFileCRC32() const {return m_uRawFileCRC32;}
 	Uint32	GetRawFileBytes() const {return m_uRawFileBytes;}
+	Uint32	GetRuntimeCRC32() const {return m_uRuntimeCRC32;}
 	Uint32	GetSRAMBytes() {return m_uSRAMSize * 1024 / 8;}
 
 	SNRomInfoT *GetCartInfo(Uint32 uOffset);

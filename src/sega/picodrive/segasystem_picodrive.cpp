@@ -5,6 +5,7 @@
 
 #include "segasystem.h"
 #include "sega/picodrive/picodrive_bridge.h"
+#include "platform/ps2/system/mainloop_safe_frameskip.h"
 
 extern SegaRom *_pSegaRom;
 
@@ -28,6 +29,10 @@ void SegaSystem::SetRom(Emu::Rom *pRom)
     m_bRomReady = FALSE;
     m_nCachedStateBytes = 0;
     m_uFrame = m_uLine = 0;
+
+    /* AURORA_SAFE_FRAMESKIP_CRC_UNLIMITED_V21_2_20261001 */
+    /* Clear the previous cartridge policy before any early-return/load error. */
+    MainLoopSafeFrameskipSetRomIdentityCRC32((const void *)this, 0u);
 
     /* A null SetRom is Aurora's real system-unload path. Fully deinit the
      * embedded core so its ROM/vout allocations are returned before a SNES
@@ -69,6 +74,11 @@ void SegaSystem::SetRom(Emu::Rom *pRom)
     if (!name || !*name)
         name = "game.md";
 
+    /* SegaRom holds the actual loaded/decompressed ROM payload. Hash before
+     * PicoDrive receives its writable buffer, never the ZIP/container. */
+    const Uint32 uRuntimeCRC = MainLoopSafeFrameskipRomCRC32(
+        rom->GetData(), rom->GetBytes());
+
     if (!PicoDriveBridge_LoadGame(
             rom->GetData(), (size_t)rom->GetBytes(),
             (size_t)rom->GetCapacity(), name))
@@ -79,6 +89,8 @@ void SegaSystem::SetRom(Emu::Rom *pRom)
 
     m_pSegaRom = rom;
     m_bRomReady = TRUE;
+    MainLoopSafeFrameskipSetRomIdentityCRC32(
+        (const void *)this, uRuntimeCRC);
     printf("[SegaSystem/PicoDrive] LOAD OK; SRAM=%d\n",
            PicoDriveBridge_GetSRAMBytes());
 }
@@ -90,6 +102,7 @@ Bool SegaSystem::LoadDisc(const Char *pPath, const Char *pSystemPath)
     m_bRomReady = FALSE;
     m_nCachedStateBytes = 0;
     m_uFrame = m_uLine = 0;
+    MainLoopSafeFrameskipSetRomIdentityCRC32((const void *)this, 0u);
 
     PicoDriveBridge_UnloadGame();
     if (!PicoDriveBridge_LoadDisc(pPath, pSystemPath))
@@ -105,9 +118,35 @@ Bool SegaSystem::LoadDisc(const Char *pPath, const Char *pSystemPath)
 }
 
 /* AURORA_SUPER_MAGIC_DRIVE_V1_20260902 */
-Bool SegaSystem::LoadSuperMagicDrive(const Char *b,const Char *d){m_pSegaRom=NULL;m_bRomReady=FALSE;m_nCachedStateBytes=0;m_uFrame=m_uLine=0;PicoDriveBridge_UnloadGame();if(!PicoDriveBridge_LoadSuperMagicDrive(b,d))return FALSE;m_bRomReady=TRUE;return TRUE;}
-Bool SegaSystem::InsertSuperMagicDriveCartridge(SegaRom *r){if(!m_bRomReady||!r||!r->GetData()||!r->GetBytes())return FALSE;const Char*n=r->GetSourceName();if(!PicoDriveBridge_SmdInsertCartridge(r->GetData(),(size_t)r->GetBytes(),(size_t)r->GetCapacity(),(n&&*n)?n:"cartridge.md"))return FALSE;m_pSegaRom=r;m_nCachedStateBytes=0;return TRUE;}
-void SegaSystem::EjectSuperMagicDriveCartridge(){if(m_bRomReady&&PicoDriveBridge_IsSuperMagicDrive()){PicoDriveBridge_SmdEjectCartridge();m_pSegaRom=NULL;m_nCachedStateBytes=0;}}
+Bool SegaSystem::LoadSuperMagicDrive(const Char *b,const Char *d)
+{
+    m_pSegaRom=NULL; m_bRomReady=FALSE; m_nCachedStateBytes=0; m_uFrame=m_uLine=0;
+    MainLoopSafeFrameskipSetRomIdentityCRC32((const void *)this, 0u);
+    PicoDriveBridge_UnloadGame();
+    if(!PicoDriveBridge_LoadSuperMagicDrive(b,d)) return FALSE;
+    m_bRomReady=TRUE;
+    return TRUE;
+}
+Bool SegaSystem::InsertSuperMagicDriveCartridge(SegaRom *r)
+{
+    if(!m_bRomReady||!r||!r->GetData()||!r->GetBytes()) return FALSE;
+    const Char*n=r->GetSourceName();
+    const Uint32 uRuntimeCRC = MainLoopSafeFrameskipRomCRC32(
+        r->GetData(), r->GetBytes());
+    if(!PicoDriveBridge_SmdInsertCartridge(r->GetData(),(size_t)r->GetBytes(),
+        (size_t)r->GetCapacity(),(n&&*n)?n:"cartridge.md")) return FALSE;
+    m_pSegaRom=r; m_nCachedStateBytes=0;
+    MainLoopSafeFrameskipSetRomIdentityCRC32((const void *)this, uRuntimeCRC);
+    return TRUE;
+}
+void SegaSystem::EjectSuperMagicDriveCartridge()
+{
+    if(m_bRomReady&&PicoDriveBridge_IsSuperMagicDrive())
+    {
+        PicoDriveBridge_SmdEjectCartridge(); m_pSegaRom=NULL; m_nCachedStateBytes=0;
+        MainLoopSafeFrameskipSetRomIdentityCRC32((const void *)this, 0u);
+    }
+}
 Bool SegaSystem::SwapSuperMagicDriveDisk(const Char*p){return m_bRomReady&&PicoDriveBridge_IsSuperMagicDrive()&&PicoDriveBridge_SmdSwapDisk(p)?TRUE:FALSE;}
 void SegaSystem::PowerCycleSuperMagicDrive(){if(m_bRomReady&&PicoDriveBridge_IsSuperMagicDrive()){PicoDriveBridge_SmdPowerCycle();m_nCachedStateBytes=0;}}
 Bool SegaSystem::IsSuperMagicDrive()const{return PicoDriveBridge_IsSuperMagicDrive()?TRUE:FALSE;}

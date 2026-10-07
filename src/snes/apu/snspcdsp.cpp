@@ -5,6 +5,7 @@
 #include "snspcdsp.h"
 #include "console.h"
 #include "platform/ps2/system/aurora_runtime_trace.h"
+#include "snspctracer.h" /* AURORA_SNES_GENERIC_TRACER_V36_20261002 */
 /* AURORA_SNES_BINARY_TRACE_V6D_SPARSE_HIGHSIGNAL_20260918 */
 
 #define SNSPCDSP_DETERMINISMSAFE (0)
@@ -29,10 +30,34 @@ SNSpcDsp::SNSpcDsp()
 void SNSpcDsp::Reset()
 {
 	memset(m_Regs, 0, sizeof(m_Regs));
-	/* AURORA_HW_ACCURACY_SDSP_FLG_RESET_V1_20260916
-	 * Internal S-DSP FLG powers/resets to $E0. */
+	memset(m_LiveRegs, 0, sizeof(m_LiveRegs));
+	/* AURORA_HW_ACCURACY_SDSP_FLG_RESET_V1_20260916 */
 	m_Regs[SNSPCDSP_REG_FLG] = 0xE0;
+	m_LiveRegs[SNSPCDSP_REG_FLG] = 0xE0;
 	m_Queue.Reset();
+}
+
+void SNSpcDsp::WriteLive8(Uint32 uAddr, Uint8 uData)
+{
+	uAddr &= 0x7Fu;
+	m_LiveRegs[uAddr] = uData;
+	/* Readback-visible register semantics only. Mixer/voice side effects are
+	 * deliberately deferred to Write8() on the replay timeline. */
+	if (uAddr == SNSPCDSP_REG_FLG && (uData & 0x80u))
+	{
+		m_LiveRegs[SNSPCDSP_REG_FLG] |= 0x60u;
+		m_LiveRegs[SNSPCDSP_REG_KOFF] = 0;
+		m_LiveRegs[SNSPCDSP_REG_KON] = 0;
+		m_LiveRegs[SNSPCDSP_REG_ENDX] = 0;
+	}
+	else if (uAddr == SNSPCDSP_REG_KON)
+	{
+		m_LiveRegs[SNSPCDSP_REG_ENDX] &= (Uint8)~uData;
+	}
+	else if (uAddr == SNSPCDSP_REG_ENDX)
+	{
+		m_LiveRegs[SNSPCDSP_REG_ENDX] = 0;
+	}
 }
 
 void SNSpcDsp::Write8(Uint32 uAddr, Uint8 uData)
@@ -164,7 +189,7 @@ Uint8 SNSpcDsp::Read8(Uint32 uAddr)
 	}
 #endif
 
-	return m_Regs[uAddr];
+	return m_LiveRegs[uAddr];
 }
 
 Uint16 SNSpcDsp::GetSampleDir(Uint8 uSrcN, Uint32 uOffset)
@@ -229,17 +254,31 @@ void SNSpcDsp::KeyOff(Int32 iChannel)
 
 Bool SNSpcDsp::EnqueueWrite(Uint32 uCycle, Uint32 uAddr, Uint8 uData)
 {
-	return m_Queue.Enqueue(uCycle, uAddr, uData);
+	const Uint8 r = (Uint8)(uAddr & 0x7Fu);
+	if (!m_Queue.Enqueue(uCycle, r, uData))
+		return FALSE;
+#if AURORA_SNES_TRACER
+	if (SNSPC_TRACER_FAST_ACTIVE())
+		SNSPCTracerDspEvent('Q', uCycle, 0xFFFFFFFFu, r, m_LiveRegs[r], uData);
+#endif
+	WriteLive8(r, uData);
+	return TRUE;
 }
 
 void SNSpcDsp::Sync(Uint32 uCycle)
 {
 	SNQueueElementT *pElement;
-
-	// dequeue all pending writes  up to cycle time
-	while ( (pElement=m_Queue.Dequeue(uCycle)) != NULL)
+	/* AURORA_SDSP_DUAL_TIMELINE_V36_20261002: a DSP write stamped exactly
+	 * at the first cycle of this mixer chunk is already visible to it. */
+	while ( (pElement=m_Queue.DequeueAtOrBefore(uCycle)) != NULL)
 	{
-		// perform write
+#if AURORA_SNES_TRACER
+		if (SNSPC_TRACER_FAST_ACTIVE())
+		{
+			const Uint8 r=(Uint8)(pElement->uAddr&0x7Fu);
+			SNSPCTracerDspEvent('T',pElement->uCycle,uCycle,r,m_Regs[r],pElement->uData);
+		}
+#endif
 		Write8(pElement->uAddr, pElement->uData);
 	}
 }
@@ -247,15 +286,17 @@ void SNSpcDsp::Sync(Uint32 uCycle)
 void SNSpcDsp::Sync(void)
 {
 	SNQueueElementT *pElement;
-
-	// dequeue all pending writes
 	while ( (pElement=m_Queue.Dequeue()) != NULL)
 	{
-		// perform write
+#if AURORA_SNES_TRACER
+		if (SNSPC_TRACER_FAST_ACTIVE())
+		{
+			const Uint8 r=(Uint8)(pElement->uAddr&0x7Fu);
+			SNSPCTracerDspEvent('F',pElement->uCycle,0xFFFFFFFFu,r,m_Regs[r],pElement->uData);
+		}
+#endif
 		Write8(pElement->uAddr, pElement->uData);
 	}
-
-	// empty queue
 	m_Queue.Reset();
 }
 
@@ -286,5 +327,8 @@ void SNSpcDsp::UpdateFlags(ISNSpcDspMix *pMixer)
 			pRegs->outx = 0;
 		}
 	}
+	/* End-of-frame replay has consumed every queued write. Reconcile dynamic
+	 * ENVX/OUTX/ENDX and all register side effects for next frame readback. */
+	memcpy(m_LiveRegs, m_Regs, sizeof(m_Regs));
 }
 

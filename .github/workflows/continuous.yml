@@ -67,7 +67,7 @@ jobs:
           git submodule status --recursive
           echo "Beetle PCE Fast commit:"
           git -C src/third_party/beetle-pce-fast rev-parse HEAD
-          test "$(git -C src/third_party/beetle-pce-fast rev-parse HEAD)" = "4685b6454924933fd6dbc6ddca84b12ccdd88440"
+          test "$(git -C src/third_party/beetle-pce-fast rev-parse HEAD)" = "02ee59546765b50d88d50210bb8ff5188ee4af2f"
           python3 tools/prepare_beetle_pce_fast_sources.py --source src/third_party/beetle-pce-fast --check-source
           echo "FCEUmm/FDS commit:"
           git -C src/third_party/fceumm-fds rev-parse HEAD

@@ -4,6 +4,7 @@
 
 #define SNSPC_TRAPFUNC
 #include "snspcdefs.h"
+#include "snspctracer.h" /* AURORA_SNES_GENERIC_TRACER_V36_20261002 */
 
 enum SNSpcCounterE
 {

@@ -29,13 +29,6 @@
 #include "mainloop_state.h"
 #include "mainloop_ui.h"
 #include "mainloop_iop.h"
-#include "mainloop_debug_state.h" /* AURORA_SNES_DEBUG_STATE_V35_UI_FEEDBACK_20261002 */
-#if AURORA_C4_PROFILER
-#include "aurora_c4_profiler.h"
-#endif
-#if AURORA_SMK_PROFILER
-#include "aurora_smk_profiler.h"
-#endif
 
 #include "types.h"
 #include "console.h"
@@ -44,9 +37,6 @@
 #include "memcard.h"
 #include "uiScreen.h"
 #include "mainloop_bgm.h"
-#if AURORA_FRONTEND_PROFILER
-#include "platform/ps2/system/aurora_frontend_profiler.h"
-#endif
 #include "pce/beetle/pce_bridge.h" /* AURORA_PCE_CD_MENU_IO_QUIESCE_V1_20260901 */
 #include "sega/picodrive/picodrive_bridge.h" /* AURORA_SEGACD_MENU_IO_QUIESCE_V1_20260901 */
 #include "audmixbuffer.h"
@@ -133,29 +123,6 @@ static void _MenuSavePendingSRAM(void)
 
 void _MenuRuntimeUpdate(void)
 {
-#if AURORA_FRONTEND_PROFILER
-    AuroraFrontendProfilerMenuUpdate(
-        (_bMenu && !s_sramSavePending && MainLoopCdUiReady())
-            ? TRUE : FALSE);
-#endif
-#if AURORA_C4_PROFILER
-	if (_bMenu && !s_sramSavePending && MainLoopCdUiReady()) AuroraC4ProfilerMenuUpdate();
-#endif
-#if AURORA_SMK_PROFILER
-	/* Snapshot was sealed at menu entry. Storage waits until SRAM has
-	 * priority and the CD/private transport is already quiescent. */
-	if (_bMenu && !s_sramSavePending && MainLoopCdUiReady())
-		AuroraSmkProfilerMenuUpdate();
-#endif
-
-#if AURORA_SNES_DEBUG_STATE
-	/* AURORA_SNES_DEBUG_STATE_V35_UI_FEEDBACK_20261002
-	 * Automatic SRAM persistence keeps storage priority. Once it is clear,
-	 * advance the debug request exactly once per visible menu tick. */
-	if (_bMenu && !s_sramSavePending)
-		MainLoopSnesDebugStateUpdate();
-#endif
-
 	if (!_bMenu || !s_sramSavePending)
 		return;
 	/* PCE-CD: don't overlap the final pre-menu async read with SRAM I/O. */
@@ -320,17 +287,6 @@ void _MenuEnable(Bool bEnable)
 			_bMenu = TRUE;
 			MainLoopAudioUiMute();
 			BgmMenuEnter();
-#if AURORA_FRONTEND_PROFILER
-            AuroraFrontendProfilerMenuEnter();
-#endif
-#if AURORA_C4_PROFILER
-			AuroraC4ProfilerMenuOpen();
-#endif
-#if AURORA_SMK_PROFILER
-			/* Seal gameplay counters once per gameplay -> menu transition.
-			 * RTC/file I/O is deferred to _MenuRuntimeUpdate(). */
-			AuroraSmkProfilerMenuOpen();
-#endif
 
 			/* Preserve a write performed in the <30-frame checksum window. */
 			_MainLoopForceCheckSRAM();
@@ -351,17 +307,6 @@ void _MenuEnable(Bool bEnable)
 			   game directly while a save was queued for the previous ROM. */
 			s_sramSavePending = FALSE;
 			s_sramSaveDelay = 0;
-#if AURORA_C4_PROFILER
-			AuroraC4ProfilerCancelPending();
-#endif
-#if AURORA_SMK_PROFILER
-			AuroraSmkProfilerCancelPending();
-#endif
-#if AURORA_SNES_DEBUG_STATE
-			/* AURORA_SNES_DEBUG_STATE_V35_UI_FEEDBACK_20261002:
-			 * never carry a queued capture into a later menu session. */
-			MainLoopCancelSnesDebugStateRequest();
-#endif
 			s_NormalMenuBgmSession = FALSE;
 			_bMenu = FALSE;
 			BgmStop();

@@ -899,6 +899,9 @@ void SNSpcDsp::SaveState(struct SNStateSPCDSPT *pState)
 void SNSpcDsp::RestoreState(struct SNStateSPCDSPT *pState)
 {
 	memcpy(m_Regs, pState->m_Regs, sizeof(m_Regs));
+	memcpy(m_LiveRegs, pState->m_Regs, sizeof(m_LiveRegs));
+	/* DSP write queues are transient and are not in the legacy state payload. */
+	m_Queue.Reset();
 }
 
 void SNSpcDspMix::SaveState(struct SNStateSPCDSPT *pState)

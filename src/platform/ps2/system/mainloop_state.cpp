@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 #include "types.h"
 #include "console.h"
@@ -4555,6 +4556,70 @@ static Bool _MainLoopStateEnsureOneDir(const Char *pPath)
     return stat(pPath, &Status) == 0 && S_ISDIR(Status.st_mode);
 }
 
+/* AURORA_STATES_UPPERCASE_V1_20261003
+ * Save-state directory canonical spelling is now STATES.
+ *
+ * Do not use stat(".../STATES") to detect legacy "states": on FAT-like media
+ * the lookup may be case-insensitive. Scan the parent directory so the exact
+ * stored entry name can be distinguished.
+ *
+ * Migration policy:
+ *   states exists, STATES absent -> rename to STATES
+ *   both exist                   -> preserve both; never overwrite user data
+ *
+ * Some filesystems reject a case-only rename. In that case use a temporary
+ * sibling name and roll back if the second rename fails.
+ */
+static void _MainLoopStateMigrateLegacyStatesDir(
+    const MainLoopStateRootT *pRoot)
+{
+    Char Parent[1024];
+    Char Legacy[1024];
+    Char Canonical[1024];
+    Char Temp[1024];
+    DIR *pDir;
+    struct dirent *pEntry;
+    struct stat Status;
+    Bool bLegacy = FALSE;
+    Bool bCanonical = FALSE;
+
+    if (!pRoot || pRoot->bMemCard)
+        return;
+
+    snprintf(Parent, sizeof(Parent), "%s/SNESticle", pRoot->Root);
+    pDir = opendir(Parent);
+    if (!pDir)
+        return;
+
+    while ((pEntry = readdir(pDir)) != NULL)
+    {
+        if (strcmp(pEntry->d_name, "states") == 0)
+            bLegacy = TRUE;
+        else if (strcmp(pEntry->d_name, "STATES") == 0)
+            bCanonical = TRUE;
+    }
+    closedir(pDir);
+
+    if (!bLegacy || bCanonical)
+        return;
+
+    snprintf(Legacy, sizeof(Legacy), "%s/states", Parent);
+    snprintf(Canonical, sizeof(Canonical), "%s/STATES", Parent);
+
+    if (rename(Legacy, Canonical) == 0)
+        return;
+
+    snprintf(Temp, sizeof(Temp), "%s/.__states_case_migrate__", Parent);
+    if (stat(Temp, &Status) == 0)
+        return;
+
+    if (rename(Legacy, Temp) == 0)
+    {
+        if (rename(Temp, Canonical) != 0)
+            (void)rename(Temp, Legacy);
+    }
+}
+
 static Bool _MainLoopStateEnsureRoot(const MainLoopStateRootT *pRoot)
 {
     Char Path[1024];
@@ -4589,9 +4654,11 @@ static Bool _MainLoopStateEnsureRoot(const MainLoopStateRootT *pRoot)
         return FALSE;
     }
 
+    _MainLoopStateMigrateLegacyStatesDir(pRoot);
+
     if (!pRoot->bMemCard)
     {
-        snprintf(Path, sizeof(Path), "%s/SNESticle/states", pRoot->Root);
+        snprintf(Path, sizeof(Path), "%s/SNESticle/STATES", pRoot->Root);
         if (!_MainLoopStateEnsureOneDir(Path))
         {
             return FALSE;
@@ -4635,7 +4702,7 @@ static void _MainLoopStateBuildBankPath(
     }
     else
     {
-        snprintf(Directory, sizeof(Directory), "%s/SNESticle/states", pRoot->Root);
+        snprintf(Directory, sizeof(Directory), "%s/SNESticle/STATES", pRoot->Root);
     }
 
     nMaxName = PathGetMaxFileNameLength(Directory) - 4;

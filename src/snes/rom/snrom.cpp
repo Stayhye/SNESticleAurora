@@ -22,11 +22,6 @@ enum { SNROM_HOST_READ_GUARD_BYTES = 16 };
 Uint32 g_FakeSRAMSize = 0;
 SnesForceRegionE g_SnesForceRegion = SNES_FORCE_REGION_OFF;
 
-/* AURORA_SONIC_BLAST_MAN_COLOR_V7
- * Runtime-only renderer compatibility flag. It is reset on every ROM load.
- * No Sonic Blast Man ROM byte is modified. */
-Bool g_SnesCompatSonicBlastManColorMath = FALSE;
-
 /* AURORA_CRC_ZERO_INIT_DB_V8
  * Set from the normalized/headerless ROM CRC before any in-memory ROM patch.
  * SnesSystem consumes it only while attaching a new cartridge. */
@@ -67,7 +62,6 @@ Bool g_SnesCompatSunsetRidersObj128 = FALSE;
 void SnesRomResetRuntimeCompatForExternalDevice(void)
 {
     SnesTurboFileSelectForCRC(0);
-    g_SnesCompatSonicBlastManColorMath = FALSE;
     g_SnesCompatZeroInit = FALSE;
     g_SnesCompatHongKong97SPCBoot = FALSE;
     g_SnesCompatTopGearFastRom = FALSE;
@@ -869,6 +863,7 @@ SnesRom::SnesRom()
 	m_uRomBytes	= 0;
 	m_uRawFileCRC32 = 0; /* AURORA_SNES_SINGLE_IO_IDENTITY_V1_20260915 */
 	m_uRawFileBytes = 0;
+	m_uRuntimeCRC32 = 0;
 	m_Flags      = SNROM_FLAG_ROM;
 	m_eMapping   = SNROM_MAPPING_LOROM;
 	m_eVideoType = SNROM_VIDEO_NTSC;
@@ -1241,6 +1236,20 @@ void SnesRom::SetCartInfo(SNRomInfoT *pCartInfo)
 			m_Flags    = SNROM_FLAG_ROM | SNROM_FLAG_SAVERAM | SNROM_FLAG_SRTC;
 		}
 
+		/* AURORA_REVIVE_AUDIT_SRAM128K_V10_20260930
+		 * These two known boards use the 128-KiB sliding SRAM decoder.
+		 * Require the physical 128-KiB header declaration too, so a hack that
+		 * merely preserves a title cannot silently acquire a different PCB.
+		 * RPG Tsukuru 2 is promoted to BSC-LoROM later by its existing ZR2J
+		 * product-code path; this flag deliberately survives that promotion. */
+		if (m_eMapping == SNROM_MAPPING_LOROM &&
+		    m_uSRAMSize == 1024u &&
+		    (!strcmp((const char *)m_Name, "THOROUGHBRED BREEDER3") ||
+		     !strcmp((const char *)m_Name, "RPG-TCOOL 2")))
+		{
+			m_Flags |= SNROM_FLAG_SRAM128K_SPECIAL;
+		}
+
 	} else
 	{
 		m_eVideoType = SNROM_VIDEO_NTSC;
@@ -1297,6 +1306,7 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 	/* Never expose stale identity after a failed reload. */
 	m_uRawFileCRC32 = 0;
 	m_uRawFileBytes = 0;
+	m_uRuntimeCRC32 = 0;
 
 	// determine file size
 	pFileIO->Seek(0, SEEK_END);
@@ -1509,6 +1519,7 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 			(m_pRomData && m_uRomBytes)
 				? _SNRomRuntimeCRC32(m_pRomData, m_uRomBytes) : 0;
 
+		m_uRuntimeCRC32 = uRuntimeCRC;
 		SnesTurboFileSelectForCRC(uRuntimeCRC);
 
 	}
@@ -1530,10 +1541,6 @@ Emu::Rom::LoadErrorE SnesRom::LoadRom(CDataIO *pFileIO, Uint8 *pBuffer, Uint32 n
 			(uPilotwingsCRC == 0x77871727u) || /* Japan */
 			(uPilotwingsCRC == 0xDEF45776u);   /* Europe: prefer original DSP-1 behavior */
 	}
-
-/* AURORA_SONIC_BLAST_MAN_COLOR_V7
- * Never leak the previous game's renderer workaround into the next load. */
-g_SnesCompatSonicBlastManColorMath = FALSE;
 
 /* AURORA_HK97_SPC_BOOT_DB_V9
  * Detect the normalized/headerless ROM before any V6 in-memory patching.
@@ -1599,15 +1606,6 @@ if (m_pRomData && m_uRomBytes)
 	if (m_uRomBytes == 0x100000u && _SNRomIsValidCartInfo(pLoCartInfo))
 	{
 		const Uint32 uCompatCRC = _SNRomCompatCRC32(m_pRomData, m_uRomBytes);
-
-#if SNES_SONIC_COLOR_WORKAROUND
-		/* Sonic Blast Man clean 1 MiB dumps: USA / Europe / Japan.
-		 * The renderer uses this only to suppress CGADSUB color math. */
-		g_SnesCompatSonicBlastManColorMath =
-			(uCompatCRC == 0x8886396Eu) ||
-			(uCompatCRC == 0x5441F25Bu) ||
-			(uCompatCRC == 0xBE523800u);
-#endif
 
 		const SNRomCompatEntryT *pCompat = NULL;
 
@@ -1832,6 +1830,7 @@ void SnesRom::Unload()
 	m_uRomBytes = 0;
 	m_uRawFileCRC32 = 0;
 	m_uRawFileBytes = 0;
+	m_uRuntimeCRC32 = 0;
 	m_bLoaded   = false;
 	memset(m_Name, 0, sizeof(m_Name));
 }

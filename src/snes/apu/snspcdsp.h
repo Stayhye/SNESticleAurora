@@ -124,12 +124,21 @@ struct SNSpcEchoT
 {
 	SNSpcFIRFilterT	Filter[2];		// filter for left/right
 	Uint16			uEchoAddr;
+	/* AURORA_SDSP_ECHO_LATCH_V36_20261002: EDL takes effect at ring wrap. */
+	Uint8			uEchoEDL;
+	Uint8			bEchoLatchValid;
+	Uint16			uEchoPad;
 };
 
 
+/* AURORA_SDSP_TIMELINE_TRACER_FINAL_V36_20261002 */
 class    SNSpcDsp
 {
+	/* AURORA_SDSP_DUAL_TIMELINE_V36_20261002
+	 * m_Regs is the mixer/replay timeline. m_LiveRegs is what SPC $F3
+	 * reads observe while the SPC executes ahead of the host mixer. */
 	Uint8			m_Regs[SNSPCDSP_REG_NUM];
+	Uint8			m_LiveRegs[SNSPCDSP_REG_NUM];
 
 	Uint8			*m_pMem;       // S-SMP-visible memory view
 	Uint8			*m_pShadowMem; // physical APURAM hidden by IPL at $FFC0-$FFFF
@@ -138,9 +147,12 @@ class    SNSpcDsp
 	ISNSpcDspMix	*m_pMixer[SNSPCDSP_MAXMIXERS];;
 
 	#if SNSPCDSP_WRITEQUEUE
-	SNQueue	m_Queue;
+	/* 16384 entries conservatively exceed even one DSP write per two SPC
+	 * cycles across a PAL frame, so replay never needs an early destructive flush. */
+	SNQueueT<16384>	m_Queue;
 	#endif
 
+	void	WriteLive8(Uint32 uAddr, Uint8 uData);
 	void	KeyOn(Int32 iChannel);
 	void	KeyOff(Int32 iChannel);
 
@@ -154,6 +166,13 @@ public:
 	void	SetMixer(Int32 iMixer, class ISNSpcDspMix	*pMixer) {m_pMixer[iMixer] = pMixer;}
 
 	Bool	EnqueueWrite(Uint32 uCycle, Uint32 uAddr, Uint8 uData);
+	/* AURORA_SDSP_DUAL_TIMELINE_V36_20261002: next replay event, for
+	 * splitting mixer work at the first output-sample boundary after it. */
+	inline Uint32 GetNextWriteCycle()
+	{
+		SNQueueElementT *p = m_Queue.Peek();
+		return p ? p->uCycle : 0xFFFFFFFFu;
+	}
 	void	Sync(Uint32 uCycle);
 	void	Sync(void);
 

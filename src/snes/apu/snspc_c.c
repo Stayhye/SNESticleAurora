@@ -14,6 +14,7 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include "types.h"
 #include "snspc.h"
 #include "snspc_c.h"
@@ -21,6 +22,329 @@ Direct-page 16-bit wrap fixed by SAFE ACCURACY BATCH 2.
 #include "sndebug.h"
 #include "platform/ps2/system/aurora_runtime_trace.h"
 
+
+
+/* AURORA_SNES_GENERIC_TRACER_V36_20261002
+ * Generic SNES/SPC laboratory tracer. It has no ROM/CRC gate: build-time
+ * AURORA_SNES_TRACER decides whether this code exists, and the menu toggle
+ * decides whether it records at runtime. Title/CRC are metadata only.
+ */
+#if AURORA_SNES_TRACER
+#define AURORA_SNES_TRC_SPC_COUNT 256u
+#define AURORA_SNES_TRC_SPC_MASK  (AURORA_SNES_TRC_SPC_COUNT - 1u)
+#define AURORA_SNES_TRC_IO_COUNT  128u
+#define AURORA_SNES_TRC_IO_MASK   (AURORA_SNES_TRC_IO_COUNT - 1u)
+#define AURORA_SNES_TRC_DSP_COUNT 256u
+#define AURORA_SNES_TRC_DSP_MASK  (AURORA_SNES_TRC_DSP_COUNT - 1u)
+#define AURORA_SNES_TRC_ECHO_COUNT 128u
+#define AURORA_SNES_TRC_ECHO_MASK  (AURORA_SNES_TRC_ECHO_COUNT - 1u)
+
+typedef struct AuroraSnesTracerSpcT
+{
+    Uint32 seq;
+    Int32 frameCycle;
+    Int32 totalCycle;
+    Int32 residualCycles;
+    Uint16 pc;
+    Uint8 opcode, a, x, y, sp, psw, halt;
+} AuroraSnesTracerSpcT;
+
+typedef struct AuroraSnesTracerIoT
+{
+    Uint32 seq, frameCycle, totalCycle;
+    Uint16 pc;
+    Uint8 kind, port, data, prior;
+} AuroraSnesTracerIoT;
+
+typedef struct AuroraSnesTracerDspT
+{
+    Uint32 seq, eventCycle, applyCycle;
+    Uint8 kind, reg, prior, data;
+} AuroraSnesTracerDspT;
+
+typedef struct AuroraSnesTracerEchoT
+{
+    Uint32 seq, mixCycle, sampleRate;
+    Uint16 base, size, posBefore, posAfter, nSamples;
+    Uint8 flg, esaReg, edlReg, edlLatch, write;
+} AuroraSnesTracerEchoT;
+
+static AuroraSnesTracerSpcT s_AuroraSnesTracerSpc[AURORA_SNES_TRC_SPC_COUNT];
+static AuroraSnesTracerIoT s_AuroraSnesTracerIo[AURORA_SNES_TRC_IO_COUNT];
+static AuroraSnesTracerDspT s_AuroraSnesTracerDsp[AURORA_SNES_TRC_DSP_COUNT];
+static AuroraSnesTracerEchoT s_AuroraSnesTracerEcho[AURORA_SNES_TRC_ECHO_COUNT];
+static Uint32 s_AuroraSnesTracerSpcHead, s_AuroraSnesTracerSpcCount;
+static Uint32 s_AuroraSnesTracerIoHead, s_AuroraSnesTracerIoCount;
+static Uint32 s_AuroraSnesTracerDspHead, s_AuroraSnesTracerDspCount;
+static Uint32 s_AuroraSnesTracerEchoHead, s_AuroraSnesTracerEchoCount;
+static Uint32 s_AuroraSnesTracerSeq, s_AuroraSnesTracerNopRun;
+static Uint32 s_AuroraSnesTracerCRC;
+volatile Uint8 g_AuroraSnesTracerEnabled = 0;
+static Uint8 s_AuroraSnesTracerFrozen, s_AuroraSnesTracerGameValid;
+static Char s_AuroraSnesTracerTitle[64];
+static SNSpcT *s_AuroraSnesTracerLastCpu;
+
+static void AuroraSnesTracerDump(SNSpcT *pCpu, const char *reason);
+
+static void AuroraSnesTracerResetRings(void)
+{
+    s_AuroraSnesTracerSpcHead = s_AuroraSnesTracerSpcCount = 0;
+    s_AuroraSnesTracerIoHead = s_AuroraSnesTracerIoCount = 0;
+    s_AuroraSnesTracerDspHead = s_AuroraSnesTracerDspCount = 0;
+    s_AuroraSnesTracerEchoHead = s_AuroraSnesTracerEchoCount = 0;
+    s_AuroraSnesTracerSeq = 0;
+    s_AuroraSnesTracerNopRun = 0;
+    s_AuroraSnesTracerFrozen = 0;
+    s_AuroraSnesTracerLastCpu = NULL;
+}
+
+void SNSPCTracerConfigureGame(Uint32 uRuntimeCRC, const char *pTitle)
+{
+    if (g_AuroraSnesTracerEnabled && s_AuroraSnesTracerLastCpu)
+        AuroraSnesTracerDump(s_AuroraSnesTracerLastCpu, "game changed while tracer was on");
+    g_AuroraSnesTracerEnabled = 0;
+    s_AuroraSnesTracerCRC = uRuntimeCRC;
+    s_AuroraSnesTracerTitle[0] = 0;
+    if (pTitle && *pTitle)
+    {
+        strncpy(s_AuroraSnesTracerTitle, pTitle, sizeof(s_AuroraSnesTracerTitle)-1u);
+        s_AuroraSnesTracerTitle[sizeof(s_AuroraSnesTracerTitle)-1u] = 0;
+    }
+    s_AuroraSnesTracerGameValid = (pTitle != NULL || uRuntimeCRC != 0u) ? 1u : 0u;
+    AuroraSnesTracerResetRings();
+}
+
+Bool SNSPCTracerSetEnabled(Bool bEnabled)
+{
+    if (bEnabled)
+    {
+        if (!s_AuroraSnesTracerGameValid)
+            return FALSE;
+        AuroraSnesTracerResetRings();
+        g_AuroraSnesTracerEnabled = 1u;
+        printf("[SNES-TRACER] ON title='%s' crc=%08X\n",
+               s_AuroraSnesTracerTitle[0] ? s_AuroraSnesTracerTitle : "?",
+               (unsigned)s_AuroraSnesTracerCRC);
+        return TRUE;
+    }
+    if (g_AuroraSnesTracerEnabled && s_AuroraSnesTracerLastCpu)
+        AuroraSnesTracerDump(s_AuroraSnesTracerLastCpu, "manual tracer off");
+    g_AuroraSnesTracerEnabled = 0u;
+    return FALSE;
+}
+
+Bool SNSPCTracerIsEnabled(void)
+{
+    return g_AuroraSnesTracerEnabled ? TRUE : FALSE;
+}
+
+static Uint8 AuroraSnesTracerPackPSW(
+    Uint8 p, Uint32 fN, Uint32 fZ, Uint32 fC, Uint32 fHV)
+{
+    p &= (Uint8)~(SNSPC_FLAG_C | SNSPC_FLAG_Z | SNSPC_FLAG_N |
+                  SNSPC_FLAG_H | SNSPC_FLAG_V);
+    p |= (Uint8)(fC & SNSPC_FLAG_C);
+    p |= (Uint8)(fHV & (SNSPC_FLAG_H | SNSPC_FLAG_V));
+    if (fN & 0x8000u) p |= SNSPC_FLAG_N;
+    if (!(fZ & 0xFFFFu)) p |= SNSPC_FLAG_Z;
+    return p;
+}
+
+void SNSPCTracerPortEvent(
+    Uint8 kind, Uint8 port, Uint8 data, Uint8 prior,
+    Uint32 frameCycle, Uint32 totalCycle, Uint16 pc)
+{
+    AuroraSnesTracerIoT *e;
+    if (!g_AuroraSnesTracerEnabled || s_AuroraSnesTracerFrozen) return;
+    e = &s_AuroraSnesTracerIo[s_AuroraSnesTracerIoHead];
+    e->seq = s_AuroraSnesTracerSeq;
+    e->frameCycle = frameCycle; e->totalCycle = totalCycle; e->pc = pc;
+    e->kind = kind; e->port = port; e->data = data; e->prior = prior;
+    s_AuroraSnesTracerIoHead = (s_AuroraSnesTracerIoHead + 1u) & AURORA_SNES_TRC_IO_MASK;
+    if (s_AuroraSnesTracerIoCount < AURORA_SNES_TRC_IO_COUNT) ++s_AuroraSnesTracerIoCount;
+}
+
+void SNSPCTracerDspEvent(
+    Uint8 kind, Uint32 eventCycle, Uint32 applyCycle,
+    Uint8 reg, Uint8 prior, Uint8 data)
+{
+    AuroraSnesTracerDspT *e;
+    if (!g_AuroraSnesTracerEnabled || s_AuroraSnesTracerFrozen) return;
+    e = &s_AuroraSnesTracerDsp[s_AuroraSnesTracerDspHead];
+    e->seq = s_AuroraSnesTracerSeq; e->eventCycle = eventCycle;
+    e->applyCycle = applyCycle; e->kind = kind; e->reg = reg;
+    e->prior = prior; e->data = data;
+    s_AuroraSnesTracerDspHead = (s_AuroraSnesTracerDspHead + 1u) & AURORA_SNES_TRC_DSP_MASK;
+    if (s_AuroraSnesTracerDspCount < AURORA_SNES_TRC_DSP_COUNT) ++s_AuroraSnesTracerDspCount;
+}
+
+void SNSPCTracerEchoRun(
+    Uint32 mixCycle, Uint32 sampleRate,
+    Uint32 base, Uint32 size, Uint32 posBefore, Uint32 posAfter,
+    Uint32 nSamples, Uint8 flg, Uint8 esaReg, Uint8 edlReg,
+    Uint8 edlLatch, Uint8 bWrite)
+{
+    AuroraSnesTracerEchoT *e;
+    if (!g_AuroraSnesTracerEnabled || s_AuroraSnesTracerFrozen) return;
+    e = &s_AuroraSnesTracerEcho[s_AuroraSnesTracerEchoHead];
+    e->seq = s_AuroraSnesTracerSeq; e->mixCycle = mixCycle; e->sampleRate = sampleRate;
+    e->base = (Uint16)base; e->size = (Uint16)size;
+    e->posBefore = (Uint16)posBefore; e->posAfter = (Uint16)posAfter;
+    e->nSamples = (Uint16)nSamples; e->flg = flg; e->esaReg = esaReg;
+    e->edlReg = edlReg; e->edlLatch = edlLatch; e->write = bWrite;
+    s_AuroraSnesTracerEchoHead = (s_AuroraSnesTracerEchoHead + 1u) & AURORA_SNES_TRC_ECHO_MASK;
+    if (s_AuroraSnesTracerEchoCount < AURORA_SNES_TRC_ECHO_COUNT) ++s_AuroraSnesTracerEchoCount;
+}
+
+static FILE *AuroraSnesTracerOpen(SNSpcT *pCpu, const char **ppPath)
+{
+    static Char path0[128], path1[128];
+    const Uint32 stamp = pCpu ? (Uint32)SNSPCGetCounter(pCpu, SNSPC_COUNTER_TOTAL) : s_AuroraSnesTracerSeq;
+    snprintf(path0, sizeof(path0), "mass0:/SNESticle/snes_trace_%08X_T%08X.txt",
+             (unsigned)s_AuroraSnesTracerCRC, (unsigned)stamp);
+    snprintf(path1, sizeof(path1), "mass:/SNESticle/snes_trace_%08X_T%08X.txt",
+             (unsigned)s_AuroraSnesTracerCRC, (unsigned)stamp);
+    {
+        FILE *f = fopen(path0, "wb");
+        if (f) { if (ppPath) *ppPath = path0; return f; }
+        f = fopen(path1, "wb");
+        if (f) { if (ppPath) *ppPath = path1; return f; }
+    }
+    if (ppPath) *ppPath = "stdout";
+    return stdout;
+}
+
+static void AuroraSnesTracerDumpHex(FILE *f, SNSpcT *pCpu, Uint32 start, Uint32 bytes)
+{
+    Uint32 i;
+    for (i = 0; i < bytes; i += 16u)
+    {
+        Uint32 j;
+        fprintf(f, "%04X:", (unsigned)((start + i) & 0xFFFFu));
+        for (j = 0; j < 16u && i + j < bytes; ++j)
+            fprintf(f, " %02X", pCpu->Mem[(start + i + j) & 0xFFFFu]);
+        fputc('\n', f);
+    }
+}
+
+static void AuroraSnesTracerDump(SNSpcT *pCpu, const char *reason)
+{
+    const char *path = NULL;
+    FILE *f;
+    Uint32 i, pos;
+    Uint8 cpuToSpc[4] = {0,0,0,0}, spcToCpu[4] = {0,0,0,0};
+    if (!pCpu || s_AuroraSnesTracerFrozen) return;
+    s_AuroraSnesTracerFrozen = 1u;
+    f = AuroraSnesTracerOpen(pCpu, &path);
+    if (!f) return;
+
+    fprintf(f, "SNESticleAurora generic SNES tracer v36\n");
+    fprintf(f, "title=%s\ncrc32=%08X\nreason=%s\n",
+            s_AuroraSnesTracerTitle[0] ? s_AuroraSnesTracerTitle : "?",
+            (unsigned)s_AuroraSnesTracerCRC, reason ? reason : "manual");
+    fprintf(f, "live PC=%04X A=%02X X=%02X Y=%02X SP=%02X PSW=%02X HALT=%02X Cycles=%d FrameCounter=%d TotalCounter=%d\n",
+            (unsigned)pCpu->Regs.rPC, (unsigned)pCpu->Regs.rA,
+            (unsigned)pCpu->Regs.rX, (unsigned)pCpu->Regs.rY,
+            (unsigned)pCpu->Regs.rSP, (unsigned)pCpu->Regs.rPSW,
+            (unsigned)pCpu->Regs.uPad, (int)pCpu->Cycles,
+            (int)pCpu->Counter[SNSPC_COUNTER_FRAME],
+            (int)pCpu->Counter[SNSPC_COUNTER_TOTAL]);
+
+    fprintf(f, "\n# recent SPC700 instructions\n# seq frame total residual pc op A X Y SP PSW halt\n");
+    pos = (s_AuroraSnesTracerSpcHead - s_AuroraSnesTracerSpcCount) & AURORA_SNES_TRC_SPC_MASK;
+    for (i = 0; i < s_AuroraSnesTracerSpcCount; ++i)
+    {
+        const AuroraSnesTracerSpcT *e = &s_AuroraSnesTracerSpc[(pos+i)&AURORA_SNES_TRC_SPC_MASK];
+        fprintf(f, "%08u %10d %10d %6d %04X %02X %02X %02X %02X %02X %02X %02X\n",
+                (unsigned)e->seq, (int)e->frameCycle, (int)e->totalCycle,
+                (int)e->residualCycles, (unsigned)e->pc, (unsigned)e->opcode,
+                (unsigned)e->a, (unsigned)e->x, (unsigned)e->y, (unsigned)e->sp,
+                (unsigned)e->psw, (unsigned)e->halt);
+    }
+
+    SNSPCTracerPeekPorts(pCpu, cpuToSpc, spcToCpu);
+    fprintf(f, "\n# current APUIO latches\nCPU->SPC F4..F7: %02X %02X %02X %02X\nSPC->CPU F4..F7: %02X %02X %02X %02X\n",
+            cpuToSpc[0],cpuToSpc[1],cpuToSpc[2],cpuToSpc[3],
+            spcToCpu[0],spcToCpu[1],spcToCpu[2],spcToCpu[3]);
+    fprintf(f, "\n# APUIO event history\n# seq frame total pc kind port data prior\n");
+    pos = (s_AuroraSnesTracerIoHead - s_AuroraSnesTracerIoCount) & AURORA_SNES_TRC_IO_MASK;
+    for (i = 0; i < s_AuroraSnesTracerIoCount; ++i)
+    {
+        const AuroraSnesTracerIoT *e=&s_AuroraSnesTracerIo[(pos+i)&AURORA_SNES_TRC_IO_MASK];
+        fprintf(f, "%08u %10u %10u %04X %c %02X %02X %02X\n",
+                (unsigned)e->seq,(unsigned)e->frameCycle,(unsigned)e->totalCycle,
+                (unsigned)e->pc,(int)e->kind,(unsigned)e->port,
+                (unsigned)e->data,(unsigned)e->prior);
+    }
+
+    fprintf(f, "\n# DSP queue/replay history\n# kind Q=queued T=timed replay F=final replay\n# seq event_cycle apply_cycle kind reg prior new\n");
+    pos=(s_AuroraSnesTracerDspHead-s_AuroraSnesTracerDspCount)&AURORA_SNES_TRC_DSP_MASK;
+    for(i=0;i<s_AuroraSnesTracerDspCount;++i)
+    {
+        const AuroraSnesTracerDspT *e=&s_AuroraSnesTracerDsp[(pos+i)&AURORA_SNES_TRC_DSP_MASK];
+        fprintf(f,"%08u %10u %10u %c %02X %02X %02X\n",
+                (unsigned)e->seq,(unsigned)e->eventCycle,(unsigned)e->applyCycle,
+                (int)e->kind,(unsigned)e->reg,(unsigned)e->prior,(unsigned)e->data);
+    }
+
+    fprintf(f, "\n# echo runs (registers plus hardware-style latches)\n# seq mix_cycle rate base size pos0 pos1 nsamp W FLG ESA EDL L_EDL\n");
+    pos=(s_AuroraSnesTracerEchoHead-s_AuroraSnesTracerEchoCount)&AURORA_SNES_TRC_ECHO_MASK;
+    for(i=0;i<s_AuroraSnesTracerEchoCount;++i)
+    {
+        const AuroraSnesTracerEchoT *e=&s_AuroraSnesTracerEcho[(pos+i)&AURORA_SNES_TRC_ECHO_MASK];
+        fprintf(f,"%08u %10u %5u %04X %04X %04X %04X %5u %u %02X %02X %02X %02X\n",
+                (unsigned)e->seq,(unsigned)e->mixCycle,(unsigned)e->sampleRate,
+                (unsigned)e->base,(unsigned)e->size,(unsigned)e->posBefore,
+                (unsigned)e->posAfter,(unsigned)e->nSamples,(unsigned)e->write,
+                (unsigned)e->flg,(unsigned)e->esaReg,(unsigned)e->edlReg,
+                (unsigned)e->edlLatch);
+    }
+
+    fprintf(f, "\n# stack page $0100-$01FF\n");
+    AuroraSnesTracerDumpHex(f,pCpu,0x0100u,0x0100u);
+    fprintf(f, "\n# low/work APURAM $0000-$05FF\n");
+    AuroraSnesTracerDumpHex(f,pCpu,0x0000u,0x0600u);
+    fprintf(f, "\n# APURAM around current PC ($%04X-...)\n", (unsigned)((pCpu->Regs.rPC-0x80u)&0xFFFFu));
+    AuroraSnesTracerDumpHex(f,pCpu,(Uint16)(pCpu->Regs.rPC-0x80u),0x0100u);
+    fprintf(f, "\n# top APURAM / IPL window $FFC0-$FFFF\n");
+    AuroraSnesTracerDumpHex(f,pCpu,0xFFC0u,0x0040u);
+    fflush(f);
+    if (f != stdout) fclose(f);
+    printf("[SNES-TRACER] saved: %s -> %s\n", reason ? reason : "manual", path ? path : "?");
+}
+
+void SNSPCTracerRecordInstruction(
+    SNSpcT *pCpu, Uint16 pc, Uint8 opcode, Int32 nCycles,
+    Uint32 fN, Uint32 fZ, Uint32 fC, Uint32 fHV)
+{
+    AuroraSnesTracerSpcT *e;
+    if (!g_AuroraSnesTracerEnabled || s_AuroraSnesTracerFrozen || !pCpu) return;
+    s_AuroraSnesTracerLastCpu = pCpu;
+    e=&s_AuroraSnesTracerSpc[s_AuroraSnesTracerSpcHead];
+    e->seq=s_AuroraSnesTracerSeq++;
+    e->frameCycle=pCpu->Counter[SNSPC_COUNTER_FRAME]-nCycles;
+    e->totalCycle=pCpu->Counter[SNSPC_COUNTER_TOTAL]-nCycles;
+    e->residualCycles=nCycles; e->pc=pc; e->opcode=opcode;
+    e->a=pCpu->Regs.rA; e->x=pCpu->Regs.rX; e->y=pCpu->Regs.rY;
+    e->sp=pCpu->Regs.rSP;
+    e->psw=AuroraSnesTracerPackPSW(pCpu->Regs.rPSW,fN,fZ,fC,fHV);
+    e->halt=pCpu->Regs.uPad;
+    s_AuroraSnesTracerSpcHead=(s_AuroraSnesTracerSpcHead+1u)&AURORA_SNES_TRC_SPC_MASK;
+    if(s_AuroraSnesTracerSpcCount<AURORA_SNES_TRC_SPC_COUNT) ++s_AuroraSnesTracerSpcCount;
+
+    if(opcode==0x00u) ++s_AuroraSnesTracerNopRun; else s_AuroraSnesTracerNopRun=0;
+    if(s_AuroraSnesTracerNopRun>=24u)
+    {
+        AuroraSnesTracerDump(pCpu,"suspicious SPC700 NOP run (24 x $00)");
+        g_AuroraSnesTracerEnabled=0u;
+    }
+    else if(opcode==0xFFu || pc==0x0000u)
+    {
+        AuroraSnesTracerDump(pCpu, opcode==0xFFu ? "SPC700 STOP fetched" : "SPC700 PC reached $0000");
+        g_AuroraSnesTracerEnabled=0u;
+    }
+}
+#endif /* AURORA_SNES_TRACER */
 
 #define SNSPC_STATEDEBUG (SNES_DEBUG && 1)
 /* AURORA_SPC700_ACCURACY_BATCH1_V1_20260914
@@ -526,6 +850,13 @@ Int32 SNSPCExecute_C(SNSpcT *pCpu)
 		if (uAuroraTraceEnabled)
 			AuroraRuntimeTraceSPC(
 				pCpu, (Uint16)(rPC - 1u), (Uint8)uOpcode);
+#endif
+
+#if AURORA_SNES_TRACER
+        if (SNSPC_TRACER_FAST_ACTIVE())
+            SNSPCTracerRecordInstruction(
+                pCpu, (Uint16)(rPC - 1u), (Uint8)uOpcode, nCycles,
+                fN, fZ, fC, fHV);
 #endif
 
 		switch (uOpcode)

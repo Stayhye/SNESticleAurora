@@ -198,10 +198,6 @@ public:
     SnesPPU *GetPPU() {return &m_PPU;}
 
     Uint32	GetFrame() {return m_uFrame;}
-#if AURORA_SNES_DEBUG_STATE
-    /* AURORA_SNES_DEBUG_STATE_V34_FINAL_20261002: read-only capture helper; compiled out with the feature. */
-    Uint32  DebugGetLine() const { return m_uLine; }
-#endif
     Uint8	*GetSRAM() {return m_SRam;}
 
     /* AURORA_BSXSLOT_MEMORY_PACK_V1_20260906_SNES_H */

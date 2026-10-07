@@ -40,6 +40,9 @@ static Bool s_haveSnapshot = FALSE;
 static Uint32 s_frameStart = 0;
 
 static Uint32 s_frameCycles[AURORA_SNES_COST_BUCKET_COUNT] = { 0,0,0,0,0 };
+/* AURORA_C4_EXCLUSIVE_FRAME_V8_20261003: last valid exclusive frame. */
+static AuroraSnesCostFrameT s_lastFrame;
+static Bool s_lastFrameValid = FALSE;
 static AuroraSnesCostScopeT s_stack[AURORA_SNES_COST_STACK_MAX];
 static Int32 s_depth = 0;
 
@@ -150,6 +153,8 @@ Bool AuroraSnesCostProfilerSetEnabled(Bool enabled)
     s_ppuSplitPct10 = 0;
     s_focusPct10 = 0;
     s_frameK10 = 0;
+    memset(&s_lastFrame, 0, sizeof(s_lastFrame));
+    s_lastFrameValid = FALSE;
     ResetWindow();
     return s_enabled;
 }
@@ -159,11 +164,20 @@ Bool AuroraSnesCostProfilerIsEnabled(void)
     return s_enabled;
 }
 
+Bool AuroraSnesCostProfilerGetLastFrame(AuroraSnesCostFrameT *out)
+{
+    if (!out || !s_lastFrameValid)
+        return FALSE;
+    *out = s_lastFrame;
+    return TRUE;
+}
+
 void AuroraSnesCostProfilerFrameBegin(void)
 {
     if (!s_enabled)
         return;
 
+    s_lastFrameValid = FALSE;
     memset(s_frameCycles, 0, sizeof(s_frameCycles));
     memset(s_framePpuCycles, 0, sizeof(s_framePpuCycles));
     memset(s_framePpuWork, 0, sizeof(s_framePpuWork));
@@ -289,8 +303,14 @@ void AuroraSnesCostProfilerFrameEnd(void)
     {
         s_depth = 0;
         s_ppuDepth = 0;
+        s_lastFrameValid = FALSE;
         return;
     }
+
+    s_lastFrame.total = total;
+    for (Int32 i = 0; i < AURORA_SNES_COST_BUCKET_COUNT; ++i)
+        s_lastFrame.bucket[i] = s_frameCycles[i];
+    s_lastFrameValid = TRUE;
 
     s_windowTotal += total;
     for (Int32 i = 0; i < AURORA_SNES_COST_BUCKET_COUNT; ++i)
