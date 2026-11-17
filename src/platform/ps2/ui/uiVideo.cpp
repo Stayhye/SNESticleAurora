@@ -3,13 +3,21 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h> /* strcasecmp: pfs0 ELF recognition */
 #include <stdio.h>
+#include <sys/stat.h>
+#define NEWLIB_PORT_AWARE
+#include <fileXio.h>
+#include <fileXio_rpc.h>
+#include <libhdd.h> /* APA partition metadata */
+#undef NEWLIB_PORT_AWARE
 #include <kernel.h>
 #include <libpad.h>
 #include "types.h"
 #include "font.h"
 #include "poly.h"
 #include "uiVideo.h"
+#include "platform/ps2/system/aurora_core_build_config.h" /* AURORA_CORE_FLAGS_FINAL_20261104 */
 #include "snrom.h"
 #include "snes.h"
 extern "C" {
@@ -21,6 +29,7 @@ extern "C" {
 #include "memcard.h"
 #include "uiCover.h"
 #include "mainloop_bgm.h"
+#include "mainloop_ui.h" /* MainLoopStatusPrintf */
 #include "mainloop_state.h"
 #include "mainloop_input.h"
 #include "input.h"
@@ -67,7 +76,7 @@ Bool MainLoopReinitVideoMode(Int32 mode);
 /* ------------------------------------------------------------------ */
 
 #define VIDEOCFG_MAGIC   0x53564944u   /* 'SVID' */
-#define VIDEOCFG_VERSION 53 /* AURORA_GBA_BLEND_UI_CFG53_V1_20261004: append GBA blending; v52 imported intact */
+#define VIDEOCFG_VERSION 55 /* AURORA_GBA_BLEND_UI_CFG53_V1_20261004: append GBA blending; v52 imported intact */
 /* AURORA_CFG_MODE7_FULL_ONCE_V1_6_20260905: 44 -> 45; same-layout migration, Mode7 Full once. */
 /* AURORA_CD_MUSIC_REDBOOK_V3_20260830: v43 appends shared SCD/PCE CD Red Book toggle; old configs default On. */
 /* AURORA_PCE_SCALING_LIGHTGUN_TOGGLE_V2_20260830: v42 appends Light Gun; old configs default On. */
@@ -152,8 +161,12 @@ typedef struct
 	Int32  gbcvol;        /* internal 0..400; UI /2; default 200 == unity */
 	Int32  gbavol;        /* internal 0..400; UI /2; default 200 == unity */
 	Int32  gbablending; /* v53: gpSP interframe blending, 0=Off, 1=On */
+	Int32  pce6button; /* v54: native PCE 2/6-button pad, 0=2 (default) */
+	Int32  sneslegacymode; /* v55: OFF by default, historical renderer */
 } VideoCfgT;
-#define VIDEOCFG_V52_BYTES (sizeof(VideoCfgT) - sizeof(Int32))
+#define VIDEOCFG_V54_BYTES (sizeof(VideoCfgT) - sizeof(Int32))
+#define VIDEOCFG_V53_BYTES (VIDEOCFG_V54_BYTES - sizeof(Int32))
+#define VIDEOCFG_V52_BYTES (VIDEOCFG_V53_BYTES - sizeof(Int32))
 #define VIDEOCFG_V49_BYTES (VIDEOCFG_V52_BYTES - 2 * sizeof(Int32))
 #define VIDEOCFG_V46_BYTES (VIDEOCFG_V49_BYTES - sizeof(Int32))
 #define VIDEOCFG_V45_BYTES (VIDEOCFG_V46_BYTES - sizeof(Int32))
@@ -383,10 +396,390 @@ typedef struct
 	Int32  version;
 } VideoCfgHeaderT;
 
+/* AURORA_HDD_FULL_STORAGE_SAFE_V2_20261013
+ * Keep binary layout and migration logic of video.cfg IDENTICAL.
+ * MC remains the preferred source. HDD fallback is attempted ONLY when the
+ * ELF was actually launched by an HDD path, after the video/IOP boot phase.
+ * Keep the partition in hdd0: form: pfs0: can be remounted by the browser. */
+static Char s_AuroraVideoHddCfg[300] = {0};
+/* AURORA_CONFIG_USB_FIRST_VIDEO_V1_20261107: USB-first settings, no extra device initialization. */
+static Char s_AuroraVideoUsbCfg[300] = {0};
+extern char *MainGetBootDir();
+extern char *MainGetBootPath();
+extern Char _RomPath[1024];
+
+/* Fixed single-device lookup, not a boot-time mass0/mass1/mass scan.
+ * If launched from mass1: or mass:, use that exact existing alias. */
+static Bool _AuroraVideoCfgPreferredUsbPath(char *pOut, size_t nOut)
+{
+    const char *boot = MainGetBootPath();
+    const char *dev = "mass0:";
+    if (boot && !strncmp(boot, "mass1:", 6)) dev = "mass1:";
+    else if (boot && !strncmp(boot, "mass:", 5)) dev = "mass:";
+    int n = snprintf(pOut, nOut, "%s/SNESticle/video.cfg", dev);
+    return n >= 0 && (size_t)n < nOut ? TRUE : FALSE;
+}
+
+
+static Bool _AuroraVideoCfgIsHdd(const char *pPath)
+{
+    return pPath &&
+        (!strncmp(pPath, "hdd0:", 5) ||
+         !strncmp(pPath, "pfs0:", 5)) && pPath[5];
+}
+
+static Bool _AuroraVideoCfgMappedPath(
+    const char *pPath, char *pOut, size_t nOut)
+{
+    int n;
+    if (!pPath || !pOut || nOut == 0) return FALSE;
+    if (_AuroraVideoCfgIsHdd(pPath))
+    {
+        if (!strncmp(pPath, "pfs0:", 5))
+        {
+            n = snprintf(pOut, nOut, "%s", pPath);
+            return n >= 0 && (size_t)n < nOut ? TRUE : FALSE;
+        }
+        return HddMapPath(pPath, pOut, (int)nOut) == 1 ? TRUE : FALSE;
+    }
+    n = snprintf(pOut, nOut, "%s", pPath);
+    return n >= 0 && (size_t)n < nOut ? TRUE : FALSE;
+}
+
+class AuroraVideoHddIOGuard
+{
+    Bool m_locked;
+public:
+    AuroraVideoHddIOGuard(const char *pPath)
+      : m_locked(_AuroraVideoCfgIsHdd(pPath))
+    {
+        if (m_locked) BgmIOBegin();
+    }
+    ~AuroraVideoHddIOGuard()
+    {
+        if (m_locked) BgmIOEnd();
+    }
+};
+
+static Bool _AuroraVideoCfgRead(
+    char *pPath, Uint8 *pData, Uint32 nBytes)
+{
+    AuroraVideoHddIOGuard ioGuard(pPath);
+    char mapped[512];
+    FILE *f;
+    size_t got;
+    if (!_AuroraVideoCfgIsHdd(pPath))
+        return MemCardReadFile(pPath, pData, nBytes);
+    if (!_AuroraVideoCfgMappedPath(pPath, mapped, sizeof(mapped)))
+        return FALSE;
+    f = fopen(mapped, "rb");
+    if (!f) return FALSE;
+    got = fread(pData, 1, nBytes, f);
+    fclose(f);
+    return got == nBytes ? TRUE : FALSE;
+}
+
+static Bool _AuroraVideoCfgWrite(
+    char *pPath, Uint8 *pData, Uint32 nBytes)
+{
+    /* AURORA_HDD_ISSUE38_VIDEO_CFG_V4_20261013 : verified HDD write.
+     * The existing file format/layout and memory-card write path are intact.
+     * fopen("wb") may create/truncate before fwrite: do not report success
+     * until a full readback and byte-for-byte comparison has succeeded. */
+    AuroraVideoHddIOGuard ioGuard(pPath);
+    char mapped[512];
+    FILE *f;
+    size_t written;
+    Bool ok;
+    Uint8 verify[sizeof(VideoCfgT)];
+
+    if (!_AuroraVideoCfgIsHdd(pPath))
+        return MemCardWriteFile(pPath, pData, nBytes);
+    if (!pData || nBytes != sizeof(VideoCfgT) ||
+        !_AuroraVideoCfgMappedPath(pPath, mapped, sizeof(mapped)))
+    {
+        printf("[video.cfg] invalid HDD write/path\n");
+        return FALSE;
+    }
+    {
+        char parent[512];
+        char *slash;
+        int n = snprintf(parent, sizeof(parent), "%s", mapped);
+        if (n < 0 || n >= (int)sizeof(parent)) return FALSE;
+        slash = strrchr(parent, '/');
+        if (!slash) return FALSE;
+        *slash = 0;
+        if (mkdir(parent, 0777) < 0)
+        {
+            struct stat st;
+            if (stat(parent, &st) < 0 || !S_ISDIR(st.st_mode))
+            {
+                int dfd = fileXioDopen(parent);
+                if (dfd < 0) return FALSE;
+                fileXioDclose(dfd);
+            }
+        }
+    }
+    f = fopen(mapped, "wb");
+    if (!f)
+    {
+        printf("[video.cfg] HDD fopen(write) FAILED: %s\n", mapped);
+        return FALSE;
+    }
+    written = fwrite(pData, 1, nBytes, f);
+    ok = written == nBytes && fflush(f) == 0 ? TRUE : FALSE;
+    if (fclose(f) != 0) ok = FALSE;
+    if (!ok)
+    {
+        printf("[video.cfg] HDD write FAILED: %u/%u bytes\n",
+               (unsigned)written, (unsigned)nBytes);
+        return FALSE;
+    }
+
+    /* Exact round-trip and EOF check: a 0-byte or partial file fails. */
+    f = fopen(mapped, "rb");
+    if (!f)
+    {
+        printf("[video.cfg] HDD readback reopen FAILED\n");
+        return FALSE;
+    }
+    size_t got = fread(verify, 1, nBytes, f);
+    int end = fgetc(f);
+    ok = got == nBytes && end == EOF && !ferror(f) &&
+         memcmp(verify, pData, nBytes) == 0 ? TRUE : FALSE;
+    if (fclose(f) != 0) ok = FALSE;
+    if (!ok)
+    {
+        printf("[video.cfg] HDD readback mismatch: got=%u expected=%u\n",
+               (unsigned)got, (unsigned)nBytes);
+        return FALSE;
+    }
+    printf("[video.cfg] HDD SAVE VERIFIED: %s (%u bytes)\n",
+           pPath, (unsigned)nBytes);
+    return TRUE;
+}
+
+/* AURORA_HDD_ISSUE38_VIDEO_CFG_V4_20261013
+ * An FHDB launcher may supply only pfs0:/path/to/ELF. After the IOP reset,
+ * pfs0: is NOT reliably mounted and no partition identity survives that alias.
+ * Locate the actual ELF, do not assume +OPL and do not enumerate at normal
+ * mc:/mass:/SMB boots. Preserve the partition identity as hdd0:/PART/... . */
+/* AURORA_ISSUE38_HDD_BOOT_V5_20261013
+ * Detect explicit HDD-origin ELF paths, including the legacy wLaunchELF
+ * hdd0:PART:pfs:/path/ELF syntax.  No storage I/O for other boot media. */
+static Bool _AuroraCfgIsPfsBoot(const char *path)
+{
+    return path && !strncmp(path, "pfs", 3) &&
+           path[3] >= '0' && path[3] <= '9' &&
+           path[4] == ':' && path[5] == '/';
+}
+
+static Bool _AuroraCfgBootHddPath(
+    const char *source, char *out, size_t outBytes)
+{
+    const char *part, *end, *after;
+    int n;
+    if (!out || outBytes < 32) return FALSE;
+    out[0] = 0;
+    if (!source || strncmp(source, "hdd0:", 5)) return FALSE;
+    if (!strncmp(source, "hdd0:/", 6))
+        return MainLoopHddLogicalDataPath(
+            source, "video.cfg", out, (Int32)outBytes);
+
+    /* hdd0:PART:pfs:/path/APP.ELF — partition is delimited by ':' */
+    part = source + 5;
+    end = strchr(part, ':');
+    if (!end || end == part || end - part >= 120) return FALSE;
+    for (const char *p = part; p < end; ++p)
+    {
+        if (*p == '/' || *p == '\\') return FALSE;
+        if (*p == '.' && p + 1 < end && p[1] == '.') return FALSE;
+    }
+    after = end + 1;
+    if (strncmp(after, "pfs:/", 5) &&
+        strncmp(after, "pfs0:/", 6)) return FALSE;
+    if (!after[4]) return FALSE;
+    n = snprintf(out, outBytes, "hdd0:/%.*s/SNESticle/video.cfg",
+                 (int)(end - part), part);
+    if (n < 0 || (size_t)n >= outBytes) { out[0] = 0; return FALSE; }
+    return TRUE;
+}
+
+static Bool _AuroraVideoCfgResolvePfsBoot(
+    const char *bootPath, char *pOut, size_t nOut)
+{
+    enum { MAX_PFS_BOOT_PARTS = 64 };
+    char parts[MAX_PFS_BOOT_PARTS][128];
+    char logical[512], mapped[512], winner[300];
+    iox_dirent_t entry;
+    int fd, count = 0, i, matches = 0, n;
+    int previous;
+    const char *elf;
+
+    if (!pOut || !nOut) return FALSE;
+    pOut[0] = 0;
+    if (!_AuroraCfgIsPfsBoot(bootPath)) return FALSE;
+    elf = bootPath + 5; /* '/SNESticle/SNESticle.elf' for pfsN: */
+    if (!elf[1] || strstr(elf, "..") || strchr(elf, '\\')) return FALSE;
+    {
+        /* Require a real absolute .elf filename, never a bare directory. */
+        const char *ext = strrchr(elf, '.');
+        if (!ext || strcasecmp(ext, ".elf") != 0) return FALSE;
+    }
+    if (strlen(elf) > 240) return FALSE;
+
+    previous = HddSupportIsEnabled();
+    if (!previous) HddSupportSetEnabled(1);
+    if (HddLoadEmbeddedIrx() < 0)
+    {
+        if (!previous) HddSupportSetEnabled(0);
+        return FALSE;
+    }
+
+    /* First close the APA directory, THEN mount a PFS filesystem. */
+    fd = fileXioDopen("hdd0:");
+    if (fd < 0) return FALSE;
+    while (fileXioDread(fd, &entry) > 0)
+    {
+        size_t len;
+        if (!entry.name[0] ||
+            entry.stat.attr != ATTR_MAIN_PARTITION ||
+            entry.stat.mode != FS_TYPE_PFS)
+            continue;
+        len = strlen(entry.name);
+        if (!len || len >= sizeof(parts[0])) continue;
+        if (count >= MAX_PFS_BOOT_PARTS)
+        {
+            fileXioDclose(fd);
+            printf("[video.cfg] FHDB boot: too many PFS partitions\n");
+            return FALSE; /* Never choose from a truncated list. */
+        }
+        memcpy(parts[count++], entry.name, len + 1);
+    }
+    fileXioDclose(fd);
+    winner[0] = 0;
+
+    for (i = 0; i < count; ++i)
+    {
+        FILE *f;
+        unsigned char header[4];
+        size_t got;
+        n = snprintf(logical, sizeof(logical),
+                     "hdd0:/%s%s", parts[i], elf);
+        if (n < 0 || n >= (int)sizeof(logical) ||
+            HddMapPath(logical, mapped, sizeof(mapped)) != 1)
+            continue;
+        f = fopen(mapped, "rb");
+        if (!f) continue;
+        got = fread(header, 1, sizeof(header), f);
+        fclose(f);
+        if (got != sizeof(header) ||
+            header[0] != 0x7f || header[1] != 'E' ||
+            header[2] != 'L' || header[3] != 'F')
+            continue;
+        matches++;
+        n = snprintf(winner, sizeof(winner),
+                     "hdd0:/%s/SNESticle/video.cfg", parts[i]);
+        if (n < 0 || n >= (int)sizeof(winner)) return FALSE;
+    }
+
+    if (matches != 1)
+    {
+        printf("[video.cfg] FHDB boot ELF matches: %d (need exactly 1)\n",
+               matches);
+        return FALSE;
+    }
+    n = snprintf(pOut, nOut, "%s", winner);
+    return n >= 0 && (size_t)n < nOut ? TRUE : FALSE;
+}
+
+static Bool _AuroraVideoCfgActivateHddBootFallback(void)
+{
+    /* AURORA_ISSUE38_HDD_BOOT_V5_20261013
+     * Only an explicit HDD/PFS boot enters HDD initialization at startup.
+     * Do not probe DEV9/HDD on normal mass:/mc:/smb:/host: boot.
+     * Once resolved, store hdd0:/PART (not pfsN:) so later remounts
+     * cannot redirect video.cfg into the wrong partition. */
+    const char *bootDir = MainGetBootDir();
+    const char *bootPath = MainGetBootPath();
+    const char *boot[2] = { bootPath, bootDir };
+    char candidate[300], mapped[512];
+    int previous = HddSupportIsEnabled();
+    int i;
+
+    if (!strncmp(s_AuroraVideoHddCfg, "hdd0:", 5))
+        return TRUE;
+
+    /* Prefer the actual ELF argv path over the directory hint. */
+    for (i = 0; i < 2; ++i)
+    {
+        if (!_AuroraCfgBootHddPath(boot[i], candidate,
+                                   sizeof(candidate)))
+            continue;
+        if (!previous) HddSupportSetEnabled(1);
+        int modules = HddLoadEmbeddedIrx();
+        int mounted = (modules >= 0) ?
+            HddMapPath(candidate, mapped, sizeof(mapped)) : -1;
+        if (mounted == 1)
+        {
+            snprintf(s_AuroraVideoHddCfg,
+                     sizeof(s_AuroraVideoHddCfg), "%s", candidate);
+            printf("[video.cfg] boot HDD: %s\n", candidate);
+            return TRUE;
+        }
+        printf("[video.cfg] HDD boot mount failed: modules=%d map=%d\n",
+               modules, mounted);
+        if (!previous) HddSupportSetEnabled(0);
+    }
+
+    /* pfsN: boot: v4's bounded scan identifies the unique on-disk ELF.
+     * Never use a stale pfsN: mount left by FHDB/OPL after the IOP reset. */
+    if (_AuroraCfgIsPfsBoot(bootPath))
+    {
+        if (_AuroraVideoCfgResolvePfsBoot(
+                bootPath, candidate, sizeof(candidate)))
+        {
+            snprintf(s_AuroraVideoHddCfg,
+                     sizeof(s_AuroraVideoHddCfg), "%s", candidate);
+            printf("[video.cfg] pfs boot resolved: %s\n", candidate);
+            return TRUE;
+        }
+        printf("[video.cfg] pfs boot unresolved/ambiguous: %s\n", bootPath);
+        return FALSE;
+    }
+
+    /* Preserve v4's runtime fallback when a USB-launched ELF later opens
+     * an HDD ROM; NO HDD probing occurs for such a user at startup. */
+    if (_RomPath[0] && !strncmp(_RomPath, "hdd0:/", 6) &&
+        MainLoopHddLogicalDataPath(
+            _RomPath, "video.cfg", candidate, sizeof(candidate)))
+    {
+        if (!previous) HddSupportSetEnabled(1);
+        int modules = HddLoadEmbeddedIrx();
+        int mounted = (modules >= 0) ?
+            HddMapPath(candidate, mapped, sizeof(mapped)) : -1;
+        if (mounted == 1)
+        {
+            snprintf(s_AuroraVideoHddCfg,
+                     sizeof(s_AuroraVideoHddCfg), "%s", candidate);
+            return TRUE;
+        }
+        if (!previous) HddSupportSetEnabled(0);
+    }
+    return FALSE;
+}
+
 static void _VideoCfgPath(char *pOut)
 {
-	strcpy(pOut, _SramPath);
-	strcat(pOut, "/video.cfg");
+    if (s_AuroraVideoHddCfg[0])
+        strcpy(pOut, s_AuroraVideoHddCfg);
+    else if (s_AuroraVideoUsbCfg[0])
+        strcpy(pOut, s_AuroraVideoUsbCfg);
+    else
+    {
+        strcpy(pOut, _SramPath);
+        strcat(pOut, "/video.cfg");
+    }
 }
 
 static Bool g_FamicloneAudio = FALSE;
@@ -513,10 +906,55 @@ void VideoSettingsSave(void)
 	cfg.gbcvol = g_GbcVolume;
 	cfg.gbavol = g_GbaVolume;
 	cfg.gbablending = GpSPGetFrameBlending() ? 1 : 0;
-	_VideoCfgPath(path);
-	BgmIOBegin();
-	MemCardWriteFile(path, (Uint8 *)&cfg, sizeof(cfg));
-	BgmIOEnd();
+	cfg.pce6button = PceBridge_Get6Button() ? 1 : 0; /* v54 */
+	cfg.sneslegacymode = 1; /* AURORA_SNES_LEGACY_ALWAYS_ON_V29_20261015: always ON */ /* v55 */ /* AURORA_PCE_PAD6_V1_20261009 */
+    /* AURORA_HDD_ISSUE38_V3_20261013 : after a ROM has been launched, replace any
+     * uncertain pfs0: boot alias with hdd0:/PART from the selected ROM. */
+    (void)_AuroraVideoCfgActivateHddBootFallback();
+    Bool writeOK = FALSE;
+    const Bool bHadUsbConfig = s_AuroraVideoUsbCfg[0] ? TRUE : FALSE;
+    if (s_AuroraVideoHddCfg[0])
+        _VideoCfgPath(path); /* Original HDD partition policy wins. */
+    else if (!_AuroraVideoCfgPreferredUsbPath(path, sizeof(path)))
+        return;
+
+    BgmIOBegin();
+    if (!s_AuroraVideoHddCfg[0])
+    {
+        char parent[300];
+        snprintf(parent, sizeof(parent), "%s", path);
+        char *slash = strrchr(parent, '/');
+        if (slash) { *slash = 0; (void)mkdir(parent, 0777); }
+        /* Try USB only when settings are SAVED: no mkdir on boot. */
+        writeOK = _AuroraVideoCfgWrite(path, (Uint8 *)&cfg, sizeof(cfg));
+        if (writeOK)
+        {
+            snprintf(s_AuroraVideoUsbCfg, sizeof(s_AuroraVideoUsbCfg),
+                     "%s", path);
+        }
+        else if (!bHadUsbConfig)
+        {
+            /* MC import/defaults may be saved to MC if USB is absent.
+             * Never silently diverge when THIS session loaded from USB. */
+            snprintf(path, sizeof(path), "%s/video.cfg", _SramPath);
+            writeOK = _AuroraVideoCfgWrite(path, (Uint8 *)&cfg, sizeof(cfg));
+        }
+    }
+    else
+        writeOK = _AuroraVideoCfgWrite(path, (Uint8 *)&cfg, sizeof(cfg));
+    BgmIOEnd();
+    /* AURORA_HDD_ISSUE38_VIDEO_CFG_V4_20261013 : no silent false success. */
+    if (writeOK)
+        MainLoopStatusPrintf(180, _AuroraVideoCfgIsHdd(path) ?
+            "Settings saved and verified on HDD." :
+            (!strncmp(path, "mass", 4) ? "Settings saved to USB."
+              : "Settings saved to Memory Card."));
+    else
+    {
+        MainLoopStatusPrintf(300, "ERROR: settings NOT saved. Check storage.");
+        printf("[video.cfg] SAVE FAILED: %s (%u bytes)\n",
+               path, (unsigned)sizeof(cfg));
+    }
 }
 
 void VideoSettingsLoad(void)
@@ -526,6 +964,8 @@ void VideoSettingsLoad(void)
 	VideoCfgHeaderT header;
 	char      path[300];
 	Bool      loaded = FALSE;
+    Bool bTriedUsb = FALSE;
+    VideoCfgT cfgDefaults;
 
 
 	/* AURORA_LEGACYCORE_V3_MENU_BRIDGE_20260824 */
@@ -540,11 +980,14 @@ void VideoSettingsLoad(void)
 	g_GbcVolume = 200;
 	g_GbaVolume = 200;
 	GpSPSetFrameBlending(FALSE); /* AURORA_GBA_BLEND_UI_CFG53_V1_20261004: conservative default */
+	PceBridge_Set6Button(false); /* AURORA_PCE_PAD6_V1_20261009: preserve legacy default */
+	AuroraSnesLegacySetEnabled(TRUE); /* AURORA_SNES_LEGACY_ALWAYS_ON_V29_20261015: forced ON */
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.gameboymode = 0; /* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: old configs default GBC */
 	cfg.gbcvol = 200;
 	cfg.gbavol = 200;
 	cfg.gbablending = 0;
+	cfg.pce6button = 0; /* AURORA_PCE_PAD6_V1_20261009 */
 	cfg.lightgun = 1; /* v42 default and all pre-v42 migrations: On */
 	cfg.cdmusic = 1;  /* AURORA_CD_MUSIC_REDBOOK_V3_20260830: pre-v43 default On */
 	QuicknesBridge_SetLightGunEnabled(true);
@@ -560,10 +1003,42 @@ void VideoSettingsLoad(void)
 	MainLoopTurboSetSpeed(MAINLOOP_TURBO_SPEED_NORMAL);
 	SNCPUSetOverclockLevel(_pSnes ? _pSnes->GetCpu() : NULL, SNCPU_OVERCLOCK_OFF);
 	_VideoApplyCompatFlags(0);
-	_VideoCfgPath(path);
+    cfgDefaults = cfg;
+    s_AuroraVideoUsbCfg[0] = 0;
+    /* AURORA_HDD_ISSUE38_V3_20261013 : select HDD before probing the config header.
+     * When no HDD file exists we may import the legacy MC file, but all
+     * future saves go to this session's HDD partition. */
+    (void)_AuroraVideoCfgActivateHddBootFallback();
+    if (s_AuroraVideoHddCfg[0])
+        _VideoCfgPath(path);
+    else
+    {
+        /* USB BDM is already initialized by app/main.cpp; ONE fopen only. */
+        if (!_AuroraVideoCfgPreferredUsbPath(path, sizeof(path)))
+            return;
+        bTriedUsb = TRUE;
+    }
 
+    /* AURORA_HDD_FULL_STORAGE_SAFE_V2_20261013 : preserve MC priority; only an actual HDD boot
+     * permits an HDD probe, never a normal mass:/mc:/ boot. */
+    if (s_AuroraVideoHddCfg[0])
+    {
+    memset(&header, 0, sizeof(header));
+    if (!_AuroraVideoCfgRead(path, (Uint8 *)&header, sizeof(header)) ||
+        header.magic != VIDEOCFG_MAGIC)
+    {
+        /* AURORA_HDD_ISSUE38_V3_20261013 : import existing v16-v54 MC preferences when
+         * the new HDD location has no video.cfg yet. Never rewrite MC. */
+        if (s_AuroraVideoHddCfg[0])
+        {
+            snprintf(path, sizeof(path), "%s/video.cfg", _SramPath);
+        }
+    }
+    }
+AuroraVideoCfgAttempt:
+    loaded = FALSE;
 	memset(&header, 0, sizeof(header));
-	if (MemCardReadFile(path, (Uint8 *)&header, sizeof(header)) &&
+	if (_AuroraVideoCfgRead(path, (Uint8 *)&header, sizeof(header)) &&
 	    header.magic == VIDEOCFG_MAGIC)
 	{
 		if (header.version < 16)
@@ -573,14 +1048,29 @@ void VideoSettingsLoad(void)
 		}
 		else if (header.version == VIDEOCFG_VERSION)
 		{
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, sizeof(cfg));
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, sizeof(cfg));
+		}
+		else if (header.version == 54)
+		{
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V54_BYTES);
+			if (loaded) { cfg.sneslegacymode = 1; cfg.version = VIDEOCFG_VERSION; }
+		}
+		else if (header.version == 53)
+		{
+			/* AURORA_PCE_PAD6_V1_20261009: previous layout, append-only migration. */
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V53_BYTES);
+			if (loaded)
+			{
+				cfg.pce6button = 0;
+				cfg.version = VIDEOCFG_VERSION;
+			}
 		}
 		else if (header.version == 52)
 		{
 			/* AURORA_GBA_BLEND_UI_CFG53_V1_20261004
 			 * v52 is the exact prefix before gbablending. Preserve every
 			 * existing preference and default only the appended field Off. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V52_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V52_BYTES);
 			if (loaded)
 			{
 				cfg.gbablending = 0;
@@ -591,7 +1081,7 @@ void VideoSettingsLoad(void)
 		{
 			/* AURORA_VOLUME_TFA_N163_V4_20260913:
 			 * v49 is the exact prefix before the two independent gains. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V49_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V49_BYTES);
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 48)
@@ -599,7 +1089,7 @@ void VideoSettingsLoad(void)
 			/* AURORA_V22_VIDEOCFG49_GGZOOM_OFF_20260912
 			 * v48 is byte-identical; preserve all preferences except the
 			 * now-hidden GG Zoom setting, which migrates to Off. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V49_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V49_BYTES);
 			if (loaded)
 			{
 				cfg.ggzoom = 0;
@@ -609,7 +1099,7 @@ void VideoSettingsLoad(void)
 		else if (header.version == 47)
 		{
 			/* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: old 0=GB,1=SGB -> 0=GBC,1=SGB1,2=SGB2. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V49_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V49_BYTES);
 			if (loaded)
 			{
 				cfg.gameboymode = cfg.gameboymode ? (cfg.sgbbios ? 2 : 1) : 0;
@@ -619,7 +1109,7 @@ void VideoSettingsLoad(void)
 		else if (header.version == 46)
 		{
 			/* AURORA_GB_MODE_GBC_SGB1_SGB2_R8_20260909: v46 had SGB model but no standalone selector. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V46_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V46_BYTES);
 			if (loaded)
 			{
 				cfg.gameboymode = cfg.sgbbios ? 2 : 1;
@@ -629,46 +1119,46 @@ void VideoSettingsLoad(void)
 		else if (header.version == 45 || header.version == 44)
 		{
 			/* AURORA_V4_7_FINAL_UNIFIED_SGB_BSX8M_20260908: v44/v45 are the exact prefix before sgbbios. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V45_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V45_BYTES);
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 43)
 		{
 			/* AURORA_CFG_LOADER_REBUILD_V1_13_20260905: v43 prefix before sgbinvert. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V43_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V43_BYTES);
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 42)
 		{
 			/* AURORA_CD_MUSIC_REDBOOK_V3_20260830
 			 * v42 is the exact v43 prefix before cdmusic; default stays On. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V42_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V42_BYTES);
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 41 || header.version == 40 || header.version == 39)
 		{
 			/* v39/v40/v41 are the exact v42 prefix before lightgun.
 			 * lightgun and cdmusic were preinitialised On. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg,
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg,
 			                         VIDEOCFG_V42_BYTES - sizeof(cfg.lightgun));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 38)
 		{
 			/* v38 is the exact prefix before the two v39 fields. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V38_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V38_BYTES);
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 37)
 		{
 			/* v37 is the exact prefix before the reserved v38 slot. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, VIDEOCFG_V37_BYTES);
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, VIDEOCFG_V37_BYTES);
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 36)
 		{
 			/* v36 is exactly the v37 prefix without the appended PCE volume. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg,
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg,
 			        VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
@@ -676,24 +1166,24 @@ void VideoSettingsLoad(void)
 		{
 			/* v35 is byte-identical in size; this slot used to be the
 			 * legacy SNES rate value and is migrated below. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, (VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)));
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, (VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 34)
 		{
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg,
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg,
 			        (VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 33)
 		{
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg,
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg,
 			        ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 32)
 		{
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg,
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg,
 			        ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
@@ -701,21 +1191,21 @@ void VideoSettingsLoad(void)
 		{
 			/* AURORA_PICODRIVE_CURRENT_CFG_V32 */
 			memset(&cfg, 0, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)));
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg,
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg,
 			        ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 30)
 		{
 			/* v30 has the same byte layout as v31. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering));
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 29)
 		{
 			/* v29 was a temporary test config with broken menu-audio defaults.
 			 * Import its layout, then reset only those two settings once. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering));
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering));
 			if (loaded)
 			{
 				cfg.version = VIDEOCFG_VERSION;
@@ -726,26 +1216,26 @@ void VideoSettingsLoad(void)
 		else if (header.version == 28)
 		{
 			/* v28 has the same byte layout; only Menu Volume semantics changed. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering));
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 27)
 		{
 			/* v27 is the v28/v29 prefix without bgmenable. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering) - sizeof(Int32));
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering) - sizeof(Int32));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 26)
 		{
 			/* v26 has the same byte layout; only Game Volume semantics changed. */
-			loaded = MemCardReadFile(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering) - sizeof(Int32));
+			loaded = _AuroraVideoCfgRead(path, (Uint8 *)&cfg, ((VIDEOCFG_V37_BYTES - sizeof(cfg.pcevol)) - sizeof(cfg.smscolorborder) - sizeof(cfg.smsfm)) - sizeof(cfg.segavol) - sizeof(cfg.segaaudiorate) - sizeof(cfg.md6button) - sizeof(cfg.bgmtrack) - sizeof(cfg.mdrendering) - sizeof(Int32));
 			if (loaded) cfg.version = VIDEOCFG_VERSION;
 		}
 		else if (header.version == 25)
 		{
 			VideoCfgV25T oldcfg25;
 			memset(&oldcfg25, 0, sizeof(oldcfg25));
-			if (MemCardReadFile(path, (Uint8 *)&oldcfg25, sizeof(oldcfg25)))
+			if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg25, sizeof(oldcfg25)))
 			{
 				memcpy(&cfg, &oldcfg25, sizeof(oldcfg25));
 				cfg.version = VIDEOCFG_VERSION;
@@ -764,7 +1254,7 @@ void VideoSettingsLoad(void)
 		{
 			VideoCfgV24T oldcfg24;
 			memset(&oldcfg24, 0, sizeof(oldcfg24));
-			if (MemCardReadFile(path, (Uint8 *)&oldcfg24, sizeof(oldcfg24)))
+			if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg24, sizeof(oldcfg24)))
 			{
 				memcpy(&cfg, &oldcfg24, sizeof(oldcfg24));
 				cfg.version = VIDEOCFG_VERSION;
@@ -776,7 +1266,7 @@ void VideoSettingsLoad(void)
 		{
 			VideoCfgV23T oldcfg23;
 			memset(&oldcfg23, 0, sizeof(oldcfg23));
-			if (MemCardReadFile(path, (Uint8 *)&oldcfg23, sizeof(oldcfg23)))
+			if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg23, sizeof(oldcfg23)))
 			{
 				memcpy(&cfg, &oldcfg23, sizeof(oldcfg23));
 				cfg.version = VIDEOCFG_VERSION;
@@ -788,7 +1278,7 @@ void VideoSettingsLoad(void)
 		{
 			VideoCfgV22T oldcfg22;
 			memset(&oldcfg22, 0, sizeof(oldcfg22));
-			if (MemCardReadFile(path, (Uint8 *)&oldcfg22, sizeof(oldcfg22)))
+			if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg22, sizeof(oldcfg22)))
 			{
 				memcpy(&cfg, &oldcfg22, sizeof(oldcfg22));
 				cfg.version = VIDEOCFG_VERSION;
@@ -802,7 +1292,7 @@ void VideoSettingsLoad(void)
 		{
 			VideoCfgV20T oldcfg20;
 			memset(&oldcfg20, 0, sizeof(oldcfg20));
-			if (MemCardReadFile(path, (Uint8 *)&oldcfg20, sizeof(oldcfg20)))
+			if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg20, sizeof(oldcfg20)))
 			{
 				memcpy(&cfg, &oldcfg20, sizeof(oldcfg20));
 				cfg.version = VIDEOCFG_VERSION;
@@ -815,7 +1305,7 @@ void VideoSettingsLoad(void)
 			VideoCfgV19T oldcfg19;
 
 			memset(&oldcfg19, 0, sizeof(oldcfg19));
-			if (MemCardReadFile(path, (Uint8 *)&oldcfg19, sizeof(oldcfg19)))
+			if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg19, sizeof(oldcfg19)))
 			{
 				memcpy(&cfg, &oldcfg19, sizeof(oldcfg19));
 				cfg.version = VIDEOCFG_VERSION;
@@ -829,7 +1319,7 @@ void VideoSettingsLoad(void)
 			VideoCfgV18T oldcfg18;
 
 			memset(&oldcfg18, 0, sizeof(oldcfg18));
-			if (MemCardReadFile(path, (Uint8 *)&oldcfg18, sizeof(oldcfg18)))
+			if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg18, sizeof(oldcfg18)))
 			{
 				memcpy(&cfg, &oldcfg18, sizeof(oldcfg18));
 				cfg.version = VIDEOCFG_VERSION;
@@ -843,7 +1333,7 @@ void VideoSettingsLoad(void)
 	VideoCfgV17T oldcfg17;
 
 	memset(&oldcfg17, 0, sizeof(oldcfg17));
-	if (MemCardReadFile(path, (Uint8 *)&oldcfg17, sizeof(oldcfg17)))
+	if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg17, sizeof(oldcfg17)))
 	{
 		memcpy(&cfg, &oldcfg17, sizeof(oldcfg17));
 		cfg.version = VIDEOCFG_VERSION;
@@ -854,7 +1344,7 @@ void VideoSettingsLoad(void)
 		else if (header.version == 16)
 		{
 			memset(&oldcfg, 0, sizeof(oldcfg));
-			if (MemCardReadFile(path, (Uint8 *)&oldcfg, sizeof(oldcfg)))
+			if (_AuroraVideoCfgRead(path, (Uint8 *)&oldcfg, sizeof(oldcfg)))
 			{
 				/* VideoCfgT only appends colorprofile to the v16 prefix. */
 				memcpy(&cfg, &oldcfg, sizeof(oldcfg));
@@ -864,6 +1354,20 @@ void VideoSettingsLoad(void)
 			}
 		}
 	}
+
+    /* If a USB file is missing, unsupported OR truncated, retry on MC
+     * with the exact initialized defaults, rather than applying a partial
+     * config. This reuses the existing legacy-version migration code. */
+    if (!loaded && bTriedUsb)
+    {
+        bTriedUsb = FALSE;
+        cfg = cfgDefaults;
+        snprintf(path, sizeof(path), "%s/video.cfg", _SramPath);
+        goto AuroraVideoCfgAttempt;
+    }
+    if (loaded && !strncmp(path, "mass", 4))
+        snprintf(s_AuroraVideoUsbCfg, sizeof(s_AuroraVideoUsbCfg),
+                 "%s", path);
 
 	/* v27 and older had no independent Menu Music switch.
 	 * New default policy is Off; Menu Volume remains independent. */
@@ -931,7 +1435,7 @@ void VideoSettingsLoad(void)
 	 * Older migrations retain the previous one-time conservative default. */
 	/* AURORA_CFG_LOADER_REBUILD_V1_13_20260905
  * One-time migration exceptions only. */
-if (loaded && header.version != VIDEOCFG_VERSION && header.version != 52 && header.version != 49)
+if (loaded && header.version != VIDEOCFG_VERSION && header.version != 54 && header.version != 53 && header.version != 52 && header.version != 49)
 {
 	cfg.safeframeskip = 1;
 	cfg.sneshackflags &= ~SNPPU_HACK_MODE7_HALF;
@@ -959,6 +1463,8 @@ if (loaded && header.version != VIDEOCFG_VERSION && header.version != 52 && head
 		if (cfg.overscan >= 0 && cfg.overscan <= 100) g_GskOverscan = cfg.overscan;
 		if (cfg.widescreen == 0 || cfg.widescreen == 1) g_GskWidescreen = cfg.widescreen;
 		if (cfg.covers == 0 || cfg.covers == 1) CoverSetEnabled(cfg.covers ? TRUE : FALSE);
+		if (header.version == VIDEOCFG_VERSION)
+			AuroraSnesLegacySetEnabled(TRUE); /* AURORA_SNES_LEGACY_ALWAYS_ON_V29_20261015: ignore old OFF */
 		if (cfg.smscolorborder == 0 || cfg.smscolorborder == 1)
 			PicoDriveBridge_SetSmsColorBorder(cfg.smscolorborder != 0);
 		if (header.version >= 39 && header.version <= VIDEOCFG_VERSION &&
@@ -998,7 +1504,10 @@ if (loaded && header.version != VIDEOCFG_VERSION && header.version != 52 && head
 		if (cfg.bgmtrack >= 1 && cfg.bgmtrack <= 64) BgmSetTrackIndex(cfg.bgmtrack);
 		if (cfg.mdrendering >= 0 && cfg.mdrendering <= 2)
 			PicoDriveBridge_SetRenderingMode(cfg.mdrendering);
-		if (cfg.hddenable == 0 || cfg.hddenable == 1) HddSupportSetEnabled(cfg.hddenable);
+		/* Booting FROM the HDD implicitly requires HDD to remain enabled.
+         * An old config with hddenable=0 must not disable its own device. */
+        if (cfg.hddenable == 0 || cfg.hddenable == 1)
+            HddSupportSetEnabled(s_AuroraVideoHddCfg[0] ? 1 : cfg.hddenable);
 		if (cfg.mmceenable == 0 || cfg.mmceenable == 1) MmceSupportSetEnabled(cfg.mmceenable);
 		if (cfg.massenable == 0 || cfg.massenable == 1) MassStorageSetEnabled(cfg.massenable);
 		if (cfg.smbenable == 0 || cfg.smbenable == 1) SmbSupportSetEnabled(cfg.smbenable);
@@ -1055,6 +1564,9 @@ if (cfg.famicloneaudio == 0 || cfg.famicloneaudio == 1)
 				(cfg.md6button & 2) ? MAINLOOP_MD_PAD_BCA
 				                     : MAINLOOP_MD_PAD_ABC);
 		}
+		/* AURORA_PCE_PAD6_V1_20261009: accept only boolean mode; historical configs stay at two buttons. */
+		if (cfg.pce6button == 0 || cfg.pce6button == 1)
+			PceBridge_Set6Button(cfg.pce6button != 0);
 		SNCPUSetOverclockLevel(_pSnes ? _pSnes->GetCpu() : NULL,
 		                         SNCPU_OVERCLOCK_OFF);
 	}
@@ -1120,13 +1632,6 @@ static const char *_VideoMmceStatus()
 	return "Not found";
 }
 
-static const char *_VideoSafeFrameskipStatus()
-{
-    /* AURORA_SAFE_FRAMESKIP_BINARY_UI_DIRECT_LEVEL_V1_20260925
-     * Display the exact state consumed by MainLoopSafeFrameskipTake(). */
-    return MainLoopSafeFrameskipGetLevel() > 0 ? "On" : "Off";
-}
-
 static const char *_VideoFakeSRAMStatus()
 {
    switch (g_FakeSRAMSize)
@@ -1176,12 +1681,6 @@ static const char *_VideoHackLayerStatus(Uint8 uLayer)
 static const char *_VideoHackAccurateStatus(Uint8 uFlag)
 {
 	return (SNPPURenderGetSoftwareHackFlags() & uFlag) ? "Off" : "Accurate";
-}
-
-static const char *_VideoHackMode7Status()
-{
-	return (SNPPURenderGetSoftwareHackFlags() & SNPPU_HACK_MODE7_HALF)
-		? "Half" : "Full";
 }
 
 static const char *_VideoHackSpriteLimiterStatus()
@@ -1356,16 +1855,18 @@ void CVideoScreen::Draw()
 	_VideoRow(vy, 4, m_iSelect, "Offset Y", buf);      vy += 12;
 
 	_VideoRow(vy, 5, m_iSelect, "Cover art", CoverIsEnabled() ? "On" : "Off"); vy += 12;
+#if !AURORA_NO_PICODRIVE
 	_VideoRow(vy, 6, m_iSelect, "SMS VDP border",
 	          PicoDriveBridge_GetSmsColorBorder() ? "On" : "Off"); vy += 12;
+#endif
 #if 0 /* AURORA_V22_VERSION_GGZOOM_HIDDEN_20260912: hidden, implementation intentionally retained */
 	_VideoRow(vy, 7, m_iSelect, "GG zoom",
 	          PicoDriveBridge_GetGgZoom() ? "On" : "Off"); vy += 12;
 #endif
+#if !AURORA_NO_GPSP
 	_VideoRow(vy, 9, m_iSelect, "GBA blending",
 	          GpSPGetFrameBlending() ? "On" : "Off"); vy += 12;
-	_VideoRow(vy, 8, m_iSelect, "Safe frameskip",
-	          _VideoSafeFrameskipStatus()); vy += 12;
+#endif
 
 	}
 	else if (iPage == 1)
@@ -1378,20 +1879,34 @@ void CVideoScreen::Draw()
 		snprintf(buf, sizeof(buf), "%d", AudMixGameGetVolume() / 2);
 		_VideoRow(vy, 52, m_iSelect, "SNES volume", buf); vy += 10;
 		snprintf(buf, sizeof(buf), "%d", AudMixSegaGetVolume() / 2);
+#if !AURORA_NO_PICODRIVE
 		_VideoRow(vy, 53, m_iSelect, "SEGA volume", buf); vy += 10;
+#endif
 		snprintf(buf, sizeof(buf), "%d", AudMixPceGetVolume() / 2);
+#if !AURORA_NO_PCE
 		_VideoRow(vy, 54, m_iSelect, "PCE volume", buf); vy += 10;
+#endif
 		snprintf(buf, sizeof(buf), "%d", g_GbcVolume / 2);
+#if !AURORA_NO_GAMBATTE
 		_VideoRow(vy, 59, m_iSelect, "GBC volume", buf); vy += 10;
+#endif
 		snprintf(buf, sizeof(buf), "%d", g_GbaVolume / 2);
+#if !AURORA_NO_GPSP
 		_VideoRow(vy, 60, m_iSelect, "GBA volume", buf); vy += 10;
+#endif
 		_VideoRow(vy, 55, m_iSelect, "SNES audio", "32 kHz native"); vy += 10;
 		snprintf(buf, sizeof(buf), "%d kHz", (PicoDriveBridge_GetAudioRate() + 500) / 1000);
+#if !AURORA_NO_PICODRIVE
 		_VideoRow(vy, 56, m_iSelect, "SEGA audio", buf); vy += 10;
+#endif
+#if !AURORA_NO_PICODRIVE
 		_VideoRow(vy, 57, m_iSelect, "SMS FM audio",
 		          PicoDriveBridge_GetSmsFm() ? "Enable" : "Disable"); vy += 10;
+#endif
+#if !AURORA_NO_PICODRIVE || !AURORA_NO_PCE
 		_VideoRow(vy, 58, m_iSelect, "CD music",
 		          g_CdMusicEnabled ? "ON" : "OFF"); vy += 10; /* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
+#endif
 	}
 	else if (iPage == 4)
 	{
@@ -1415,8 +1930,10 @@ _VideoHeader(vy, "Misc."); vy += 14;
 _VideoRow(vy, 16, m_iSelect, "Force region",
           _VideoForceRegionStatus()); vy += 12;
 
+#if !AURORA_NO_QUICKNES
 _VideoRow(vy, 17, m_iSelect, "Famiclone audio",
           _VideoFamicloneAudioStatus()); vy += 12;
+#endif
 
 _VideoRow(vy, 18, m_iSelect, "Reset emulator", ""); vy += 12;
 _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
@@ -1435,9 +1952,13 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 			_VideoHackLayerStatus(SNESPPU_MASK_BG4)); vy += 12;
 		_VideoRow(vy, 24, m_iSelect, "Sprites / OBJ",
 			_VideoHackLayerStatus(SNESPPU_MASK_OBJ)); vy += 12;
+#if !AURORA_NO_PICODRIVE
 		_VideoHeader(vy, "Mega Drive"); vy += 14;
+#endif
+#if !AURORA_NO_PICODRIVE
 		_VideoRow(vy, 37, m_iSelect, "MD rendering",
 			_VideoMdRenderingStatus()); vy += 12;
+#endif
 		/* AURORA_MENU_CLEANUP_V5_20260922:
 		 * Color Math / Window Effects / Mode 7 Quality are fixed policy and hidden. */
 #if AURORA_RUNTIME_TRACE || AURORA_SNES_COST_PROFILER || AURORA_SNES_DEBUG_STATE || AURORA_SNES_TRACER
@@ -1472,14 +1993,24 @@ _VideoRow(vy, 19, m_iSelect, "Exit to OSD", ""); vy += 12;
 		_VideoHeader(vy, "Controller options"); vy += 14;
 		_VideoRow(vy, 40, m_iSelect, "Use mouse",
 			InputSnesMouseGetModeName()); vy += 12;
+#if !AURORA_NO_PICODRIVE
 		_VideoRow(vy, 41, m_iSelect, "MD pad",
 			PicoDriveBridge_Get6Button() ? "6-button" : "3-button"); vy += 12;
+#endif
+#if !AURORA_NO_PCE
+		_VideoRow(vy, 45, m_iSelect, "PCE pad",
+			PceBridge_Get6Button() ? "6-button" : "2-button"); vy += 12; /* AURORA_PCE_PAD6_V1_20261009 */
+#endif
+#if !AURORA_NO_PICODRIVE
 		_VideoRow(vy, 42, m_iSelect, "MD mapping",
 			MainLoopMdPadGetLayoutName()); vy += 12;
+#endif
 		_VideoRow(vy, 43, m_iSelect, "Turbo speed",
 			MainLoopTurboGetSpeedName()); vy += 12;
+#if !AURORA_NO_QUICKNES
 		_VideoRow(vy, 44, m_iSelect, "Light gun",
 			QuicknesBridge_GetLightGunEnabled() ? "On" : "Off"); vy += 12;
+#endif
 	}
 
 	/* controls / hints (clear of the vy=215 footer) */
@@ -1524,7 +2055,14 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 			/* AURORA_GBA_BLEND_UI_CFG53_V1_20261004
 			 * Keep legacy IDs stable: hidden GG Zoom=7, Safe Frameskip=8,
 			 * new GBA blending=9. Visual order intentionally places 9 before 8. */
-			static const Int32 order[] = { 0, 1, 2, 3, 4, 5, 6, 9, 8 };
+			static const Int32 order[] = { 0, 1, 2, 3, 4, 5,
+#if !AURORA_NO_PICODRIVE
+            6,
+#endif
+#if !AURORA_NO_GPSP
+            9,
+#endif
+			};
 			const Int32 count = (Int32)(sizeof(order) / sizeof(order[0]));
 			Int32 pos = 0;
 			while (pos < count && order[pos] != m_iSelect) pos++;
@@ -1535,7 +2073,53 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 		}
 		else if (m_iSelect >= 50 && (trigger & (PAD_UP | PAD_DOWN)))
 		{
-			static const Int32 order[] = { 50, 51, 52, 53, 54, 59, 60, 55, 56, 57, 58 };
+			static const Int32 order[] = { 50, 51, 52,
+#if !AURORA_NO_PICODRIVE
+            53,
+#endif
+#if !AURORA_NO_PCE
+            54,
+#endif
+#if !AURORA_NO_GAMBATTE
+            59,
+#endif
+#if !AURORA_NO_GPSP
+            60,
+#endif
+            55,
+#if !AURORA_NO_PICODRIVE
+            56, 57,
+#endif
+#if !AURORA_NO_PICODRIVE || !AURORA_NO_PCE
+            58,
+#endif
+        };
+			const Int32 count = (Int32)(sizeof(order) / sizeof(order[0]));
+			Int32 pos = 0;
+			while (pos < count && order[pos] != m_iSelect) pos++;
+			if (pos >= count) pos = 0;
+			if (trigger & PAD_UP)   pos = (pos + count - 1) % count;
+			if (trigger & PAD_DOWN) pos = (pos + 1) % count;
+			m_iSelect = order[pos];
+		}
+		else if (m_iSelect >= 40 && m_iSelect <= 45 &&
+		         (trigger & (PAD_UP | PAD_DOWN)))
+		{
+			static const Int32 order[] = {40,
+#if !AURORA_NO_PICODRIVE
+            41,
+#endif
+#if !AURORA_NO_PCE
+            45,
+#endif
+#if !AURORA_NO_PICODRIVE
+            42,
+#endif
+            43,
+#if !AURORA_NO_QUICKNES
+            44,
+#endif
+        };
 			const Int32 count = (Int32)(sizeof(order) / sizeof(order[0]));
 			Int32 pos = 0;
 			while (pos < count && order[pos] != m_iSelect) pos++;
@@ -1551,7 +2135,10 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 			 * Hidden quality rows 25..27 and old Performance rows 31..37 are
 			 * deliberately absent from this order. */
 			static const Int32 order[] = {
-				20, 21, 22, 23, 24, 37,
+				20, 21, 22, 23, 24,
+#if !AURORA_NO_PICODRIVE
+                37,
+#endif
 #if AURORA_SNES_DEBUG_STATE
 				30,
 #endif
@@ -1590,6 +2177,9 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 				if (m_iSelect < lo) m_iSelect = hi;
 				if (m_iSelect == 7)  m_iSelect = 6;  /* hidden GG Zoom */
 				if (m_iSelect == 15) m_iSelect = 14; /* retired SRAM Size */
+#if AURORA_NO_QUICKNES
+                if (m_iSelect == 17) m_iSelect = 16;
+#endif
 			}
 			if (trigger & PAD_DOWN)
 			{
@@ -1597,6 +2187,9 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 				if (m_iSelect > hi) m_iSelect = lo;
 				if (m_iSelect == 7)  m_iSelect = 8;  /* hidden GG Zoom */
 				if (m_iSelect == 15) m_iSelect = 16; /* retired SRAM Size */
+#if AURORA_NO_QUICKNES
+                if (m_iSelect == 17) m_iSelect = 18;
+#endif
 			}
 		}
 	}
@@ -1655,12 +2248,7 @@ void CVideoScreen::Input(Uint32 buttons, Uint32 trigger)
 		case 7: /* Game Gear exact 3:2 zoom, 160x144 -> 240x216 */
 			PicoDriveBridge_SetGgZoom(!PicoDriveBridge_GetGgZoom());
 			break;
-		case 8: /* Safe Frameskip: Off, On */
-			/* AURORA_SAFE_FRAMESKIP_BINARY_UI_DIRECT_LEVEL_V1_20260925
-			 * Toggle the exact scheduler level: 0=Off, 1=On. */
-			MainLoopSafeFrameskipSetLevel(
-				MainLoopSafeFrameskipGetLevel() > 0 ? 0 : 1);
-			break;
+
 
 		case 9: /* GBA blending */
 			GpSPSetFrameBlending(!GpSPGetFrameBlending());
@@ -1829,10 +2417,6 @@ case 17: /* Famiclone Audio */
 			SNPPURenderSetSoftwareHackFlags(
 				SNPPURenderGetSoftwareHackFlags() ^ SNPPU_HACK_WINDOWS_OFF);
 			break;
-		case 27:
-			SNPPURenderSetSoftwareHackFlags(
-				SNPPURenderGetSoftwareHackFlags() ^ SNPPU_HACK_MODE7_HALF);
-			break;
 		case 28:
 			{
 				Int32 level = (Int32)SNPPURenderGetObjLimitLevel() + dir;
@@ -1907,6 +2491,9 @@ case 17: /* Famiclone Audio */
 			/* AURORA_PICODRIVE_CURRENT_6BUTTON */
 			PicoDriveBridge_Set6Button(!PicoDriveBridge_Get6Button());
 			break;
+		case 45: /* AURORA_PCE_PAD6_V1_20261009 */
+			PceBridge_Set6Button(!PceBridge_Get6Button());
+			break;
 		case 42:
 			MainLoopMdPadCycleLayoutDir(dir);
 			break;
@@ -1942,6 +2529,29 @@ if (trigger & (PAD_CROSS | PAD_START))
     }
     else if (m_iSelect == 19)
     {
+        /* AURORA_ISSUE38_OSD_SAFE_UNMOUNT_V6_20261013
+         * A PFS filesystem can remain mounted after HDD boot/config I/O.
+         * Serialize the final sync/umount against BGM filesystem activity.
+         * Abort exit without muting audio if PFS reports an error/busy.
+         * ExecOSD() is __attribute__((noreturn)): if it hangs, there is
+         * no subsequent callback capable of remounting the partition.
+         * Non-HDD paths never enter this branch or load HDD modules. */
+        if (HddOsdHasMountedPfs())
+        {
+            BgmIOBegin();
+            const int osdStorage = HddOsdSyncAndUnmount();
+            if (osdStorage < 0)
+            {
+                BgmIOEnd();
+                MainLoopStatusPrintf(300,
+                    "Exit cancelled: HDD unmount failed.");
+                printf("[OSD] Aborted before ExecOSD: PFS error=%d\n",
+                       osdStorage);
+                return;
+            }
+            /* Intentionally keep BgmIOBegin() scope active: ExecOSD does
+             * not return and no further filesystem work is permitted. */
+        }
         if (Aud_IsInitialized()) Aud_Setvol(0);
         ExecOSD(0, NULL);
     }

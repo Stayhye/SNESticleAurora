@@ -1,46 +1,132 @@
-# Build output
-build/
-refs/
-logs/
-.snesticle_rebuild/
-.snesticle_rebuild_v2/
+# SNESticle Aurora — .gitignore
+# Revisado com a arvore local de 07/11/2026.
+# Ignora compilacao, temporarios e backups sem ocultar fontes, assets,
+# licencas, ferramentas versionadas ou IRX precompilados em irx/.
 
-# Compiled/generated files
+# -----------------------------------------------------------------------------
+# 1. Build, logs e areas de trabalho locais
+# -----------------------------------------------------------------------------
+/build/
+/refs/
+/logs/
+/.snesticle_rebuild*/
+/.ps2dev-env
+
+# Intermediarios e produtos de compilacao PS2 / GCC.
 *.o
+*.obj
+*.d
+*.a
 *.elf
+*.symbols.map
+/SNESticle.map
 *.log
-*.tar.gz
+
+# Driver PS2 Mouse: somente saidas compiladas; manter imports.lst e fontes.
+/src/platform/ps2/iop/aurora_ps2mouse/obj/
+/src/platform/ps2/iop/aurora_ps2mouse/*.irx
+
+# Diagnosticos e perfis locais.
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+*.dmp
+/gmon.out
+/perf.data*
+
+# -----------------------------------------------------------------------------
+# 2. Scripts pessoais, backups e patches locais
+# -----------------------------------------------------------------------------
+# Python versionado fica em tools/. Scripts avulsos na RAIZ sao locais.
+/*.py
+/backup.sh
+/copy.sh
+
+# Inclui .bak.AURORA_*, .usbconfig.bak e copias pre/before/orig/rej.
 *.bak*
+*.pre_*
+*.pre-*
+*.before_*
+*.before-*
+*.orig
+*.rej
 
-# Local Python scripts
-*.py
+# Backups Aurora, inclusive variantes como:
+# .aurora_adp_backups/
+# .aurora_core_flags_backup_FINAL_*/
+# .aurora_nointro_crc32_backup_v1/
+# Nao ancorar na raiz: os prefixos podem aparecer em subpastas comuns.
+# Em submodulos Git, repetir esta regra no ignore do proprio submodulo.
+.aurora_*_backup*/
+.aurora_*_originals/
+.aurora_*_snapshots/
 
-# Local helper scripts
-backup.sh
-copy.sh
+# -----------------------------------------------------------------------------
+# 3. Python: bytecode, ambientes e analise
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.venv/
+venv/
+.coverage
+.coverage.*
+htmlcov/
 
-# Local PS2DEV environment
-.ps2dev-env
+# -----------------------------------------------------------------------------
+# 4. Pacotes locais e dados de usuario
+# -----------------------------------------------------------------------------
+# Arquivos de distribuicao/arquivamento avulsos na raiz.
+/*.zip
+/*.7z
+/*.tar
+/*.tar.gz
+/*.tgz
+/*.iso
 
-# Editor/temp files
-.#*
+# Configuracoes locais (SMB.CNF.example continua versionavel).
+/SMB.CNF
+.env
+.env.*
+!.env.example
+.cache/
+
+# Conteudo de execucao no console; manter bibliotecas e arquivos de src/.
+/ROMS/
+/roms/
+/BIOS/
+/SYSTEM/
+/SNESticle/
+
+# Saves pessoais do EverDrive.
+/ED64P/SDSAVE/
+
+# -----------------------------------------------------------------------------
+# 5. Residuos de editores e sistemas operacionais
+# -----------------------------------------------------------------------------
+*.swp
+*.swo
+*.tmp
+*.temp
 *~
+.#*
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
 
-src/platform/ps2/iop/aurora_ps2mouse/*.elf
-src/platform/ps2/iop/aurora_ps2mouse/*.irx
-src/platform/ps2/iop/aurora_ps2mouse/obj/
-
-# Required PCE build tool
-!tools/namespace_pce_archive.py
-# AURORA_CONTINUOUS_PCE_PREPARE_TRACKED_V21_20260928
-!tools/prepare_beetle_pce_fast_sources.py
-!tools/namespace_fceumm_fds_archive.py
-!tools/prepare_fceumm_fds_sources.py
-
-!tools/prepare_gambatte_sgb_sources.py
-
-# Required gpSP build tools
-!tools/namespace_gpsp_archive.py
-!tools/prepare_gpsp_aurora_sources.py
-
-!tools/strip_gambatte_sgb_stage.py
+# -----------------------------------------------------------------------------
+# Manter versionados (nao ignorar globalmente):
+#   Makefile, .gitmodules, .github/, LICENSE, LICENSES/, *.md,
+#   assets/, docs/, src/, tools/*.py, tools/Makefile.*, irx/*.irx.
+#   *.lst pode ser insumo de build; *.bin e *.cfg podem ser dados de cores.
+#   src/third_party/ contem submodulos Git; cada submodulo tem ignore proprio.
+# Nao ignorar *.irx, *.bin, *.lst ou *.py globalmente.
+# -----------------------------------------------------------------------------

@@ -24,6 +24,9 @@ extern "C" {
 #include "mainloop_shared.h"
 #include "mainloop_state.h"
 
+/* AURORA_HDD_FULL_STORAGE_SAFE_V2_20261013: ELF boot path supplied by app/main.cpp. */
+extern char *MainGetBootPath();
+
 /* AURORA_VOLUME_TFA_N163_V4_20260913 */
 #include "nes/quicknes/quicknes_bridge.h" /* AURORA_QN_TURBOFILE_SAVE_V2_20260828 */
 #include "sega/picodrive/picodrive_bridge.h" /* AURORA_CD_STATE_V1_SAFE_20260903 */
@@ -114,8 +117,45 @@ static const Char *_MainLoopSramGetSystemDirectoryName()
     return "SNES";
 }
 
+/* AURORA_HDD_FULL_STORAGE_SAFE_V2_20261013: new SRAM destination. */
+static Bool _MainLoopSramHddPreferred(void)
+{
+    return _MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_HDD ||
+           (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_AUTO &&
+            HddSupportIsEnabled() && !strncmp(_RomPath, "hdd0:", 5));
+}
+
+static Bool _MainLoopSramHddReady(void)
+{
+    Char Root[32];
+    return MainLoopHddSystemRootForSource(_RomPath, Root, sizeof(Root));
+}
+
+/* Ensure the background BGM worker does not remount pfs0: during
+ * an entire HDD save/load transaction. Nesting is supported by BgmIOBegin. */
+class AuroraHddStorageGuard
+{
+    Bool m_bActive;
+public:
+    AuroraHddStorageGuard()
+      : m_bActive(_MainLoopSramHddPreferred() ||
+                  (HddSupportIsEnabled() && !strncmp(_RomPath, "hdd0:", 5) &&
+                   (MainLoopStateGetDevice() == MAINLOOP_STATEDEVICE_AUTO ||
+                    MainLoopStateGetDevice() == MAINLOOP_STATEDEVICE_HDD)))
+    {
+        if (m_bActive) BgmIOBegin();
+    }
+    ~AuroraHddStorageGuard()
+    {
+        if (m_bActive) BgmIOEnd();
+    }
+};
+
 static const Char *_MainLoopSramRoot(MainLoopSramDeviceE eDevice)
 {
+    static const Char hddRoot[] = "pfs0:/SNESticle";
+    if (eDevice == MAINLOOP_SRAMDEVICE_HDD)
+        return _MainLoopSramHddReady() ? hddRoot : "";
     return eDevice == MAINLOOP_SRAMDEVICE_USB ? "mass0:/SNESticle" : _SramPath;
 }
 
@@ -152,12 +192,15 @@ const Char *MainLoopSramGetDeviceName()
     {
         case MAINLOOP_SRAMDEVICE_USB:     return "USB only";
         case MAINLOOP_SRAMDEVICE_MEMCARD: return "Memory Card";
+        case MAINLOOP_SRAMDEVICE_HDD:     return "HDD (ROM partition)";
         default:                          return "USB -> MC fallback";
     }
 }
 
 const Char *MainLoopSramGetBrowseRoot()
 {
+    if (_MainLoopSramHddPreferred())
+        return _MainLoopSramRoot(MAINLOOP_SRAMDEVICE_HDD);
     if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
         return _MainLoopSramRoot(MAINLOOP_SRAMDEVICE_USB);
     if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_MEMCARD)
@@ -169,6 +212,7 @@ const Char *MainLoopSramGetBrowseRoot()
 
 Bool MainLoopSramNeedsMemoryCardPreflight()
 {
+    if (_MainLoopSramHddPreferred()) return FALSE;
     if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
         return FALSE;
     if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_MEMCARD)
@@ -266,6 +310,52 @@ static Bool _MainLoopSystemFileAtRoot(Char *pOut, Int32 nOutBytes,
         pOut, nOutBytes, Directory);
 }
 
+/* AURORA_HDD_FULL_STORAGE_SAFE_V2_20261013
+ * HDD data is scoped to a *specific* APA/PFS partition, never "hdd0:/".
+ * Represent it logically as hdd0:/PART/SNESticle and map per access to
+ * pfs0:/SNESticle. The browser/BGM can mount another partition later.
+ * No implicit HDD scans or eager loading on a USB/MC boot. */
+Bool MainLoopHddLogicalDataPath(const Char *pSourcePath,
+                                const Char *pLeaf, Char *pOut, Int32 nOutBytes)
+{
+    const Char *p, *end;
+    int n;
+    if (!pOut || nOutBytes <= 0) return FALSE;
+    pOut[0] = 0;
+    if (!pSourcePath || strncmp(pSourcePath, "hdd0:", 5)) return FALSE;
+    p = pSourcePath + 5;
+    while (*p == '/') ++p;
+    if (!*p) return FALSE;
+    end = strchr(p, '/');
+    if (!end) return FALSE;
+    if (end == p || (end - p) >= 120) return FALSE;
+    if (pLeaf && *pLeaf && strchr(pLeaf, '/')) return FALSE;
+    n = snprintf(pOut, (size_t)nOutBytes,
+                 "hdd0:/%.*s/SNESticle%s%s",
+                 (int)(end - p), p, (pLeaf && *pLeaf) ? "/" : "",
+                 (pLeaf && *pLeaf) ? pLeaf : "");
+    if (n < 0 || n >= nOutBytes) { pOut[0] = 0; return FALSE; }
+    return TRUE;
+}
+
+Bool MainLoopHddSystemRootForSource(const Char *pSourcePath,
+                                    Char *pRoot, Int32 nRootBytes)
+{
+    char logical[256], mapped[256];
+    if (!pRoot || nRootBytes < 16) return FALSE;
+    pRoot[0] = 0;
+    if (!HddSupportIsEnabled() ||
+        !MainLoopHddLogicalDataPath(pSourcePath, NULL,
+                                    logical, sizeof(logical)) ||
+        HddLoadEmbeddedIrx() < 0 ||
+        HddMapPath(logical, mapped, sizeof(mapped)) != 1)
+        return FALSE;
+    if (strcmp(mapped, "pfs0:/SNESticle")) return FALSE;
+    if (snprintf(pRoot, (size_t)nRootBytes, "pfs0:/SNESticle") >= nRootBytes)
+        return FALSE;
+    return TRUE;
+}
+
 Bool MainLoopFindSystemFileDirectory(Char *pOut, Int32 nOutBytes,
                                      const Char *pFileName)
 {
@@ -312,6 +402,24 @@ Bool MainLoopFindSystemFileDirectory(Char *pOut, Int32 nOutBytes,
         return TRUE;
     }
 
+    /* AURORA_HDD_FULL_STORAGE_SAFE_V2_20261013 : try only the currently selected ROM/ELF partition.
+     * Existing USB and active-root priorities remain unchanged. */
+    {
+        Char hddRoot[32];
+        const Char *sources[] = { _RomPath, MainGetBootPath(), NULL };
+        for (i = 0; sources[i]; ++i)
+        {
+            if (MainLoopHddSystemRootForSource(sources[i],
+                    hddRoot, sizeof(hddRoot)) &&
+                _MainLoopSystemFileAtRoot(
+                    pOut, nOutBytes, hddRoot, pFileName))
+            {
+                printf("[SYSTEM] found HDD %s in %s\n", pFileName, pOut);
+                return TRUE;
+            }
+        }
+    }
+
     for (i = 0; pFallbackRoots[i]; ++i)
     {
         if (_MainLoopSystemFileAtRoot(
@@ -353,6 +461,23 @@ Bool MainLoopEnsureSystemDirectory(Char *pOut, Int32 nOutBytes)
         {
             printf("[SYSTEM] directory: %s\n", pOut);
             return TRUE;
+        }
+    }
+
+    /* AURORA_HDD_FULL_STORAGE_SAFE_V2_20261013 : storage-local SYSTEM only when a known HDD
+     * partition is already authorized; USB still wins first. */
+    {
+        Char hddRoot[32];
+        const Char *sources[] = { _RomPath, MainGetBootPath(), NULL };
+        for (i = 0; sources[i]; ++i)
+        {
+            if (MainLoopHddSystemRootForSource(sources[i],
+                    hddRoot, sizeof(hddRoot)) &&
+                _MainLoopSystemTryWritableRoot(pOut, nOutBytes, hddRoot))
+            {
+                printf("[SYSTEM] HDD directory: %s\n", pOut);
+                return TRUE;
+            }
         }
     }
 
@@ -639,8 +764,15 @@ static Bool _MainLoopLoadGBSavedataFrom(MainLoopSramDeviceE eDevice,
 
 Bool MainLoopLoadGBSavedata(Uint8 **ppData, Uint32 *pBytes)
 {
+    AuroraHddStorageGuard hddIoGuard;
     if (!ppData || !pBytes) return FALSE;
     *ppData = NULL; *pBytes = 0;
+    if (_MainLoopSramHddPreferred())
+    {
+        if (_MainLoopLoadGBSavedataFrom(MAINLOOP_SRAMDEVICE_HDD, ppData, pBytes))
+            return TRUE;
+        if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_HDD) return FALSE;
+    }
     if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
         return _MainLoopSramUsbReady() ? _MainLoopLoadGBSavedataFrom(MAINLOOP_SRAMDEVICE_USB, ppData, pBytes) : FALSE;
     if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_MEMCARD)
@@ -651,6 +783,7 @@ Bool MainLoopLoadGBSavedata(Uint8 **ppData, Uint32 *pBytes)
 
 Bool MainLoopSaveGBSavedata(const Uint8 *pData, Uint32 nBytes)
 {
+    AuroraHddStorageGuard hddIoGuard;
     MainLoopSramDeviceE eDevice = _MainLoop_SramDevice;
     const Char *pRoot;
     Bool bMemCard;
@@ -658,7 +791,8 @@ Bool MainLoopSaveGBSavedata(const Uint8 *pData, Uint32 nBytes)
     if ((!pData && nBytes) || nBytes > MAINLOOP_GB_SAVEDATA_MAX) return FALSE;
     if (!nBytes) return TRUE;
     if (eDevice == MAINLOOP_SRAMDEVICE_AUTO)
-        eDevice = _MainLoopSramUsbReady() ? MAINLOOP_SRAMDEVICE_USB : MAINLOOP_SRAMDEVICE_MEMCARD;
+        eDevice = _MainLoopSramHddPreferred() ? MAINLOOP_SRAMDEVICE_HDD :
+            (_MainLoopSramUsbReady() ? MAINLOOP_SRAMDEVICE_USB : MAINLOOP_SRAMDEVICE_MEMCARD);
     if (eDevice == MAINLOOP_SRAMDEVICE_USB && !_MainLoopSramUsbReady()) return FALSE;
     pRoot = _MainLoopSramRoot(eDevice);
     bMemCard = eDevice == MAINLOOP_SRAMDEVICE_MEMCARD ? TRUE : FALSE;
@@ -723,7 +857,11 @@ static Bool _MainLoopLoadGBTurboFile(void)
     Bool loaded = FALSE;
     if (!_pGb || !_pGb->HasTurboFile()) return TRUE;
 
-    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
+    if (_MainLoopSramHddPreferred())
+        loaded = _MainLoopLoadGBTurboFileFrom(MAINLOOP_SRAMDEVICE_HDD);
+    if (!loaded && _MainLoop_SramDevice != MAINLOOP_SRAMDEVICE_HDD)
+    {
+        if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
         loaded = _MainLoopSramUsbReady()
             ? _MainLoopLoadGBTurboFileFrom(MAINLOOP_SRAMDEVICE_USB) : FALSE;
     else if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_MEMCARD)
@@ -736,6 +874,7 @@ static Bool _MainLoopLoadGBTurboFile(void)
             loaded = _MainLoopLoadGBTurboFileFrom(MAINLOOP_SRAMDEVICE_MEMCARD);
     }
 
+    } /* legacy fallback completed */
     if (!loaded)
     {
         /* Missing/wrong-size media behaves like a blank physical unit. */
@@ -960,6 +1099,7 @@ static Bool _MainLoopLoadSwcCartSRAMFrom(
 
 void _MainLoopSwcCartSRAMAttach(const Char *pCartPath)
 {
+    AuroraHddStorageGuard hddIoGuard;
     const Char *pName;
     Bool bLoaded = FALSE;
     Bool bLegacy = FALSE;
@@ -1003,7 +1143,16 @@ void _MainLoopSwcCartSRAMAttach(const Char *pCartPath)
     if (!_pSnes->HasSuperWildCardCartridgeBatterySRAM())
         return;
 
-    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
+    Bool bHddLoaded = FALSE;
+    if (_MainLoopSramHddPreferred())
+    {
+        bLoaded = _MainLoopLoadSwcCartSRAMFrom(
+            MAINLOOP_SRAMDEVICE_HDD, &bLegacy);
+        bHddLoaded = bLoaded;
+    }
+    if (!bLoaded && _MainLoop_SramDevice != MAINLOOP_SRAMDEVICE_HDD)
+    {
+        if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
     {
         if (_MainLoopSramUsbReady())
             bLoaded = _MainLoopLoadSwcCartSRAMFrom(
@@ -1033,12 +1182,14 @@ void _MainLoopSwcCartSRAMAttach(const Char *pCartPath)
         }
     }
 
+    } /* end SWC legacy lookup */
     _pSnes->ClearSuperWildCardCartridgeSRAMDirty();
 
     /* Same copy/migration policy as ordinary Aurora SRAM: never delete source. */
     s_SwcCartSRAMMigrationPending =
         bLoaded &&
-        (bLegacy || (bMcFallback && _MainLoopSramUsbReady()));
+        (bLegacy || (bMcFallback && _MainLoopSramUsbReady()) ||
+         (_MainLoopSramHddPreferred() && !bHddLoaded));
 
     if (s_SwcCartSRAMMigrationPending)
         _MainLoop_SRAMUpdated = TRUE;
@@ -1361,7 +1512,30 @@ static void _MainLoopLoadBSXMemoryPack(MainLoopSramDeviceE ePreferredDevice)
 
     /* First choice: keep .mpk coherent with an ordinary .srm backing if
      * _MainLoopLoadSRAM() already resolved one concrete device. */
-    if (ePreferredDevice == MAINLOOP_SRAMDEVICE_USB)
+    if (ePreferredDevice == MAINLOOP_SRAMDEVICE_HDD ||
+        (_MainLoopSramHddPreferred() &&
+         ePreferredDevice == MAINLOOP_SRAMDEVICE_AUTO))
+    {
+        bLoaded = _MainLoopLoadBSXMemoryPackFrom(MAINLOOP_SRAMDEVICE_HDD);
+        if (!bLoaded && _MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_AUTO)
+        {
+            if (_MainLoopSramUsbReady())
+            {
+                bLoaded = _MainLoopLoadBSXMemoryPackFrom(MAINLOOP_SRAMDEVICE_USB);
+                if (bLoaded) eBackingDevice = MAINLOOP_SRAMDEVICE_USB;
+            }
+            if (!bLoaded)
+            {
+                bLoaded = _MainLoopLoadBSXMemoryPackFrom(MAINLOOP_SRAMDEVICE_MEMCARD);
+                if (bLoaded) eBackingDevice = MAINLOOP_SRAMDEVICE_MEMCARD;
+            }
+        }
+        if (!bLoaded)
+            bCreated = _MainLoopCreateBSXMemoryPackOn(MAINLOOP_SRAMDEVICE_HDD);
+        if (bCreated || (bLoaded && eBackingDevice == MAINLOOP_SRAMDEVICE_AUTO))
+            eBackingDevice = MAINLOOP_SRAMDEVICE_HDD;
+    }
+    else if (ePreferredDevice == MAINLOOP_SRAMDEVICE_USB)
     {
         if (_MainLoopSramUsbReady())
         {
@@ -1471,7 +1645,8 @@ static void _MainLoopLoadBSXMemoryPack(MainLoopSramDeviceE ePreferredDevice)
              bLoaded ? "loaded" :
              bCreated ? "created" : "blank in RAM / backing FAILED",
              eBackingDevice == MAINLOOP_SRAMDEVICE_USB ? "USB" :
-             eBackingDevice == MAINLOOP_SRAMDEVICE_MEMCARD ? "MC" : "NONE");
+             eBackingDevice == MAINLOOP_SRAMDEVICE_MEMCARD ? "MC" :
+             eBackingDevice == MAINLOOP_SRAMDEVICE_HDD ? "HDD" : "NONE");
 }
 
 static Bool _MainLoopVerifyBSXMemoryPackFile(const Char *pPath,
@@ -1611,7 +1786,11 @@ static void _MainLoopLoadGBATFA(void)
     Bool loaded = FALSE;
     if (_pSystem != _pGba || !_pGba || !_pGba->HasTurboFileAdvance()) return;
 
-    if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
+    if (_MainLoopSramHddPreferred())
+        loaded = _MainLoopLoadGBATFAFrom(MAINLOOP_SRAMDEVICE_HDD);
+    if (!loaded && _MainLoop_SramDevice != MAINLOOP_SRAMDEVICE_HDD)
+    {
+        if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
         loaded = _MainLoopSramUsbReady()
             ? _MainLoopLoadGBATFAFrom(MAINLOOP_SRAMDEVICE_USB) : FALSE;
     else if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_MEMCARD)
@@ -1624,6 +1803,7 @@ static void _MainLoopLoadGBATFA(void)
             loaded = _MainLoopLoadGBATFAFrom(MAINLOOP_SRAMDEVICE_MEMCARD);
     }
 
+    } /* legacy fallback completed */
     if (!loaded)
     {
         (void)_pGba->AttachTurboFileAdvance(NULL, 0);
@@ -1697,6 +1877,13 @@ static void _MainLoopLoadTurboFile(void)
         !QuicknesBridge_TurboFileEnabled() ||
         QuicknesBridge_TurboFileDirty())
         return;
+
+    if (_MainLoopSramHddPreferred())
+    {
+        if (_MainLoopLoadTurboFileFrom(MAINLOOP_SRAMDEVICE_HDD) ||
+            _MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_HDD)
+            return;
+    }
 
     if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
     {
@@ -1785,6 +1972,13 @@ static void _MainLoopLoadSnesTurboFile(void)
         SnesTurboFileDirty())
         return;
 
+    if (_MainLoopSramHddPreferred())
+    {
+        if (_MainLoopLoadSnesTurboFileFrom(MAINLOOP_SRAMDEVICE_HDD) ||
+            _MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_HDD)
+            return;
+    }
+
     if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
     {
         if (_MainLoopSramUsbReady())
@@ -1868,6 +2062,13 @@ static void _MainLoopLoadBattleBox(void)
         !QuicknesBridge_BattleBoxEnabled() ||
         QuicknesBridge_BattleBoxDirty())
         return;
+
+    if (_MainLoopSramHddPreferred())
+    {
+        if (_MainLoopLoadBattleBoxFrom(MAINLOOP_SRAMDEVICE_HDD) ||
+            _MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_HDD)
+            return;
+    }
 
     if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
     {
@@ -2122,8 +2323,12 @@ static Bool _MainLoopSaveSRAMTo(MainLoopSramDeviceE eDevice, Bool bSync)
 
 Bool _MainLoopSaveSRAM(Bool bSync)
 {
+    AuroraHddStorageGuard hddIoGuard;
     if (!_MainLoopHasSRAM())
         return FALSE;
+
+    if (_MainLoopSramHddPreferred())
+        return _MainLoopSaveSRAMTo(MAINLOOP_SRAMDEVICE_HDD, bSync);
 
     if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
         return _MainLoopSramUsbReady()
@@ -2208,6 +2413,7 @@ static Bool _MainLoopLoadSRAMFrom(MainLoopSramDeviceE eDevice,
 
 void _MainLoopLoadSRAM()
 {
+    AuroraHddStorageGuard hddIoGuard;
     if (_pSystem == _pGb && _pGb && _pGb->IsGameLoaded())
     {
         Uint8 *pData = NULL;
@@ -2237,7 +2443,15 @@ void _MainLoopLoadSRAM()
 
     if (pSRAM && nSramBytes > 0)
     {
-        if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
+        if (_MainLoopSramHddPreferred())
+        {
+            bLoaded = _MainLoopLoadSRAMFrom(
+                MAINLOOP_SRAMDEVICE_HDD, pSRAM, nSramBytes, &bLegacy);
+            if (bLoaded) eLoadedDevice = MAINLOOP_SRAMDEVICE_HDD;
+        }
+        if (!bLoaded && _MainLoop_SramDevice != MAINLOOP_SRAMDEVICE_HDD)
+        {
+            if (_MainLoop_SramDevice == MAINLOOP_SRAMDEVICE_USB)
         {
             if (_MainLoopSramUsbReady())
             {
@@ -2275,6 +2489,8 @@ void _MainLoopLoadSRAM()
             }
         }
 
+        } /* end SRAM legacy lookup */
+
         /* AURORA_VOLUME_TFA_N163_V4_20260913
          * Mapper 019 internal battery RAM lives inside QuickNES's mapper
          * state, not high_mem(). _MainLoopLoadSRAMFrom filled the bridge's
@@ -2292,7 +2508,9 @@ void _MainLoopLoadSRAM()
 
         /* Never delete the source. Mark only for copy/migration. */
         _MainLoop_SRAMUpdated = bLoaded &&
-            (bLegacy || (bMcFallback && _MainLoopSramUsbReady()));
+            (bLegacy || (bMcFallback && _MainLoopSramUsbReady()) ||
+             (_MainLoopSramHddPreferred() && bLoaded &&
+              eLoadedDevice != MAINLOOP_SRAMDEVICE_HDD));
     }
 
     /* AURORA_GPSP_GBA_V2_TFA_BLEND_20260911 */
@@ -3286,6 +3504,28 @@ static void _MainLoopStateLoadSettingsFromRomDevice()
     }
 }
 
+/* AURORA_CONFIG_USB_FIRST_STATE_V1_20261107: prefer a single USB alias without scanning drives.
+ * Do not alter save states or the already configured SRAM target. */
+static Bool _MainLoopStateConfigPreferredUsbPath(Char *pOut, Int32 nOut)
+{
+    const Char *boot = MainGetBootPath();
+    const Char *dev = "mass0:";
+    if (boot && !strncmp(boot, "mass1:", 6)) dev = "mass1:";
+    else if (boot && !strncmp(boot, "mass:", 5)) dev = "mass:";
+    if (!pOut || nOut <= 0) return FALSE;
+    Int32 n = snprintf(pOut, nOut, "%s/SNESticle/state.cfg", dev);
+    return n >= 0 && n < nOut ? TRUE : FALSE;
+}
+
+static Bool _MainLoopStateConfigHddBoot()
+{
+    const Char *boot = MainGetBootPath();
+    return boot && (!strncmp(boot, "hdd0:", 5) ||
+                    (!strncmp(boot, "pfs", 3) &&
+                     boot[3] >= '0' && boot[3] <= '9' &&
+                     boot[4] == ':')) ? TRUE : FALSE;
+}
+
 void MainLoopStateSettingsLoad()
 {
     MainLoopStateConfigT Config;
@@ -3309,12 +3549,23 @@ void MainLoopStateSettingsLoad()
         NULL
     };
     Char BootPath[1024];
+    Char PreferredUsbPath[128];
     Int32 i;
 
     _MainLoop_StateDevice = MAINLOOP_STATEDEVICE_AUTO;
     _MainLoop_StateSlot = 0;
     _MainLoop_StateDeviceChosen = FALSE;
     _MainLoop_StateConfigPath[0] = 0;
+
+    /* HDD boots retain the existing HDD/MC selection policy. Otherwise
+     * one direct USB read precedes the legacy Memory Card paths. */
+    PreferredUsbPath[0] = 0;
+    if (!_MainLoopStateConfigHddBoot() &&
+        _MainLoopStateConfigPreferredUsbPath(
+            PreferredUsbPath, sizeof(PreferredUsbPath)) &&
+        _MainLoopStateConfigRead(PreferredUsbPath, &Config) &&
+        _MainLoopStateConfigApply(&Config))
+        return;
 
     /* Preserve the existing mc0/mc1 priority so upgrades keep their chosen
        target. A standalone ELF directory and every enabled writable local
@@ -3326,6 +3577,17 @@ void MainLoopStateSettingsLoad()
         {
             return;
         }
+    }
+
+    /* AURORA_HDD_FULL_STORAGE_SAFE_V2_20261013 : read config from boot partition /SNESticle. */
+    {
+        Char hddConfig[1024];
+        if (MainLoopHddLogicalDataPath(MainGetBootPath(), "state.cfg",
+                                       hddConfig, sizeof(hddConfig)) &&
+            HddSupportIsEnabled() &&
+            _MainLoopStateConfigRead(hddConfig, &Config) &&
+            _MainLoopStateConfigApply(&Config))
+            return;
     }
 
     if (_MainLoop_BootDir[0] &&
@@ -3345,6 +3607,7 @@ void MainLoopStateSettingsLoad()
     {
         for (i = 0; pMassPaths[i]; i++)
         {
+            if (!strcmp(pMassPaths[i], PreferredUsbPath)) continue;
             if (_MainLoopStateConfigRead(pMassPaths[i], &Config) &&
                 _MainLoopStateConfigApply(&Config))
             {
@@ -3413,12 +3676,42 @@ Bool MainLoopStateSettingsSave()
        prefer the writable ELF directory, then mc, mass/MX4SIO and MMCE.
        This makes the one-time choice persistent even without a memory card. */
     BgmIOBegin();
-    if (_MainLoop_StateConfigPath[0])
+    /* If USB provided the settings, write ONLY there; USB removal must
+     * not silently create a competing newer MC file. Otherwise attempt
+     * USB promotion at SAVE time and fall back to the old MC behavior. */
+    if (!strncmp(_MainLoop_StateConfigPath, "mass", 4))
+    {
+        bSaved = _MainLoopStateConfigWrite(_MainLoop_StateConfigPath,
+                                           &Config);
+        if (!bSaved) { BgmIOEnd(); return FALSE; }
+    }
+    else if (!_MainLoopStateConfigHddBoot() &&
+             strncmp(_MainLoop_StateConfigPath, "hdd0:", 5) &&
+             strncmp(_MainLoop_StateConfigPath, "pfs", 3) &&
+             strncmp(_MainLoop_StateConfigPath, "mmce", 4))
+    {
+        Char PreferredUsbPath[128];
+        if (_MainLoopStateConfigPreferredUsbPath(
+                PreferredUsbPath, sizeof(PreferredUsbPath)))
+            bSaved = _MainLoopStateConfigWrite(PreferredUsbPath, &Config);
+    }
+
+    if (!bSaved && _MainLoop_StateConfigPath[0])
     {
         bSaved = _MainLoopStateConfigWrite(
             _MainLoop_StateConfigPath,
             &Config
         );
+    }
+
+    if (!bSaved && HddSupportIsEnabled())
+    {
+        Char hddConfig[1024];
+        if ((MainLoopHddLogicalDataPath(_RomPath, "state.cfg",
+                                        hddConfig, sizeof(hddConfig)) ||
+             MainLoopHddLogicalDataPath(MainGetBootPath(), "state.cfg",
+                                        hddConfig, sizeof(hddConfig))))
+            bSaved = _MainLoopStateConfigWrite(hddConfig, &Config);
     }
 
     if (!bSaved && _MainLoop_BootDir[0] &&
@@ -4996,6 +5289,7 @@ static void _MainLoopStateSortCandidates(Int32 nCandidates)
 
 Bool _MainLoopLoadState()
 {
+    AuroraHddStorageGuard hddIoGuard;
     MainLoopSegaStateScratchGuard SegaScratchGuard;
     Char Reason[192];
     Uint32 uRomCRC;
@@ -5136,6 +5430,11 @@ Bool _MainLoopLoadState()
             );
             ConPrint("State loaded: %s\n", pCandidate->Path);
             ML_TRACE("State load ok: %s", pCandidate->Path);
+#if AURORA_FRONTEND_PROFILER
+            /* AURORA_PROFILER_AUTO20_STATELOAD_V21_20261009
+             * Arm ONLY after a successful, fully restored savestate. */
+            MainLoopProfilerAutoCloseArmAfterStateLoad();
+#endif
             return TRUE;
         }
 
@@ -5168,8 +5467,26 @@ Bool _MainLoopLoadState()
     return FALSE;
 }
 
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_STATE_CPP_BEGIN */
+/* AUTO/device search and slot 1, without persisting settings. */
+#if AURORA_FRONTEND_PROFILER
+Bool MainLoopBenchmarkLoadStateSlot1()
+{
+    const MainLoopStateDeviceE oldDevice=_MainLoop_StateDevice;
+    const Int32 oldSlot=_MainLoop_StateSlot;
+    _MainLoop_StateDevice=MAINLOOP_STATEDEVICE_AUTO;
+    _MainLoop_StateSlot=0;
+    const Bool ok=_MainLoopLoadState();
+    _MainLoop_StateDevice=oldDevice;
+    _MainLoop_StateSlot=oldSlot;
+    return ok;
+}
+#endif
+
+/* AURORA_BENCHMARK_CHAINED_V3_20261010_STATE_CPP_END */
 Bool _MainLoopSaveState()
 {
+    AuroraHddStorageGuard hddIoGuard;
     MainLoopSegaStateScratchGuard SegaScratchGuard;
     Char Reason[192];
     Uint32 uRomCRC;

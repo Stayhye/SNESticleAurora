@@ -16,6 +16,8 @@ Game Boy Advance emulation uses the pinned **gpSP** fork at `src/third_party/gps
 
 SNESticle Aurora code covered by the GPL remains under GNU GPLv2; separately licensed third-party components remain under their own terms. **Code license and project branding are separate.** The applicable software licenses grant rights in the code; they **do not grant permission to use the SNESticle Aurora name** or the project-specific **Aurora** identity/branding for an unofficial fork, modified build, redistributed binary, or derivative project. Unless separately authorized by **@itsveenee**, use a distinct project/product name and distinct branding. Factual attribution such as “based on SNESticle Aurora” remains welcome. See [BRANDING.md](BRANDING.md).
 
+A consolidated [third-party license index](LICENSES/README.md) lists the mirrored notices.
+
 Project lineage and attribution are documented in [CREDITS.md](CREDITS.md). See LICENSE, [BRANDING.md](BRANDING.md), and the third-party license files for licensing details.
 
 Keep in mind: this project uses **AI-generated code**, but the changes are tested by me, and I'm a Human according to reCAPTCHA.
@@ -45,24 +47,22 @@ If the repository was cloned without `--recurse-submodules`, run
 ## What's new?
 
 #### Emulation:
-* Support added for more NES mappers: 13, 16, 18, 27, 48, 64, 65, 67, 68, 72, 77, 80, 82, 92, 96, 99, 101, 105, 118, 119, 151, 153, 155, 157, 158, 159, 162, 163, 164, 185, 188, 210, 216, and 552. Every licensed NES and Famicom game and most of the bootleg and unlicensed games will boot now.
+* QuickNES now supports 180 NES mappers, 87 of which were added by this project. Every official NES and Famicom game + most of unlicensed and bootleg games will work.
 * Famicom Disk System (firmware not included), press L2+TRIANGLE to change the disk side.
 * Famiclone audio option for NES games (swap duty cycles, a known hardware bug in some Famiclones you can intentionally turn on).
 * Changed SRAM and RAM initialization for both NES and SNES. This will fix all the very few games that rely on specific initial values to work properly.
-* Mega Drive / Genesis + Sega Master System / Mark III + Game Gear + Sega CD emulation with PicoDrive.
-* PC Engine / TurboGrafx-16 HuCard and PC Engine CD emulation with Beetle PCE Fast.
-* Game Boy + Color emulation with Gambatte.
-* Game Boy Advance emulation with gpSP.
 * Fixes and improvements for the 240p display modes, improved screen positioning and overscan settings for each system and graphical resolution/modes.
-* Dedicated turbo buttons for NES, GB, GBC, PCE, GG and SMS games.
-* Turbo button toggle (hold R2+ANY BUTTON).
+* Dedicated turbo buttons for NES, GB, GBC, PCE, GG and SMS games (circle and triangle).
+* Turbo input (hold R2+ANY BUTTON).
 * In-game soft reset (L2+SELECT).
 * SNES and MD mouse emulation.
 * ASCII Turbo File for Famicom, Super Famicom, Game Boy and Game Boy Advance (accessory for many ASCII games).
 * Battle Box for Famicom (accessory for Armadillo).
 * Arkanoid Pad for Famicom (accessory for Arkanoid and Arkanoid II).
-* Famicom Microphone (L2+START).
+* Famicom microphone (L2+START).
 * NES Zapper / Famicom Light Gun (X to shoot, L2+SQUARE to simulate shooting away from the screen).
+* PC Engine 6-button pad *(don't use it with 2-button games!)*
+* PC Engine alternative video modes (Ninja Spirits, Aoi Blink, Toumaden, Puyo Puyo and more).
 * Region select (all consoles).
 
 #### User interface:
@@ -77,41 +77,41 @@ If the repository was cloned without `--recurse-submodules`, run
 
 #### To be added:
 * More light guns support (SNES, MD, SMS).
-* PC Engine 6-button controller.
+* SMS paddle controller.
 * SMB connection and MMCE support *(current implementations do not work).*
 * 32X emulation *(currently disabled).*
 * Other stupid *(or not-so-stupid)* ideas I might come up with. Thanks!
 
 ## Emulation progress
 
-#### FIXED:
-* PC Engine alternative video modes (Ninja Spirits, Aoi Blink, Toumaden, Puyo Puyo and more) implemented.
-* Pilotwings (SNES) and Secret of Mana (SNES) mode 7 rendering, also fixes other games that rely on it.
-* Secret of Mana (SNES) mode 5 rendering, also fixes other games that rely on it.
+#### Fixed:
+* Pilotwings (SNES) and Secret of Mana (SNES) mode 7 rendering fixed, also fixes other games that rely on it.
+* Secret of Mana (SNES) mode 5 rendering fixed, also fixes other games that rely on it.
 * Addams Family (SNES) graphical glitches and timing issues fixed.
 * Sunset Riders (SNES) graphical glitches fixed.
-* Sonic Blast Man (SNES) wrong colors fixed.
+* Super Mario All-Stars (SNES) graphical glitches fixed.
+* Sonic Blast Man (SNES) graphical glitches fixed.
 * Ys (SMS) graphical glitches fixed.
 * J.R.R. Tolkien's The Lord of the Rings (SNES) black screen fixed.
 * Kishin Douji Zenki: Tenchi Meidou (SNES) black screen fixed.
 * The Lost Vikings 1 and 2 (SNES) black screen fixed.
+* Super 3D Noah's Ark (SNES) black screen fixed.
 * Blackthorne (SNES) black screen fixed.
 * Magical Pop'n (SNES) freeze fixed.
 * Accele Brid (SNES) freeze fixed.
 * Killer Instinct (SNES) freeze fixed.
+* Super Mario Advance (GBA) freeze fixed.
 * Many other graphical glitches and inaccuracies on many games and emulated systems were fixed.
 
-#### TO BE FIXED:
-* Top Gear (SNES) performance *(in progress, safe frameskip helps a lot).*
+#### To be fixed:
+* Top Gear (SNES) performance *(in progress, safe frameskip helps a lot).* Partially fixed.
 * Speedy Gonzales in Los Gatos Banditos (SNES) performance *(in progress, safe frameskip won't help much).*
-* SNES SA-1 Emulation (experimental state).
-* SNES FX1 and FX2 emulation (experimental state).
-* PC Engine CD and Sega CD performance (experimental state).
+* SNES SA-1 Emulation (experimental state, unplayable).
+* SNES FX1 and FX2 emulation (experimental state, unplayable).
+* PC Engine CD and Sega CD performance (experimental state, many games are playable).
 * Krazy Creatures (NES) minor graphical glitches.
-* Super Mario World 2 (SNES) performance (Super FX2).
 * Any other games with performance or graphical issues.
 
 ## Special thanks
 * Pavel (@eXo12): invaluable beta testing, feedbacks and motivation which helped me immensely. Thanks!
 * Aurora: it's a secret to everybody.
- 
